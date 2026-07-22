@@ -1,0 +1,16 @@
+# Keep line endings LF everywhere, in the repo and in the working tree.
+#
+# This project is edited from two places at once: a Linux sandbox that writes
+# LF, and Windows where core.autocrlf would otherwise rewrite every file to
+# CRLF on checkout. Without this, each side keeps "changing" files the other
+# side just wrote, and diffs fill up with invisible whitespace churn.
+#
+# Python, Tk and Windows all read LF happily, so pinning to LF costs nothing.
+* text=auto eol=lf
+
+# Binary — never touch these.
+*.gif binary
+*.png binary
+*.jpg binary
+*.webp binary
+*.ico binary

@@ -97,7 +97,15 @@ and Matthew commits it locally. Standing arrangement from here: **I write files
 and leave a `COMMIT_MSG.txt`, Matthew commits.** Cleaner than fighting the mount
 every session.
 
+M0 committed locally by Matthew as `95cf542`, 26 files.
+
+Two loose ends from that handover:
+
+- The `tmp_obj_*` sweep failed on Windows with "insufficient access rights" — my sandbox still holds file handles on them. They're inert (git ignores non-object filenames under `.git/objects`), so they can be swept after a reboot or ignored indefinitely.
+- `git add` warned about LF→CRLF on all 27 files. Added `.gitattributes` pinning everything to LF, since the repo is written from a Linux sandbox and checked out on Windows; without it each side perpetually "changes" files the other just wrote. Needs `git add --renormalize .` once.
+
 **Next**
 
 - Risk 2 still open, but confirmed not blocking: it's an export concern that first bites at M3.
 - M1 next: `PlaybackClock` (with `set_durations` from the outset), timeline strip, scrubbing.
+- Note for M1: the `/tmp/tkroot` tkinter extraction that let me run the real window under Xvfb won't survive a reboot — it's four commands to redo (`apt-get download python3-tk tk8.6-blt2.5 blt libtk8.6`, `dpkg-deb -x` each into `/tmp/tkroot`, point `PYTHONPATH` at `usr/lib/python3.10` and `lib-dynload`, `LD_LIBRARY_PATH` at `usr/lib` and `usr/lib/x86_64-linux-gnu`), and Xvfb must start in the *same* bash call as the thing using it.
