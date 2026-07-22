@@ -19,3 +19,6 @@ desktop.ini
 # Scratch — test GIFs live here, not in the repo
 scratch/
 *.tmp
+
+# Commit messages I leave for you when the sandbox can't commit itself
+COMMIT_MSG.txt

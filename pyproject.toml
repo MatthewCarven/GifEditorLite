@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "giflite"
+version = "0.1.0.dev0"
+description = "A small, modular GIF editor."
+requires-python = ">=3.10"
+dependencies = ["Pillow>=10.0"]
+
+[project.optional-dependencies]
+dev = ["pytest>=7.4"]
+
+[project.scripts]
+giflite = "giflite.__main__:main"
+
+[tool.setuptools.packages.find]
+include = ["giflite*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
