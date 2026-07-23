@@ -3,15 +3,18 @@
 This is the frontend seam (ARCHITECTURE.md 9). The rule that makes it hold:
 the controller owns *session* state, not just the document. Playhead and
 playback live here, not in the frontend, because otherwise every frontend
-independently reimplements clamp-on-delete, clamp-on-undo and timeline/canvas
-sync -- precisely the duplication the seam exists to prevent.
+independently reimplements clamp-on-delete, clamp-on-undo, timeline/canvas
+sync and play-pause semantics -- precisely the duplication the seam exists to
+prevent.
 
-What stays with the frontend: widgets, the timer tick, zoom and pan, toolkit
-bitmap caches, file pickers, and dialog policy.
+What stays with the frontend: widgets, the timer tick (it calls `tick(dt)`),
+zoom and pan, toolkit bitmap caches, file pickers, and dialog policy.
 
-M0 scope: open, seek, select, render. Playback arrives at M1, operations and
-history at M2; the read-only members they will drive are stubbed here so the
-frontend wiring doesn't have to change shape later.
+M0 scope: open, seek, select, render.
+M1 scope (now): playback -- play/pause/tick/seek/set_speed, driven by the
+pure PlaybackClock in core.
+History and operations arrive at M2; the read-only members they will drive
+are stubbed here so the frontend wiring doesn't change shape later.
 """
 
 from __future__ import annotations
@@ -25,6 +28,7 @@ from giflite.app.events import EventBus
 from giflite.core.io import reader_for
 from giflite.core.io.gif_read import probe_gif
 from giflite.core.model import Document, Selection
+from giflite.core.playback import MAX_TICK_MS, PlaybackClock
 
 # Above this, a load is worth mentioning before it happens. 640x480x120 frames
 # is 147MB of RGBA (measured -- ARCHITECTURE.md 12.5), so this is roughly
@@ -43,6 +47,8 @@ class AppController:
         self._selection = Selection.empty()
         self._index = 0
         self._path: Path | None = None
+        self._clock = PlaybackClock()
+        self._playing = False
 
     # ---- readable state --------------------------------------------------
 
@@ -61,6 +67,14 @@ class AppController:
         return self._index
 
     @property
+    def playing(self) -> bool:
+        return self._playing
+
+    @property
+    def speed(self) -> float:
+        return self._clock.speed
+
+    @property
     def path(self) -> Path | None:
         """Single source of truth for where this came from (not on Document)."""
         return self._path
@@ -72,6 +86,11 @@ class AppController:
     @property
     def frame_count(self) -> int:
         return len(self._doc) if self._doc else 0
+
+    @property
+    def can_play(self) -> bool:
+        """A single frame has nowhere to advance to, so there's nothing to play."""
+        return self.frame_count > 1
 
     # ---- menu / toolbar state (so frontends don't re-derive it) ----------
 
@@ -122,10 +141,12 @@ class AppController:
             self.events.emit(ev.ERROR, exception=exc, context=str(path))
             return False
 
+        self._stop_playback()
         self._doc = doc
         self._path = path
         self._index = 0
         self._selection = Selection.single(0)
+        self._clock.loop = doc.loop
         self._emit_doc_changed("open")
         self.events.emit(ev.TITLE_CHANGED, path=path, dirty=self.dirty)
         # No summary message here on purpose: "12 frames, 80x40, 1.15s" is a
@@ -136,6 +157,7 @@ class AppController:
         return True
 
     def close(self) -> None:
+        self._stop_playback()
         self._doc = None
         self._path = None
         self._index = 0
@@ -143,14 +165,64 @@ class AppController:
         self._emit_doc_changed("close")
         self.events.emit(ev.TITLE_CHANGED, path=None, dirty=False)
 
+    # ---- playback --------------------------------------------------------
+
+    def play(self) -> None:
+        if self._doc is None or not self.can_play or self._playing:
+            return
+        # Pressing play at the end of a finished (non-looping) animation is a
+        # request to watch it again, so rewind rather than sit inert.
+        if self._clock.finished or self._index >= self.frame_count - 1:
+            self._clock.restart()
+            self._sync_from_clock()
+        self._playing = True
+        self.events.emit(ev.PLAYBACK_STATE, playing=True)
+
+    def pause(self) -> None:
+        if not self._playing:
+            return
+        self._playing = False
+        self.events.emit(ev.PLAYBACK_STATE, playing=False)
+
+    def toggle_play(self) -> None:
+        self.pause() if self._playing else self.play()
+
+    def set_speed(self, factor: float) -> None:
+        self._clock.set_speed(factor)
+
+    def tick(self, dt_ms: float) -> None:
+        """Advance playback. The frontend's timer calls this every tick.
+
+        A no-op when paused, so the frontend can run a single always-on timer
+        rather than starting and stopping one -- fewer moving parts, no
+        start/stop races.
+        """
+        if not self._playing or self._doc is None:
+            return
+        # After a stall dt can be huge; cap it so we don't fast-forward through
+        # the whole animation in one frame.
+        new_index = self._clock.tick(min(dt_ms, MAX_TICK_MS))
+        if new_index != self._index:
+            self._index = new_index
+            self.events.emit(ev.PLAYHEAD_MOVED, index=new_index)
+        if self._clock.finished:
+            self._playing = False
+            self.events.emit(ev.PLAYBACK_STATE, playing=False)
+
     # ---- session ---------------------------------------------------------
 
     def seek(self, index: int) -> None:
         clamped = self._clamp(index)
+        self._clock.seek(clamped)  # keep the clock's position in step with scrubs
         if clamped == self._index:
             return
         self._index = clamped
         self.events.emit(ev.PLAYHEAD_MOVED, index=clamped)
+
+    def step(self, delta: int) -> None:
+        """Nudge the playhead by whole frames (arrow keys). Pauses first."""
+        self.pause()
+        self.seek(self._index + delta)
 
     def set_selection(self, selection: Selection) -> None:
         selection = selection.clamped(self.frame_count)
@@ -176,15 +248,29 @@ class AppController:
             return 0
         return max(0, min(int(index), self.frame_count - 1))
 
+    def _stop_playback(self) -> None:
+        if self._playing:
+            self._playing = False
+            self.events.emit(ev.PLAYBACK_STATE, playing=False)
+
+    def _sync_from_clock(self) -> None:
+        if self._clock.index != self._index:
+            self._index = self._clock.index
+            self.events.emit(ev.PLAYHEAD_MOVED, index=self._index)
+
     def _emit_doc_changed(self, reason: str) -> None:
         """The one place DOC_CHANGED is emitted, so the contract can't drift.
 
-        Clamping happens here too: every path that changes the frame count
-        funnels through this method, which is what stops "park on the last
-        frame, delete it" from indexing off the end.
+        Clamping and clock re-sync happen here too: every path that changes
+        the frame count funnels through this method, which is what stops "park
+        on the last frame, delete it" from indexing off the end, and keeps the
+        clock's timing list matching the document.
         """
         self._index = self._clamp(self._index)
         self._selection = self._selection.clamped(self.frame_count)
+        durations = [f.duration_ms for f in self._doc] if self._doc else []
+        self._clock.set_durations(durations)
+        self._clock.seek(self._index)
         self.events.emit(
             ev.DOC_CHANGED,
             doc=self._doc,

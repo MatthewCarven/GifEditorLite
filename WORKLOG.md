@@ -104,8 +104,43 @@ Two loose ends from that handover:
 - The `tmp_obj_*` sweep failed on Windows with "insufficient access rights" — my sandbox still holds file handles on them. They're inert (git ignores non-object filenames under `.git/objects`), so they can be swept after a reboot or ignored indefinitely.
 - `git add` warned about LF→CRLF on all 27 files. Added `.gitattributes` pinning everything to LF, since the repo is written from a Linux sandbox and checked out on Windows; without it each side perpetually "changes" files the other just wrote. Needs `git add --renormalize .` once.
 
+---
+
+## 2026-07-23 — M1 built (playback + timeline)
+
+Matthew was keen to actually watch a GIF, so M1 is done in one sitting. You can
+now open a GIF, hit Space, watch it loop, scrub the thumbnail strip, step with
+the arrow keys, and change speed. Screenshot verified under Xvfb.
+
+**Shipped**
+
+- `core/playback.py` — `PlaybackClock`, pure dt-driven timing. Forward + loop + speed. No timer inside it; the frontend feeds it elapsed ms. 21 tests.
+- Controller playback: `play/pause/toggle_play/tick/seek/step/set_speed`, `playing`/`can_play`, new `PLAYBACK_STATE` event. Clock owned by the controller, durations rebuilt and playhead re-synced in `_emit_doc_changed`. 22 tests.
+- `app/cache.py` — `ThumbnailCache`, PIL-level, keyed by frame uid, `retain()` pruning. 8 tests.
+- `ui/tk/timeline.py` — virtualised thumbnail strip on one Canvas: only visible thumbnails get items, click-to-seek, current-frame highlight, auto-scroll to follow the playhead, wheel scroll.
+- `ui/tk/canvas.py` — added a bounded scaled-frame cache so playback/scrub/resize don't re-run a resize of a big frame every redraw.
+- `ui/tk/app.py` — transport bar (play/pause, frame counter, speed dropdown), continuous 60fps timer, Space/←/→/Home/End bindings.
+
+**Design decisions worth remembering**
+
+- **Speed pulled forward from M4.** It's a one-line `dt` multiplier and the controller API already promised `set_speed`, so exposing a speed dropdown was nearly free and makes M1 fun to try. Ping-pong stayed at M4 — it needs a Mode enum and boundary-reversal logic, which is real work. Noted in ARCHITECTURE §10.
+- **`PLAYBACK_STATE` is a new event.** A non-looping GIF stops on its own at the last frame, so "are we playing?" can't be derived from the frontend's own button clicks — it's session state the controller must announce. Added to the §9 event table.
+- **Continuous timer, `tick()` no-ops when paused.** Simpler than starting/stopping an `after` loop and dodges the start/stop race. 60fps idle callback is free.
+- **dt cap (250ms).** After a stall real elapsed time can be seconds; the cap stops playback fast-forwarding through the whole GIF in one frame. The clock crosses multiple frame boundaries per tick correctly, so the cap is the only guard needed.
+- **Cache split held.** PIL thumbnails in `app/cache.py`, PhotoImages in `ui/tk/timeline.py`, both keyed by the same uid. The boundary grep still passes — no `ImageTk` leaked into `app/`.
+
+**Bug caught by a test, not by me:** my "stall doesn't fast-forward" test asserted `index == 1` after a 10s tick, but the 250ms cap correctly lands on frame 2 (2.5 frames of travel). The code was right; my arithmetic was wrong. Fixed the assertion.
+
+**Numbers:** 95 headless tests (was 51), 28-check Tk smoke (was 12). All green. Xvfb re-extraction of tkinter worked exactly as noted last session.
+
+**Handover**
+
+- M1 is on disk, uncommitted. `COMMIT_MSG.txt` is ready — `git add -A; git commit -F COMMIT_MSG.txt`.
+- Same as before: I write files, you commit. The sandbox still can't hold git locks.
+- Please run it on Windows and actually play a GIF — Xvfb proves Linux/Tk 8.6, not your machine.
+
 **Next**
 
-- Risk 2 still open, but confirmed not blocking: it's an export concern that first bites at M3.
-- M1 next: `PlaybackClock` (with `set_durations` from the outset), timeline strip, scrubbing.
-- Note for M1: the `/tmp/tkroot` tkinter extraction that let me run the real window under Xvfb won't survive a reboot — it's four commands to redo (`apt-get download python3-tk tk8.6-blt2.5 blt libtk8.6`, `dpkg-deb -x` each into `/tmp/tkroot`, point `PYTHONPATH` at `usr/lib/python3.10` and `lib-dynload`, `LD_LIBRARY_PATH` at `usr/lib` and `usr/lib/x86_64-linux-gnu`), and Xvfb must start in the *same* bash call as the thing using it.
+- Risk 2 still open, still not blocking: an export concern that first bites at M3.
+- M2 is the big one: selection, the five frame ops, undo/redo. This is where "v1 lite" is actually complete. It's also the first milestone that touches history and the immutability invariant (risk 3) in anger, so the byte-identity test earns its keep.
+- Reminder: the `/tmp/tkroot` tkinter extraction and Xvfb don't survive a reboot — re-extract with `apt-get download python3-tk tk8.6-blt2.5 blt libtk8.6`, `dpkg-deb -x` into `/tmp/tkroot`, point `PYTHONPATH`/`LD_LIBRARY_PATH` at it, and start Xvfb in the *same* bash call as the smoke test.

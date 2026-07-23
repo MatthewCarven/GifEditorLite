@@ -4,18 +4,27 @@ Owns zoom and pan entirely, along with the toolkit bitmap cache. The
 controller hands over full-resolution pixels and takes no view of how they
 are displayed (ARCHITECTURE.md 9).
 
-M0 does fit-to-window only. Manual zoom and pan arrive at M1, which is why
-the scale calculation is already factored out.
+M0 did fit-to-window. M1 adds a small scaled-frame cache so playback and
+scrubbing don't re-run a LANCZOS/NEAREST resize of a big frame on every
+redraw. Manual zoom and pan are still deferred; the fit calculation is
+factored out so they slot in later.
 """
 
 from __future__ import annotations
 
 import tkinter as tk
+from collections import OrderedDict
 
 from PIL import Image, ImageTk
 
 BACKGROUND = "#232326"
 PLACEHOLDER_FG = "#8b8b93"
+
+# How many scaled frames to keep. During playback each frame is drawn once at
+# the current window size, so a GIF-sized cache lets a second viewing (or a
+# scrub back and forth) skip the resize entirely. Bounded because a resize of
+# a large frame is a real allocation.
+_SCALED_CACHE_LIMIT = 240
 
 
 class PreviewCanvas(tk.Canvas):
@@ -28,25 +37,37 @@ class PreviewCanvas(tk.Canvas):
             **kwargs,
         )
         self._source: Image.Image | None = None
+        self._source_key: object = None
         self._placeholder = ""
         # Strong reference, and the reason this attribute exists at all: Tk
         # garbage-collects a PhotoImage the moment Python drops its last
-        # reference, and the canvas then draws nothing at all. A blank window
-        # with no error is the classic symptom (ARCHITECTURE.md risk 6).
+        # reference, and the canvas then draws nothing. A blank window with no
+        # error is the classic symptom (ARCHITECTURE.md risk 6).
         self._photo: ImageTk.PhotoImage | None = None
+        # (key, w, h) -> PhotoImage. Keyed by the caller's frame identity so a
+        # redraw at the same size is a dict hit, not a resize.
+        self._scaled: "OrderedDict[tuple, ImageTk.PhotoImage]" = OrderedDict()
         self._last_size = (0, 0)
         self.bind("<Configure>", self._on_configure)
 
     # ---- public ----------------------------------------------------------
 
-    def show(self, image: Image.Image) -> None:
+    def show(self, image: Image.Image, key: object = None) -> None:
+        """Display `image`. `key` identifies the pixels for caching -- pass a
+        frame's image_uid so the same frame at the same size isn't re-scaled."""
         self._source = image
+        self._source_key = key if key is not None else id(image)
         self._redraw()
 
     def show_placeholder(self, text: str) -> None:
         self._source = None
+        self._source_key = None
         self._placeholder = text
         self._redraw()
+
+    def invalidate(self) -> None:
+        """Drop the scaled cache, e.g. when the document closes."""
+        self._scaled.clear()
 
     # ---- internals -------------------------------------------------------
 
@@ -75,6 +96,19 @@ class PreviewCanvas(tk.Canvas):
         resample = Image.NEAREST if scale > 1 else Image.LANCZOS
         return image.resize(target, resample)
 
+    def _photo_for(self, width: int, height: int) -> ImageTk.PhotoImage:
+        cache_key = (self._source_key, width, height)
+        cached = self._scaled.get(cache_key)
+        if cached is not None:
+            self._scaled.move_to_end(cache_key)
+            return cached
+
+        photo = ImageTk.PhotoImage(self._fit(self._source, width, height))
+        self._scaled[cache_key] = photo
+        if len(self._scaled) > _SCALED_CACHE_LIMIT:
+            self._scaled.popitem(last=False)
+        return photo
+
     def _redraw(self) -> None:
         self.delete("all")
         width = self.winfo_width()
@@ -94,5 +128,5 @@ class PreviewCanvas(tk.Canvas):
             )
             return
 
-        self._photo = ImageTk.PhotoImage(self._fit(self._source, width, height))
+        self._photo = self._photo_for(width, height)
         self.create_image(width // 2, height // 2, image=self._photo, anchor="center")

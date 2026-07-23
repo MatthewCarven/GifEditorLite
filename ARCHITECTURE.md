@@ -258,10 +258,16 @@ class AppController:
 |---|---|---|
 | `doc_changed(doc, selection, index, reason)` | any op, open, undo/redo | redraw canvas + timeline, refresh menus |
 | `selection_changed(sel)` | selection-only edits | restyle timeline items |
-| `playhead_moved(i)` | playback tick or scrub | redraw canvas |
+| `playhead_moved(i)` | playback tick or scrub | redraw canvas + timeline highlight |
+| `playback_state(playing)` | play, pause, auto-stop at end | toggle the play/pause button |
 | `title_changed(path, dirty)` | path or dirty changes | frontend formats the title string |
 | `status(msg)` | informational | status bar |
 | `error(exc)` | operation or IO failure | message box |
+
+`playback_state` was added in M1. Playback can stop on its own — a non-looping
+GIF reaching its last frame — so "are we playing?" is session state the
+frontend must be told about, not something it can derive from its own button
+clicks.
 
 **Ordering is part of the contract, not an accident.** `run_op`, `undo`, `redo` and `open` emit **exactly one** `doc_changed`, carrying document, selection and playhead together. `selection_changed` fires only for selection-only edits. Without this rule a frontend can receive a new selection, restyle against the old document, and index past the end.
 
@@ -295,7 +301,11 @@ class PlaybackClock:
 
 **`set_durations` is not optional.** Every M2 operation changes the frame count, so a clock that snapshots durations at construction is stale the moment the editor edits. The controller rebuilds it on `doc_changed` and clamps the playhead in the same step.
 
-Tk drives it with `root.after(16, ...)` calling `controller.tick(dt)`; Qt would use `QTimer`; tests feed synthetic `dt` values. M1 ships **forward and loop only** — ping-pong and speed multipliers are niceties that M1's goal ("watch a GIF, drag the playhead") doesn't need, and each one commits §16 to more tests. The `Mode` enum costs nothing to add at M4.
+Tk drives it with `root.after(16, ...)` calling `controller.tick(dt)`; Qt would use `QTimer`; tests feed synthetic `dt` values. The timer runs **continuously** and `tick()` is a no-op while paused — one always-on timer has no start/stop race, and a 60fps idle callback costs nothing.
+
+M1 ships **forward and loop**, plus a **speed** multiplier — speed turned out to be a single scale on `dt` and the controller already promised `set_speed`, so pulling it forward from M4 cost one line and a dropdown and makes the thing more fun to poke at. **Ping-pong** stays at M4: it needs a `Mode` enum and its own reversal logic at the loop boundary, which is real work M1's goal ("watch a GIF, drag the playhead") doesn't need.
+
+The frontend caps `dt` at `MAX_TICK_MS` (250ms) before calling `tick()`: after a stall — window dragged, laptop asleep — real elapsed time can be seconds, and fast-forwarding through the whole animation in one frame is never what anyone wants.
 
 ---
 
@@ -382,8 +392,8 @@ Measured against Pillow 12.2.0, not recalled from memory. Each of these changed 
 
 | | Scope | Done when |
 |---|---|---|
-| **M0** | Package skeleton, `Frame`/`Document`, `gif_read`, controller, Tk window | `python -m giflite some.gif` shows frame 0; bare `python -m giflite` shows an empty state |
-| **M1** | Timeline strip, playback (forward + loop), scrubbing | You can watch a GIF and drag the playhead |
+| **M0** | Package skeleton, `Frame`/`Document`, `gif_read`, controller, Tk window | `python -m giflite some.gif` shows frame 0; bare `python -m giflite` shows an empty state ✅ |
+| **M1** | Timeline strip, playback (forward + loop + speed), scrubbing | You can watch a GIF and drag the playhead ✅ |
 | **M2** | Selection, the five frame ops, undo/redo | **"v1 lite" is complete** — the editor edits |
 | **M3** | `gif_write`, Save / Save As, `Param` schema + generated option dialogs | Edits can leave the building |
 | **M4** | Image-sequence IO, IO registry promotion, canvas ops, timing ops, ping-pong | Crop/resize/speed |

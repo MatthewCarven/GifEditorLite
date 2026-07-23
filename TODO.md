@@ -3,8 +3,9 @@
 ## Blocked on Matthew
 
 - [x] `git init` — done
-- [ ] Delete the stale `.git\index.lock` before your first local git command (see WORKLOG)
-- [ ] Sweep `tmp_obj_*` cruft from `.git\objects` occasionally
+- [x] M0 committed (`95cf542`), line endings pinned to LF (`92fd44e`)
+- [ ] Sweep `tmp_obj_*` cruft from `.git\objects` after a reboot frees the handles (harmless if left)
+- [ ] Commit M1: `git add -A; git commit -F COMMIT_MSG.txt`
 - [ ] Decide risk #2: identical-frame merging on export (accept / disable optimiser / project file) — **not urgent, first bites at M3**
 - [ ] Run `python -m giflite` on Windows and confirm the window looks right
 - [ ] Confirm Python version on the Windows box (targeting 3.10+)
@@ -21,14 +22,16 @@
 - [x] Load-time memory estimate + warning above ~250 MB
 - [x] 51 headless tests + 12-check Tk smoke test, both green
 
-## M1 — viewing
+## M1 — viewing ✅
 
-- [ ] `core/playback.py` — `PlaybackClock`, forward + loop only, **with `set_durations()`**
-- [ ] Controller owns the clock; rebuilds durations and clamps index on every `doc_changed`
-- [ ] `ui/tk/canvas.py` — preview surface; **owns zoom/pan entirely**
-- [ ] `ui/tk/timeline.py` — single Canvas, virtualised thumbnails, holds `PhotoImage` strong refs
-- [ ] `app/cache.py` — PIL-level thumbnails only, keyed by frame uid (**never `id(image)`**), plain dict
-- [ ] `status("Loading…")` + busy cursor around blocking reads
+- [x] `core/playback.py` — `PlaybackClock`, forward + loop + speed, `set_durations()`, dt cap
+- [x] Controller owns the clock; rebuilds durations and clamps index on every `doc_changed`
+- [x] Continuous timer, `tick()` no-op when paused; new `PLAYBACK_STATE` event
+- [x] `ui/tk/canvas.py` — preview surface, owns zoom/pan, scaled-frame cache for smooth playback
+- [x] `ui/tk/timeline.py` — single Canvas, virtualised thumbnails, `PhotoImage` strong refs, click-to-seek, auto-scroll
+- [x] `app/cache.py` — PIL-level thumbnails only, keyed by frame uid, plain dict, `retain()` pruning
+- [x] Transport bar: play/pause, frame counter, speed dropdown; spacebar + arrow keys + Home/End
+- [x] 42 new tests (clock, controller playback, cache); Tk smoke now 28 checks, all green on Xvfb
 
 ## M2 — editing (v1 complete)
 

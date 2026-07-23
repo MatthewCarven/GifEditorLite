@@ -1,12 +1,12 @@
-"""Manual smoke test for the Tk frontend.
+"""Manual smoke test for the Tk frontend (M0 + M1).
 
-Not part of the pytest run: it needs a display, and CI (and my sandbox) is
-headless by default. Run it directly when changing the UI layer.
+Not part of the pytest run: it needs a display, and CI (and the dev sandbox)
+is headless. Run it directly when changing the UI layer.
 
     python tests/smoke_tk.py [--shot out.png]
 
 On Linux with Xvfb:
-    Xvfb :99 -screen 0 1100x760x24 & DISPLAY=:99 python tests/smoke_tk.py
+    Xvfb :99 -screen 0 1100x820x24 & DISPLAY=:99 python tests/smoke_tk.py
 """
 
 from __future__ import annotations
@@ -31,8 +31,8 @@ def main() -> int:
     args = parser.parse_args()
 
     tmp = Path(tempfile.mkdtemp())
-    gif = make_gif(tmp / "smoke.gif", frames=6, size=(160, 80),
-                   durations=[100, 100, 250, 100, 5, 500])
+    gif = make_gif(tmp / "smoke.gif", frames=8, size=(160, 80),
+                   durations=[100, 100, 250, 100, 5, 500, 100, 100])
 
     root = tk.Tk()
     controller = AppController()
@@ -41,101 +41,110 @@ def main() -> int:
 
     checks: list[tuple[str, bool, str]] = []
 
+    def check(name: str, ok: bool, detail: str = "") -> None:
+        checks.append((name, ok, detail))
+
     # --- empty state ---------------------------------------------------
-    items = window.canvas.find_all()
-    checks.append(("empty state draws a placeholder", len(items) == 1, f"{len(items)} items"))
-    checks.append((
-        "empty state has no photo retained",
-        window.canvas._photo is None,
-        "",
-    ))
-    checks.append((
-        "empty state title has no filename",
-        root.title() == "GIF Editor Lite",
-        root.title(),
-    ))
+    check("empty: placeholder drawn", len(window.canvas.find_all()) == 1)
+    check("empty: no photo retained", window.canvas._photo is None)
+    check("empty: play button disabled", str(window.play_button["state"]) == "disabled")
+    check("empty: title has no filename", root.title() == "GIF Editor Lite", root.title())
 
     # --- open ----------------------------------------------------------
     window.open_path(gif)
     root.update()
 
-    checks.append(("document loaded", controller.frame_count == 6, str(controller.frame_count)))
-    checks.append((
-        "canvas draws exactly one image",
-        len(window.canvas.find_all()) == 1
-        and window.canvas.type(window.canvas.find_all()[0]) == "image",
-        str([window.canvas.type(i) for i in window.canvas.find_all()]),
-    ))
-    checks.append((
-        "PhotoImage reference retained (blank-canvas bug)",
-        window.canvas._photo is not None,
-        "",
-    ))
-    checks.append((
-        "image was scaled up to fit the window",
-        window.canvas._photo is not None and window.canvas._photo.width() > 160,
-        f"{window.canvas._photo.width()}px wide from a 160px source",
-    ))
-    checks.append((
-        "title shows the filename",
-        root.title().startswith("smoke.gif"),
-        root.title(),
-    ))
-    checks.append((
-        "status bar summarises the document",
-        "Frame 1 of 6" in window.status.cget("text"),
-        window.status.cget("text"),
-    ))
+    check("open: 8 frames loaded", controller.frame_count == 8, str(controller.frame_count))
+    check("open: canvas shows one image",
+          len(window.canvas.find_all()) == 1
+          and window.canvas.type(window.canvas.find_all()[0]) == "image")
+    check("open: PhotoImage retained (blank-canvas bug)", window.canvas._photo is not None)
+    check("open: image scaled up to fit",
+          window.canvas._photo is not None and window.canvas._photo.width() > 160,
+          f"{window.canvas._photo.width()}px from 160px source")
+    check("open: title shows filename", root.title().startswith("smoke.gif"), root.title())
+    check("open: play button enabled", str(window.play_button["state"]) == "normal")
+    check("open: counter shows frame 1 of 8", "Frame 1 of 8" in window.counter.cget("text"),
+          window.counter.cget("text"))
 
-    # --- resize redraws -------------------------------------------------
+    # --- timeline ------------------------------------------------------
+    tl_items = window.timeline.canvas.find_all()
+    tl_images = [i for i in tl_items if window.timeline.canvas.type(i) == "image"]
+    check("timeline: thumbnails drawn", len(tl_images) >= 8, f"{len(tl_images)} thumbs")
+    check("timeline: a highlight border exists",
+          any(window.timeline.canvas.type(i) == "rectangle" for i in tl_items))
+
+    # --- playback (drive the clock directly for determinism) -----------
+    controller.play()
+    root.update()
+    check("play: button now says Pause", window.play_button.cget("text") == "Pause",
+          window.play_button.cget("text"))
+    check("play: controller is playing", controller.playing)
+
+    controller.tick(120)  # 120ms >= frame 0's 100ms -> frame 1
+    root.update()
+    check("play: playhead advanced", controller.index == 1, f"index={controller.index}")
+    check("play: canvas followed the playhead", window.canvas._photo is not None)
+    check("play: counter followed", "Frame 2 of 8" in window.counter.cget("text"),
+          window.counter.cget("text"))
+
+    controller.pause()
+    root.update()
+    check("pause: button says Play again", window.play_button.cget("text") == "Play")
+    check("pause: controller stopped", not controller.playing)
+
+    # --- scrub via timeline click --------------------------------------
+    window._on_pick(5)
+    root.update()
+    check("click: playhead jumped to picked frame", controller.index == 5,
+          f"index={controller.index}")
+    check("click: frame selected", 5 in controller.selection.indices)
+
+    # --- keyboard stepping ---------------------------------------------
+    window.root.event_generate("<Left>")
+    root.update()
+    check("Left: stepped back one frame", controller.index == 4, f"index={controller.index}")
+
+    # --- speed ----------------------------------------------------------
+    window.speed.set("2x")
+    window._on_speed(None)
+    check("speed: 2x applied to controller", abs(controller.speed - 2.0) < 1e-6,
+          str(controller.speed))
+
+    # --- resize refits --------------------------------------------------
     before = window.canvas._photo.width()
-    root.geometry("500x400")
+    root.geometry("560x460")
     root.update()
-    checks.append((
-        "resize refits the image",
-        window.canvas._photo.width() != before,
-        f"{before}px -> {window.canvas._photo.width()}px",
-    ))
+    check("resize: image refit", window.canvas._photo.width() != before,
+          f"{before}px -> {window.canvas._photo.width()}px")
 
-    # --- seek ------------------------------------------------------------
-    controller.seek(3)
-    root.update()
-    checks.append((
-        "seek updates the status bar",
-        "Frame 4 of 6" in window.status.cget("text"),
-        window.status.cget("text"),
-    ))
-
-    # --- failure path ----------------------------------------------------
-    root.geometry("900x620")
+    root.geometry("900x680")
     root.update()
 
     if args.shot:
         try:
             from PIL import ImageGrab
 
-            grab = ImageGrab.grab(xdisplay=os.environ.get("DISPLAY", ":99"))
-            grab.save(args.shot)
+            controller.seek(5)  # a frame with the dot mid-strip, for a nicer shot
+            root.update()
+            ImageGrab.grab(xdisplay=os.environ.get("DISPLAY", ":99")).save(args.shot)
             print(f"screenshot -> {args.shot}")
         except Exception as exc:  # noqa: BLE001
             print(f"screenshot unavailable: {exc}")
 
-    # --- close ------------------------------------------------------------
+    # --- close ----------------------------------------------------------
     controller.close()
     root.update()
-    checks.append((
-        "close returns to the placeholder",
-        window.canvas._photo is None and len(window.canvas.find_all()) == 1,
-        "",
-    ))
+    check("close: back to placeholder",
+          window.canvas._photo is None and len(window.canvas.find_all()) == 1)
+    check("close: timeline cleared", len(window.timeline.canvas.find_all()) == 0)
+    check("close: play button disabled again", str(window.play_button["state"]) == "disabled")
 
     root.destroy()
 
-    failed = 0
+    failed = sum(1 for _, ok, _ in checks if not ok)
     for name, ok, detail in checks:
         mark = "PASS" if ok else "FAIL"
-        if not ok:
-            failed += 1
         suffix = f"  ({detail})" if detail else ""
         print(f"[{mark}] {name}{suffix}")
     print(f"\n{len(checks) - failed}/{len(checks)} checks passed")

@@ -3,8 +3,16 @@
 A small, modular GIF editor in Python. Tkinter frontend, Pillow for pixels,
 nothing else.
 
-Status: **M0** — opens a GIF and shows a frame. See [TODO.md](TODO.md) for
-what's next and [ARCHITECTURE.md](ARCHITECTURE.md) for why it's shaped this way.
+Status: **M1** — opens a GIF, plays it back, and lets you scrub a thumbnail
+timeline. Editing (delete/duplicate/reorder frames) is M2; saving is M3. See
+[TODO.md](TODO.md) for what's next and [ARCHITECTURE.md](ARCHITECTURE.md) for
+why it's shaped this way.
+
+## Use
+
+Open a GIF, then: **Space** play/pause, **←/→** step a frame, **Home/End**
+jump to the ends, click a thumbnail to scrub there, and pick a playback speed
+from the dropdown.
 
 ## Run
 
@@ -34,8 +42,8 @@ python tests/smoke_tk.py --shot window.png
 ## Layout
 
 ```
-giflite/core/   pure library — model, IO, (soon) ops and history. Pillow only.
-giflite/app/    controller and events. UI-agnostic; owns session state.
+giflite/core/   pure library — model, IO, playback clock, (soon) ops+history. Pillow only.
+giflite/app/    controller, events, thumbnail cache. UI-agnostic; owns session state.
 giflite/ui/tk/  the Tkinter frontend. The ONLY place a toolkit may be imported.
 ```
 

@@ -21,7 +21,8 @@ from typing import Any, Callable
 DOC_CHANGED = "doc_changed"  # (doc, selection, index, reason)
 
 SELECTION_CHANGED = "selection_changed"  # (selection)  -- selection-only edits
-PLAYHEAD_MOVED = "playhead_moved"  # (index)
+PLAYHEAD_MOVED = "playhead_moved"  # (index)  -- playback tick or scrub
+PLAYBACK_STATE = "playback_state"  # (playing)  -- play/pause, incl. auto-stop
 TITLE_CHANGED = "title_changed"  # (path, dirty)  -- frontend formats the string
 STATUS = "status"  # (message)
 ERROR = "error"  # (exception, context)
