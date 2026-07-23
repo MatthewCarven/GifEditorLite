@@ -26,8 +26,9 @@ from PIL import Image
 from giflite.app import events as ev
 from giflite.app.events import EventBus
 from giflite.core.history import History, Snapshot
-from giflite.core.io import reader_for
+from giflite.core.io import reader_for, writer_for
 from giflite.core.io.gif_read import probe_gif
+from giflite.core.io.gif_write import count_merges
 from giflite.core.model import Document, Selection
 from giflite.core.ops import get_op  # importing this also registers the ops
 from giflite.core.playback import MAX_TICK_MS, PlaybackClock
@@ -184,6 +185,53 @@ class AppController:
         self._history.clear()
         self._emit_doc_changed("close")
         self.events.emit(ev.TITLE_CHANGED, path=None, dirty=False)
+
+    # ---- saving ----------------------------------------------------------
+
+    @property
+    def has_path(self) -> bool:
+        """Whether Save can write in place, or must fall back to Save As."""
+        return self._path is not None
+
+    def save(self) -> bool:
+        """Write to the current path. False if there's nowhere to write yet
+        (the frontend should open Save As in that case)."""
+        if self._doc is None or self._path is None:
+            return False
+        return self._write(self._path)
+
+    def save_as(self, path: Path) -> bool:
+        return self._write(Path(path))
+
+    def _write(self, path: Path) -> bool:
+        if self._doc is None:
+            return False
+        writer = writer_for(path)
+        if writer is None:
+            self.events.emit(
+                ev.ERROR,
+                exception=ValueError(f"No writer for {path.suffix or 'this file'}"),
+                context=str(path),
+            )
+            return False
+
+        # Count merges before writing, while we still have the authored frames.
+        merges = count_merges(self._doc)
+        try:
+            writer(self._doc, path)
+        except Exception as exc:  # noqa: BLE001 -- surfaced to the user
+            self.events.emit(ev.ERROR, exception=exc, context=str(path))
+            return False
+
+        self._path = path
+        self._history.mark_saved()  # this state now matches disk -> not dirty
+        self.events.emit(ev.TITLE_CHANGED, path=path, dirty=self.dirty)
+        message = f"Saved {path.name}"
+        if merges:
+            plural = "s" if merges > 1 else ""
+            message += f"  ({merges} identical frame{plural} merged into longer holds)"
+        self.events.emit(ev.STATUS, message=message)
+        return True
 
     # ---- editing ---------------------------------------------------------
 

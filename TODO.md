@@ -55,11 +55,23 @@
 - [x] Timeline preserves scroll on edits, resets only on open/close
 - [x] Tk smoke now 50 checks incl. the real drag gesture path, screenshot under Xvfb
 
-**M2 is complete — v1 lite edits.** Next stop is M3 (save), below.
+**M2 is complete — v1 lite edits.**
+
+## M3 — save ✅
+
+- [x] `core/io/gif_write.py` — adaptive palette + Floyd–Steinberg dither, per-frame transparency, disposal=2, durations + loop preserved
+- [x] `count_merges` so the UI can mention identical-frame folding on save
+- [x] Controller `save` / `save_as` / `has_path`; `mark_saved` clears dirty; merge count reported
+- [x] File menu Save (Ctrl+S) / Save As (Ctrl+Shift+S); Save falls back to Save As with no path; menu enable/disable
+- [x] 18 new tests (writer round-trip incl. transparency + merge, controller saving + dirty), smoke +5 checks. 182 total, all green
+- [x] Verified end-to-end on the real transparent GIFs: reverse + trim + save + reopen is pixel-perfect on visible content and transparency
+- [x] Decision recorded: accept merge, defer project file (ARCHITECTURE §18)
+- [ ] **`Param` schema deferred *again*** — "just save" needed no options dialog. It now lands with the *next* thing that has plural options (M4 timing/canvas ops, or WebP/APNG export at M5), whichever comes first
 
 ## Later
 
-- [ ] M3 `gif_write` + Save/Save As; introduce `Param` schema **here**, where options are plural
-- [ ] M4 image-sequence IO, promote format dict → registry, canvas ops, timing ops, ping-pong
+- [ ] **Project / sidecar format** (`.gifproj`?) — lossless zip of PNG frames + JSON manifest, so authored frames/timing survive a round-trip GIF can't represent. One `read_x`/`write_x` pair; see ARCHITECTURE §18. Matthew wants this eventually
+- [ ] M4 image-sequence IO, promote format dict → registry, canvas ops (crop/resize/rotate), timing ops, ping-pong
 - [ ] M5 video import (`imageio-ffmpeg`, try/except registration), WebP/APNG export
 - [ ] Second frontend to actually prove the seam (Qt or Dear PyGui)
+- [ ] Polish: warn before overwriting the *original* source on Ctrl+S (GIF re-save is lossy); default Save As to `<name>_edited.gif`?

@@ -377,7 +377,7 @@ Measured against Pillow 12.2.0, not recalled from memory. Each of these changed 
 | # | Risk | Response |
 |---|---|---|
 | 1 | Memory on long or large GIFs | Cap-and-warn at load; `FrameStore` escalation path reserved (§5) |
-| 2 | Frame count not round-trip stable (§12.4) | **Open — your call.** Accept / disable optimiser / project file |
+| 2 | Frame count not round-trip stable (§12.4) | **Decided (M3): accept.** Merge is unconditional in Pillow's encoder — "disable the optimiser" was never viable (verified with `optimize=False` + no disposal: still merged). A held-duplicate folds to one longer frame, playback-identical. The UI mentions it on save (`count_merges`). A faithful **project-file / sidecar format** to preserve exact authored frames is deferred — see §18 |
 | 3 | An op mutates `frame.image` in place and silently corrupts history | Hard rule in §5; assert-on-copy in tests; the one invariant to actually watch |
 | 4 | Palette quality on export — 256 colours, dithering | Deferred to M3 with the writer; expose as an option, don't guess a default now |
 | 5 | Tk timeline performance with 200+ thumbnails | One `Canvas` with image items, virtualised to the visible range. Never 200 `Label` widgets |
@@ -395,7 +395,7 @@ Measured against Pillow 12.2.0, not recalled from memory. Each of these changed 
 | **M0** | Package skeleton, `Frame`/`Document`, `gif_read`, controller, Tk window | `python -m giflite some.gif` shows frame 0; bare `python -m giflite` shows an empty state ✅ |
 | **M1** | Timeline strip, playback (forward + loop + speed), scrubbing | You can watch a GIF and drag the playhead ✅ |
 | **M2** | Selection, the five frame ops, undo/redo | **"v1 lite" is complete** — the editor edits ✅ |
-| **M3** | `gif_write`, Save / Save As, `Param` schema + generated option dialogs | Edits can leave the building |
+| **M3** | `gif_write`, Save / Save As | Edits can leave the building ✅ (Param schema deferred again — see below) |
 | **M4** | Image-sequence IO, IO registry promotion, canvas ops, timing ops, ping-pong | Crop/resize/speed |
 | **M5** | Video import, WebP/APNG export | Optional deps prove the try/except registration pattern |
 
@@ -432,5 +432,17 @@ Untested by design: Tk widget layout. If a bug can only be caught by looking at 
 
 ## 17. Handover
 
-- **`git init` is yours to run** — this should be a repo before M0 lands, but I'm leaving it to you per the working agreement.
-- **Decisions needed from you:** risk 2 (round-trip frame merging), and confirmation that M0–M2 ordering matches how you actually want to use this.
+- **`git init` is yours to run** — done; the repo exists.
+- **Decisions made:** risk 2 → accept the merge, defer a faithful project file (§18). M0–M3 built and verified.
+
+---
+
+## 18. Deferred: a project / sidecar format
+
+Matthew's call at M3: GIF save accepts the encoder's identical-frame merge (§12.4, risk 2), and a faithful format that preserves exact authored frames is a **future want, not now**. Captured here so it isn't lost.
+
+The need: a GIF can't represent "two identical frames held separately" — it merges them — nor sub-10ms timing, nor >256 colours, nor partial alpha. Anyone doing real iterative editing eventually wants to save *the document as authored* and reopen it byte-identical, independent of what GIF can encode.
+
+The shape, when it comes: a small container (a zip is the obvious choice — `.gifproj` or similar) holding each frame as lossless PNG plus a manifest (JSON) of durations, loop, and canvas size. It slots into the existing IO layer as one more `read_x`/`write_x` pair (§8, §11.2) — no new architecture, just a reader and writer that happen to be lossless. The `Document` model already carries everything such a format needs, which is the point of having kept it toolkit- and format-agnostic.
+
+Not designed further until there's a felt need; the hook is that adding it changes nothing else.

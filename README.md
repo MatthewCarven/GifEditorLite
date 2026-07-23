@@ -3,10 +3,10 @@
 A small, modular GIF editor in Python. Tkinter frontend, Pillow for pixels,
 nothing else.
 
-Status: **M2 — v1 lite is complete.** Opens a GIF, plays it back, and edits it:
-select frames, delete, duplicate, reorder, reverse, trim, with undo/redo.
-Saving is M3. See [TODO.md](TODO.md) for what's next and
-[ARCHITECTURE.md](ARCHITECTURE.md) for why it's shaped this way.
+Status: **M3 — opens, plays, edits, and saves.** Select frames, delete,
+duplicate, reorder, reverse, trim, undo/redo, and write the result back to a
+GIF. See [TODO.md](TODO.md) for what's next and [ARCHITECTURE.md](ARCHITECTURE.md)
+for why it's shaped this way.
 
 ## Use
 
@@ -20,7 +20,11 @@ Ctrl-click to toggle one, Ctrl+A to select all, Esc to deselect.
 Selection, and drag a frame along the timeline to reorder. Ctrl+Z / Ctrl+Shift+Z
 undo and redo everything.
 
-Nothing saves yet — that's M3 — so edits live only in the session for now.
+**Saving:** Ctrl+S to save, Ctrl+Shift+S for Save As. One quirk to know about —
+GIF merges identical *consecutive* frames and sums their durations, so a frame
+you duplicated to "hold" it comes back as one longer frame on reopen. Playback
+is identical; only the frame count changes. A lossless project format that
+preserves exact frames is on the roadmap.
 
 ## Run
 

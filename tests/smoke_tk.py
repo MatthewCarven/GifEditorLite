@@ -195,6 +195,24 @@ def main() -> int:
     controller.undo()
     root.update()
 
+    # --- save -----------------------------------------------------------
+    # Delete a middle frame: the smoke GIF's frames are all distinct, so no
+    # identical-consecutive merge, and the saved count round-trips exactly.
+    # (Merge-on-save is covered separately in tests/test_gif_write.py.)
+    save_path = Path(tempfile.mkdtemp()) / "smoke_out.gif"
+    window._pick(3)
+    controller.run_op("frames.delete")
+    check("save: dirty before saving", controller.dirty)
+    controller.save_as(save_path)
+    root.update()
+    check("save: file written to disk", save_path.exists())
+    check("save: dirty cleared after save", not controller.dirty)
+    check("save: title marker gone", not window.root.title().startswith("*"))
+    from giflite.core.io.gif_read import read_gif  # noqa: E402
+    check("save: file reopens with the edited frame count",
+          len(read_gif(save_path)) == controller.frame_count,
+          f"{len(read_gif(save_path))} vs {controller.frame_count}")
+
     # --- speed ----------------------------------------------------------
     window.speed.set("2x")
     window._on_speed(None)

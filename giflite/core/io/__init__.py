@@ -14,19 +14,30 @@ from pathlib import Path
 from typing import Callable
 
 from giflite.core.io.gif_read import read_gif
+from giflite.core.io.gif_write import write_gif
 from giflite.core.model import Document
 
 Reader = Callable[[Path], Document]
+Writer = Callable[[Document, Path], None]
 
 READERS: dict[str, Reader] = {".gif": read_gif}
-WRITERS: dict[str, object] = {}  # M3
+WRITERS: dict[str, Writer] = {".gif": write_gif}
 
 
 def reader_for(path: Path) -> Reader | None:
     return READERS.get(Path(path).suffix.lower())
 
 
+def writer_for(path: Path) -> Writer | None:
+    return WRITERS.get(Path(path).suffix.lower())
+
+
 def open_filter() -> list[tuple[str, str]]:
     """Tk-style (label, pattern) pairs, generated rather than hardcoded."""
     patterns = " ".join(f"*{ext}" for ext in sorted(READERS))
     return [("Animations", patterns), ("All files", "*.*")]
+
+
+def save_filter() -> list[tuple[str, str]]:
+    patterns = " ".join(f"*{ext}" for ext in sorted(WRITERS))
+    return [("GIF", patterns), ("All files", "*.*")]

@@ -17,7 +17,7 @@ from tkinter import filedialog, messagebox, ttk
 from giflite.app import events as ev
 from giflite.app.cache import ThumbnailCache
 from giflite.app.controller import AppController
-from giflite.core.io import open_filter
+from giflite.core.io import open_filter, save_filter
 from giflite.core.model import Selection
 from giflite.core.ops import menu_groups
 from giflite.ui.base import Frontend
@@ -70,12 +70,15 @@ class MainWindow:
     def _build_menu(self) -> None:
         menubar = tk.Menu(self.root)
 
-        file_menu = tk.Menu(menubar, tearoff=False)
-        file_menu.add_command(label="Open...", accelerator="Ctrl+O", command=self.open_file)
-        file_menu.add_command(label="Close", accelerator="Ctrl+W", command=self.controller.close)
-        file_menu.add_separator()
-        file_menu.add_command(label="Exit", command=self.root.destroy)
-        menubar.add_cascade(label="File", menu=file_menu)
+        self.file_menu = tk.Menu(menubar, tearoff=False, postcommand=self._refresh_file_menu)
+        self.file_menu.add_command(label="Open...", accelerator="Ctrl+O", command=self.open_file)
+        self.file_menu.add_separator()
+        self.file_menu.add_command(label="Save", accelerator="Ctrl+S", command=self.save_file)
+        self.file_menu.add_command(label="Save As...", accelerator="Ctrl+Shift+S", command=self.save_file_as)
+        self.file_menu.add_separator()
+        self.file_menu.add_command(label="Close", accelerator="Ctrl+W", command=self.controller.close)
+        self.file_menu.add_command(label="Exit", command=self.root.destroy)
+        menubar.add_cascade(label="File", menu=self.file_menu)
 
         # Edit and Frames refresh their own enable/disable state each time they
         # open (postcommand), so the frontend never tracks it per event -- it
@@ -106,6 +109,8 @@ class MainWindow:
 
         # bind_all so shortcuts work regardless of which widget has focus
         self.root.bind_all("<Control-o>", lambda _e: self.open_file())
+        self.root.bind_all("<Control-s>", lambda _e: self.save_file())
+        self.root.bind_all("<Control-Shift-S>", lambda _e: self.save_file_as())
         self.root.bind_all("<Control-w>", lambda _e: self.controller.close())
         self.root.bind_all("<space>", self._on_space)
         self.root.bind_all("<Left>", lambda _e: self.controller.step(-1))
@@ -182,6 +187,26 @@ class MainWindow:
     def open_path(self, path: Path) -> None:
         self._with_busy_cursor(lambda: self.controller.open(path))
 
+    def save_file(self) -> None:
+        # Save writes to the current path; with none yet, fall back to Save As.
+        if self.controller.has_path:
+            self._with_busy_cursor(self.controller.save)
+        else:
+            self.save_file_as()
+
+    def save_file_as(self) -> None:
+        if self.controller.doc is None:
+            return
+        current = self.controller.path
+        path = filedialog.asksaveasfilename(
+            title="Save animation",
+            defaultextension=".gif",
+            filetypes=save_filter(),
+            initialfile=current.name if current else "untitled.gif",
+        )
+        if path:
+            self._with_busy_cursor(lambda: self.controller.save_as(Path(path)))
+
     # ---- selection gestures (called by the timeline) ---------------------
 
     def _pick(self, index: int) -> None:
@@ -220,6 +245,13 @@ class MainWindow:
             self.controller.run_op("frames.duplicate", copies=count)
 
     # ---- menu state ------------------------------------------------------
+
+    def _refresh_file_menu(self) -> None:
+        has_doc = self.controller.doc is not None
+        state = "normal" if has_doc else "disabled"
+        # Save (index 2), Save As (3), Close (5) all need a document.
+        for entry in (2, 3, 5):
+            self.file_menu.entryconfigure(entry, state=state)
 
     def _refresh_edit_menu(self) -> None:
         c = self.controller

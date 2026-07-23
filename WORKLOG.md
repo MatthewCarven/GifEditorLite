@@ -220,4 +220,34 @@ of frames 3-5 selected in blue with frame 4 as the playhead.
 - Please drive it on Windows: shift-click a range, drag a frame, mash Ctrl+Z. The formation GIFs (92 frames) are the real test of timeline feel.
 
 **Next — M3 (save):** `gif_write` + Save/Save As, and the `Param` schema finally earns its place for export options (dither, loop, optimise). Risk 2 (identical-frame merging on save) stops being hypothetical here — decision time on accept / disable-optimiser / project-file. Risk 4 (palette quality) too.
+
+---
+
+## 2026-07-23 — M3: save. **The editor is a full loop now.**
+
+Edits can leave the building. Open, edit, Ctrl+S, and the GIF is written back.
+Verified end-to-end on Matthew's real transparent GIFs.
+
+**Decisions taken (Matthew):** accept the identical-frame merge for GIF; keep this first cut to *just Save* with smart defaults (no options dialog); defer a faithful project/sidecar format to the roadmap (ARCHITECTURE §18).
+
+**A test that reshaped the decision.** Before asking Matthew, I checked what actually controls the merge. Turns out it's **unconditional** — Pillow's GIF encoder merges identical consecutive frames even with `optimize=False` and no disposal (4 frames → 3, durations summed). So "disable the optimiser," which rev-1 me floated in the design doc as a real option, was never viable. Good thing I tested rather than presenting it. The honest choices were only accept vs project-file, and accept is right for "lite" (playback-identical, zero machinery).
+
+**Shipped**
+
+- `core/io/gif_write.py` — Document → GIF. Adaptive palette + Floyd–Steinberg dither, per-frame transparency (GIF's single transparent index, not alpha; pixels under the alpha cutoff get index 255), disposal=2 so coalesced frames round-trip, durations + loop preserved. `count_merges` reports the fold count.
+- `core/io/__init__.py` — `WRITERS` dict, `writer_for`, `save_filter`.
+- Controller — `save` / `save_as` / `has_path`; `history.mark_saved()` clears dirty on write; merge count surfaced in the save STATUS message.
+- `ui/tk/app.py` — File menu Save / Save As with shortcuts; Save falls back to Save As when there's no path; File menu enable/disable via postcommand.
+- 18 tests (writer round-trip incl. transparency-as-shape and held-duplicate merge; controller saving incl. dirty-clears-on-save and undo-back-to-saved-is-clean). Smoke +5 (54→ then fixed →55). 182 headless total, all green.
+
+**The transparent-RGB false alarm, twice.** My first fidelity check reported a *catastrophic* 112/255 mean colour error — panic-worthy. It was measuring RGB under fully-transparent pixels, where the colour is undefined and nobody sees it. Masking to opaque pixels: **0.000/255**, pixel-perfect. It bit me again in the reverse+save integration check (an `edited[0] == original[-1]` byte-compare that failed only on transparent-pixel RGB). Lesson logged: for RGBA fidelity, compare visible pixels + transparency *shape* separately, never raw RGBA `tobytes()`.
+
+**`Param` schema deferred a third time.** "Just save" needed no options dialog, so the declarative schema still hasn't been built. It now lands with the next feature that genuinely has plural options — M4 timing/canvas ops or M5 WebP/APNG export. Each deferral has been correct; building it speculatively would've been the mistake.
+
+**Handover**
+
+- M3 on disk, uncommitted. `COMMIT_MSG.txt` ready.
+- Try Ctrl+S on a real edit, reopen the result. And note the one behaviour to expect: duplicate-a-frame-to-hold-it comes back as one longer frame (by design now).
+
+**Next — M4** (canvas + timing ops): crop, resize, rotate/flip, per-frame delay, speed-scale, ping-pong. This is where `Param` finally gets built (resize needs dimensions, delay needs a value), the IO dict graduates to a real registry (image-sequence import/export arrives), and the memory ladder (risk 1) gets its first real test since canvas ops actually allocate new pixels. Or take the project-file want off the shelf first — Matthew's call.
 - Reminder: the `/tmp/tkroot` tkinter extraction and Xvfb don't survive a reboot — re-extract with `apt-get download python3-tk tk8.6-blt2.5 blt libtk8.6`, `dpkg-deb -x` into `/tmp/tkroot`, point `PYTHONPATH`/`LD_LIBRARY_PATH` at it, and start Xvfb in the *same* bash call as the smoke test.
