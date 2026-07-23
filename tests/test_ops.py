@@ -120,17 +120,18 @@ class TestTrim:
 
 
 class TestRegistryMetadata:
-    def test_all_five_ops_are_registered(self):
+    def test_all_five_frame_ops_are_registered(self):
         from giflite.core.ops import all_ops
 
         ids = {op.id for op in all_ops()}
-        assert ids == {
+        # subset, not equality: other groups (timing, canvas) register too
+        assert {
             "frames.delete",
             "frames.duplicate",
             "frames.move",
             "frames.reverse",
             "frames.trim",
-        }
+        } <= ids
 
     def test_move_is_not_a_menu_command(self):
         from giflite.core.ops import menu_groups

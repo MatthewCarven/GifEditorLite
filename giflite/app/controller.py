@@ -322,6 +322,13 @@ class AppController:
     def set_speed(self, factor: float) -> None:
         self._clock.set_speed(factor)
 
+    @property
+    def pingpong(self) -> bool:
+        return self._clock.pingpong
+
+    def set_pingpong(self, enabled: bool) -> None:
+        self._clock.set_pingpong(enabled)
+
     def tick(self, dt_ms: float) -> None:
         """Advance playback. The frontend's timer calls this every tick.
 

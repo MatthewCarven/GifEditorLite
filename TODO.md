@@ -68,10 +68,24 @@
 - [x] Decision recorded: accept merge, defer project file (ARCHITECTURE §18)
 - [ ] **`Param` schema deferred *again*** — "just save" needed no options dialog. It now lands with the *next* thing that has plural options (M4 timing/canvas ops, or WebP/APNG export at M5), whichever comes first
 
+## M4 — canvas & timing ops ✅
+
+- [x] **Fixed a real bug first:** `quantise_duration` jumped sub-20ms values to 100ms, so "speed up" could slow a frame down. Split: quantiser floors to 20 (monotonic), reader keeps the browser-clamp (tiny → ~100)
+- [x] `core/params.py` — the long-deferred `Param` schema: Int/Float/Bool/Choice with `coerce`, bounds, `default_params` hook for doc-seeded dialogs
+- [x] Timing ops: `timing.set_delay`, `timing.scale_speed` (pure, selection-or-all)
+- [x] Canvas ops: `canvas.resize` (keep-aspect), `canvas.rotate` (dirs verified vs Pillow), `canvas.flip` — first pixel-allocating ops, fresh uids
+- [x] Migrated `duplicate` to a `Param`; retired the hand-written duplicate dialog
+- [x] `ui/tk/dialogs.py` — generic `ParamDialog` built from any op's params; `ask_params`
+- [x] Menus built generically per op-group (Frames / Timing / Image); "..." decoration for param ops lives in the UI
+- [x] Ping-pong playback (clock bounce mode + transport toggle)
+- [x] 243 tests (was 182); Tk smoke 61 checks incl. dialog-seeding + resize + ping-pong, screenshot under Xvfb
+
 ## Later
 
+- [ ] **Crop** — best as a rubber-band selection on the preview canvas (param-by-coordinates is poor UX). Its own slice with a canvas gesture
+- [ ] **Image-sequence IO** — import a folder of PNGs as frames / export frames out. Promotes the IO dict to a real registry (folder-based source is a new shape)
 - [ ] **Project / sidecar format** (`.gifproj`?) — lossless zip of PNG frames + JSON manifest, so authored frames/timing survive a round-trip GIF can't represent. One `read_x`/`write_x` pair; see ARCHITECTURE §18. Matthew wants this eventually
-- [ ] M4 image-sequence IO, promote format dict → registry, canvas ops (crop/resize/rotate), timing ops, ping-pong
 - [ ] M5 video import (`imageio-ffmpeg`, try/except registration), WebP/APNG export
 - [ ] Second frontend to actually prove the seam (Qt or Dear PyGui)
 - [ ] Polish: warn before overwriting the *original* source on Ctrl+S (GIF re-save is lossy); default Save As to `<name>_edited.gif`?
+- [ ] Polish: `default_params` could seed Set-Delay from the current frame's delay

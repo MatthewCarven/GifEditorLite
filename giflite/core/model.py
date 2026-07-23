@@ -31,9 +31,16 @@ EMPTY_MAP: Mapping[str, Any] = MappingProxyType({})
 # would show 40ms in the timeline for a value stored as 30ms.
 DURATION_STEP_MS = 10
 
-# Sub-20ms delays are clamped to ~100ms by most viewers and browsers. We
-# mirror that rather than pretending a 5ms frame will play at 5ms.
+# The floor for reliable playback. Browsers treat a delay below 2 centiseconds
+# as ~100ms, so 20ms is the smallest value that plays as authored. Editing ops
+# (e.g. Scale Speed) clamp here rather than letting a frame drop below it --
+# going lower doesn't play faster, it plays unpredictably slower.
 MIN_DURATION_MS = 20
+
+# What an *unknown* or sub-threshold delay becomes on read -- mirrors the
+# browser clamp so the editor shows real playback, not an optimistic value.
+# This is a reader concern, applied in gif_read; quantise_duration does NOT
+# jump here (that would turn "speed up" into "slow down").
 DEFAULT_DURATION_MS = 100
 
 BYTES_PER_PIXEL = 4  # RGBA
@@ -56,10 +63,16 @@ def next_image_uid() -> int:
 
 
 def quantise_duration(ms: float) -> int:
-    """Snap a delay to what a GIF can actually store."""
-    if ms < MIN_DURATION_MS:
-        return DEFAULT_DURATION_MS
-    return max((int(ms) // DURATION_STEP_MS) * DURATION_STEP_MS, MIN_DURATION_MS)
+    """Snap a delay to a storable 10ms multiple, floored at MIN_DURATION_MS.
+
+    Pure and monotonic: a smaller input never yields a larger output. That is
+    why sub-floor values clamp to 20ms rather than jumping to the 100ms
+    default -- otherwise "make this frame faster" could make it slower. The
+    "unknown delay -> 100ms" mapping is the reader's job (gif_read), not this
+    function's.
+    """
+    stepped = (int(ms) // DURATION_STEP_MS) * DURATION_STEP_MS
+    return max(stepped, MIN_DURATION_MS)
 
 
 @dataclass(frozen=True, slots=True, eq=False)

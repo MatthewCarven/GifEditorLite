@@ -31,6 +31,11 @@ CASES = [
     ("frames.move", {"to": 4}),
     ("frames.reverse", {}),
     ("frames.trim", {}),
+    ("timing.set_delay", {"delay_ms": 200}),
+    ("timing.scale_speed", {"factor": 2.0}),
+    ("canvas.resize", {"width": 4, "height": 4, "keep_aspect": False}),
+    ("canvas.rotate", {"angle": "cw"}),
+    ("canvas.flip", {"direction": "horizontal"}),
 ]
 
 

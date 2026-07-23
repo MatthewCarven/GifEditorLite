@@ -3,10 +3,11 @@
 A small, modular GIF editor in Python. Tkinter frontend, Pillow for pixels,
 nothing else.
 
-Status: **M3 — opens, plays, edits, and saves.** Select frames, delete,
-duplicate, reorder, reverse, trim, undo/redo, and write the result back to a
-GIF. See [TODO.md](TODO.md) for what's next and [ARCHITECTURE.md](ARCHITECTURE.md)
-for why it's shaped this way.
+Status: **M4 — a working lite GIF editor.** Opens, plays (with ping-pong),
+edits frames (delete/duplicate/reorder/reverse/trim), re-times them (set delay,
+scale speed), transforms the canvas (resize/rotate/flip), undo/redo, and saves
+back to GIF. See [TODO.md](TODO.md) for what's next and
+[ARCHITECTURE.md](ARCHITECTURE.md) for why it's shaped this way.
 
 ## Use
 
@@ -16,9 +17,11 @@ click a thumbnail to scrub, speed from the dropdown.
 **Selecting frames:** click to select one, Shift-click to extend a range,
 Ctrl-click to toggle one, Ctrl+A to select all, Esc to deselect.
 
-**Editing** (Frames menu): Delete (Del), Duplicate (Ctrl+D), Reverse, Trim to
-Selection, and drag a frame along the timeline to reorder. Ctrl+Z / Ctrl+Shift+Z
-undo and redo everything.
+**Editing:** Frames menu — Delete (Del), Duplicate (Ctrl+D, or the menu for a
+count), Reverse, Trim to Selection; drag a frame along the timeline to reorder.
+Timing menu — Set Frame Delay, Scale Speed. Image menu — Resize, Rotate, Flip.
+Ctrl+Z / Ctrl+Shift+Z undo and redo everything. Ops that need input open a small
+dialog generated from the operation itself.
 
 **Saving:** Ctrl+S to save, Ctrl+Shift+S for Save As. One quirk to know about —
 GIF merges identical *consecutive* frames and sums their durations, so a frame

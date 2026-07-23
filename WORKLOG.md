@@ -250,4 +250,31 @@ Verified end-to-end on Matthew's real transparent GIFs.
 - Try Ctrl+S on a real edit, reopen the result. And note the one behaviour to expect: duplicate-a-frame-to-hold-it comes back as one longer frame (by design now).
 
 **Next — M4** (canvas + timing ops): crop, resize, rotate/flip, per-frame delay, speed-scale, ping-pong. This is where `Param` finally gets built (resize needs dimensions, delay needs a value), the IO dict graduates to a real registry (image-sequence import/export arrives), and the memory ladder (risk 1) gets its first real test since canvas ops actually allocate new pixels. Or take the project-file want off the shelf first — Matthew's call.
+
+---
+
+## 2026-07-23 — M4: canvas & timing ops. **The Param schema finally exists.**
+
+Matthew picked M4 over the project file, and told me to take my time on correct logic — so I did, sliced into three, and it paid off immediately.
+
+**A real bug, found before writing a line of the feature.** Working through Scale Speed's math, I checked what `quantise_duration` does to a sped-up frame: a 60ms frame at 5× → 12ms → **100ms**. Speeding up made it *slower*. The function conflated two jobs — "unknown/zero delay → default 100" (a reader concern) and "genuine small delay → clamp to floor" (an editing concern). Split them: the quantiser now floors sub-20ms to 20ms and is monotonic (smaller in never yields larger out), and the browser-clamp (tiny → ~100, matching how viewers actually play sub-2cs frames) moved into `gif_read` where it belongs. Guarded with a monotonicity test. This is exactly the kind of thing "take your time on correct logic" is for — Scale Speed built on the old quantiser would have shipped a feature that lies.
+
+**Slice 1 — Param schema + timing ops.** `core/params.py`: Int/Float/Bool/Choice, each with `coerce` (parse + clamp + fallback) and a `default_params(doc, sel)` hook so a dialog can seed from the current document (Resize pre-fills the current size). One subtlety caught: a `default` *property* on the base class is a data descriptor and would shadow the subclasses' `default` field — removed it, left a comment. Timing ops (`set_delay`, `scale_speed`) are pure and selection-or-all. Migrated `duplicate` to declare a `copies` param, which retired the M2 hand-written dialog.
+
+**Slice 2 — canvas ops.** `resize` (keep-aspect derives height), `rotate`, `flip`. First ops to *allocate pixels*, so each output frame gets a fresh uid (stale-cache guard) and history now holds real image memory (risk 1's first real load; 64-cap bounds it, `FrameStore` is the escape hatch if a big GIF ever hurts). Rotation directions verified against Pillow, not guessed — `ROTATE_270` is clockwise, `ROTATE_90` is counter-clockwise. Immutability test extended to all five new ops; still byte-identical source pixels.
+
+**Slice 3 — the payoff UI.** `ui/tk/dialogs.py` is now a generic `ParamDialog` built from any op's param tuple (Bool→check, Choice→combo, Int→spinbox, Float→entry), values back through `coerce`. Menus are built generically per op-group — Frames / Timing / Image — straight from the registry, so adding an op needs nothing here beyond the group→title map. The "..." dialog convention lives in the UI (menu display), not the op label, so undo still reads "Undo Resize". Ping-pong: a bounce mode in the clock (reflects off both ends, ignores loop count) plus a transport checkbox.
+
+**Bug I caught in my own smoke test:** I called `_invoke_op("canvas.flip")` in a scripted run — flip has a param, so it opened a modal dialog and hung the test forever. Removed it; the lesson is that any op-with-params can't be driven through `_invoke_op` headlessly (it waits on a human), so the smoke test drives param ops via `run_op(..., **values)` directly and only sends param-free ops through `_invoke_op`.
+
+**Numbers:** 243 tests (was 182). Tk smoke 61 checks (was 55), incl. dialog-seeding-from-current-size, resize+refit, and ping-pong toggle. Boundary rule still clean — `params.py` and all the new ops are toolkit-free.
+
+**Deferred, deliberately:** crop wants a rubber-band selection on the preview canvas (typing x/y/w/h is poor UX), so it's its own future slice with a canvas gesture. Image-sequence IO (folder of PNGs) is a different *shape* of source and pairs with promoting the IO dict to a real registry — also deferred. Both noted in TODO.
+
+**Handover**
+
+- M4 on disk, uncommitted. `COMMIT_MSG.txt` ready.
+- Try the new menus on a real GIF: Image → Rotate, Timing → Scale Speed, and the Ping-pong toggle on the formation GIFs. Resize keeps aspect by default.
+
+**Next:** crop (canvas rubber-band), or image-sequence IO + registry promotion, or the project-file format, or M5 (video import / WebP export). All genuinely optional now — the editor is complete and useful. Matthew's call.
 - Reminder: the `/tmp/tkroot` tkinter extraction and Xvfb don't survive a reboot — re-extract with `apt-get download python3-tk tk8.6-blt2.5 blt libtk8.6`, `dpkg-deb -x` into `/tmp/tkroot`, point `PYTHONPATH`/`LD_LIBRARY_PATH` at it, and start Xvfb in the *same* bash call as the smoke test.

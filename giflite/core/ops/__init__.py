@@ -4,13 +4,17 @@
 imported for its side effect of registering the five frame ops.
 """
 
+from giflite.core.ops import canvas  # noqa: F401  (registers ops on import)
 from giflite.core.ops import frames  # noqa: F401  (registers ops on import)
+from giflite.core.ops import timing  # noqa: F401  (registers ops on import)
 from giflite.core.ops.registry import (
     Operation,
     OpResult,
     all_ops,
     get_op,
     menu_groups,
+    op_defaults,
+    op_params,
     register_op,
 )
 
@@ -20,5 +24,7 @@ __all__ = [
     "all_ops",
     "get_op",
     "menu_groups",
+    "op_defaults",
+    "op_params",
     "register_op",
 ]

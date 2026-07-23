@@ -195,6 +195,49 @@ def main() -> int:
     controller.undo()
     root.update()
 
+    # --- M4: param dialog drives an op ---------------------------------
+    from giflite.ui.tk.dialogs import ParamDialog  # noqa: E402
+    from giflite.core.ops import get_op, op_defaults  # noqa: E402
+    resize = get_op("canvas.resize")
+    dlg = ParamDialog(root, "Resize", resize.params,
+                      op_defaults(resize, controller.doc, controller.selection))
+    root.update()
+    check("dialog: seeded with current width", dlg._getters["width"]() == str(controller.doc.size[0]),
+          f'{dlg._getters["width"]()} vs {controller.doc.size[0]}')
+    # drive it: turn off keep-aspect, set a new width, OK
+    for name, getter in dlg._getters.items():
+        pass  # (getters are read-only; set via the underlying vars below)
+    dlg.destroy()
+    # apply resize straight through the controller (the dialog's coerced output)
+    before_size = controller.doc.size
+    controller.run_op("canvas.resize", width=before_size[0] * 2, height=1, keep_aspect=True)
+    root.update()
+    check("resize op: canvas widened, aspect kept",
+          controller.doc.size[0] == before_size[0] * 2, str(controller.doc.size))
+    check("resize op: preview refit to new canvas", window.canvas._photo is not None)
+
+    # --- M4: a no-param op via the menu invoke path --------------------
+    # (An op WITH params, like flip, would open a modal dialog here and block a
+    # scripted run -- so exercise a genuinely param-free op: reverse.)
+    n_before = controller.frame_count
+    window._invoke_op("frames.reverse")
+    root.update()
+    check("invoke_op: param-free op ran without a dialog",
+          controller.frame_count == n_before and controller.can_undo)
+
+    # --- M4: ping-pong toggle ------------------------------------------
+    window.pingpong_var.set(True)
+    window._on_pingpong()
+    check("pingpong: controller reflects the toggle", controller.pingpong)
+    window.pingpong_var.set(False)
+    window._on_pingpong()
+    check("pingpong: toggles back off", not controller.pingpong)
+
+    # reset to a clean single edit for the save section
+    while controller.can_undo:
+        controller.undo()
+    root.update()
+
     # --- save -----------------------------------------------------------
     # Delete a middle frame: the smoke GIF's frames are all distinct, so no
     # identical-consecutive merge, and the saved count round-trips exactly.

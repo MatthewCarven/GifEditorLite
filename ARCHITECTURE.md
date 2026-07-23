@@ -396,7 +396,7 @@ Measured against Pillow 12.2.0, not recalled from memory. Each of these changed 
 | **M1** | Timeline strip, playback (forward + loop + speed), scrubbing | You can watch a GIF and drag the playhead ✅ |
 | **M2** | Selection, the five frame ops, undo/redo | **"v1 lite" is complete** — the editor edits ✅ |
 | **M3** | `gif_write`, Save / Save As | Edits can leave the building ✅ (Param schema deferred again — see below) |
-| **M4** | Image-sequence IO, IO registry promotion, canvas ops, timing ops, ping-pong | Crop/resize/speed |
+| **M4** | Param schema, timing ops, canvas ops (resize/rotate/flip), ping-pong | Crop/resize/speed ✅ (image-sequence IO + crop-by-selection deferred) |
 | **M5** | Video import, WebP/APNG export | Optional deps prove the try/except registration pattern |
 
 M0–M2 is the real project; everything after is additive by construction. Export sitting at M3 is deliberate and matches "I don't care if save doesn't show up for a while" — but it does mean M0–M2 cannot produce output, so keep test GIFs handy and don't edit anything precious before M3.

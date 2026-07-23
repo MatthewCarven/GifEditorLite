@@ -4,7 +4,7 @@ import pytest
 from PIL import Image
 
 from giflite.core.model import (
-    DEFAULT_DURATION_MS,
+    MIN_DURATION_MS,
     Document,
     Frame,
     Selection,
@@ -20,13 +20,24 @@ class TestQuantiseDuration:
             (125, 120),  # floors, matching Pillow's own behaviour on save
             (33, 30),
             (20, 20),  # the floor itself survives
-            (17, DEFAULT_DURATION_MS),  # below floor -> what viewers actually do
-            (5, DEFAULT_DURATION_MS),
-            (0, DEFAULT_DURATION_MS),
+            (17, MIN_DURATION_MS),  # below floor -> clamp to floor, NOT jump to 100
+            (5, MIN_DURATION_MS),
+            (0, MIN_DURATION_MS),
         ],
     )
     def test_snaps_to_storable_values(self, given, expected):
         assert quantise_duration(given) == expected
+
+    def test_is_monotonic_never_jumps_up(self):
+        """The bug this guards: speeding a frame up (smaller ms) must never
+        yield a *larger* duration. A smaller input -> a <= output, always."""
+        prev = 0
+        for value in range(0, 500, 7):
+            out = quantise_duration(value)
+            assert out >= prev or out == MIN_DURATION_MS
+            prev = out
+        # specifically, a value just under the floor clamps down, not up
+        assert quantise_duration(12) == MIN_DURATION_MS
 
     def test_is_idempotent(self):
         for value in (0, 5, 33, 100, 125, 999):

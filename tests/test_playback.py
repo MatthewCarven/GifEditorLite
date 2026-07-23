@@ -79,6 +79,33 @@ class TestLooping:
         assert clock.tick(100) == 1
 
 
+class TestPingPong:
+    def test_bounces_off_both_ends(self):
+        clock = PlaybackClock([100, 100, 100, 100])  # 4 frames
+        clock.set_pingpong(True)
+        # forward to the end, then reflect back, then forward again
+        seen = advance(clock, 100, 8)
+        assert seen == [1, 2, 3, 2, 1, 0, 1, 2]
+
+    def test_never_finishes(self):
+        clock = PlaybackClock([100, 100, 100], loop=1)  # finite loop...
+        clock.set_pingpong(True)  # ...but pingpong ignores it
+        advance(clock, 100, 20)
+        assert not clock.finished
+
+    def test_two_frames_degenerates_to_alternating(self):
+        clock = PlaybackClock([100, 100])
+        clock.set_pingpong(True)
+        assert advance(clock, 100, 4) == [1, 0, 1, 0]
+
+    def test_toggling_resets_direction(self):
+        clock = PlaybackClock([100, 100, 100, 100])
+        clock.set_pingpong(True)
+        advance(clock, 100, 3)  # now at frame 3, about to reverse
+        clock.set_pingpong(True)  # re-toggle resets to forward
+        assert clock._direction == 1
+
+
 class TestSpeed:
     def test_double_speed_advances_twice_as_fast(self):
         clock = PlaybackClock([100, 100, 100], speed=2.0)

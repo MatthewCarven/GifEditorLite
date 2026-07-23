@@ -41,6 +41,8 @@ class PlaybackClock:
         self._accum_ms = 0.0
         self._loops_done = 0
         self._finished = False
+        self.pingpong = False
+        self._direction = 1  # +1 forward, -1 backward (only used in pingpong)
 
     # ---- configuration ---------------------------------------------------
 
@@ -56,7 +58,14 @@ class PlaybackClock:
         self._accum_ms = 0.0
         self._finished = False
         self._loops_done = 0
+        self._direction = 1
         self._index = self._clamp(self._index)
+
+    def set_pingpong(self, enabled: bool) -> None:
+        """Bounce back and forth instead of looping. Resets direction so a
+        toggle mid-play starts cleanly forward."""
+        self.pingpong = bool(enabled)
+        self._direction = 1
 
     @property
     def speed(self) -> float:
@@ -102,24 +111,43 @@ class PlaybackClock:
             return self._index
 
         self._accum_ms += dt_ms * self._speed
+        n = len(self._durations)
 
         # Guard against a pathological speed/dt producing an unbounded loop:
         # the accumulator strictly decreases each iteration because every
         # duration is >= _MIN_FRAME_MS.
         while self._accum_ms >= self._durations[self._index]:
             self._accum_ms -= self._durations[self._index]
-            nxt = self._index + 1
-            if nxt >= len(self._durations):
-                self._loops_done += 1
-                if self.loop != 0 and self._loops_done >= self.loop:
-                    self._index = len(self._durations) - 1
-                    self._accum_ms = 0.0
-                    self._finished = True
-                    break
-                nxt = 0
-            self._index = nxt
+            if self.pingpong:
+                self._index = self._step_pingpong(n)
+            else:
+                nxt = self._index + 1
+                if nxt >= n:
+                    self._loops_done += 1
+                    if self.loop != 0 and self._loops_done >= self.loop:
+                        self._index = n - 1
+                        self._accum_ms = 0.0
+                        self._finished = True
+                        break
+                    nxt = 0
+                self._index = nxt
 
         return self._index
+
+    def _step_pingpong(self, n: int) -> int:
+        """One frame's advance in bounce mode, reflecting off either end.
+
+        Pingpong plays forever (loop count is a forward-mode concept), so it
+        never sets `finished`.
+        """
+        nxt = self._index + self._direction
+        if nxt >= n:  # bounced off the end
+            self._direction = -1
+            nxt = n - 2
+        elif nxt < 0:  # bounced off the start
+            self._direction = 1
+            nxt = 1
+        return nxt
 
     # ---- internals -------------------------------------------------------
 

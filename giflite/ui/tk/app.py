@@ -19,14 +19,17 @@ from giflite.app.cache import ThumbnailCache
 from giflite.app.controller import AppController
 from giflite.core.io import open_filter, save_filter
 from giflite.core.model import Selection
-from giflite.core.ops import menu_groups
+from giflite.core.ops import get_op, menu_groups, op_params
 from giflite.ui.base import Frontend
 from giflite.ui.tk.canvas import PreviewCanvas
-from giflite.ui.tk.dialogs import ask_duplicate_count
+from giflite.ui.tk.dialogs import ask_params
 from giflite.ui.tk.timeline import Timeline
 
 APP_NAME = "GIF Editor Lite"
 EMPTY_TEXT = "No animation open\n\nCtrl+O to open a GIF"
+
+# Op id prefix -> menu title. Order here is menu order in the bar.
+OP_MENUS = (("frames", "Frames"), ("timing", "Timing"), ("canvas", "Image"))
 
 # ~60fps timer. It runs continuously; controller.tick() is a no-op while
 # paused, so there is no timer to start or stop and no start/stop race.
@@ -91,19 +94,10 @@ class MainWindow:
         self.edit_menu.add_command(label="Deselect", accelerator="Esc", command=self._clear_selection)
         menubar.add_cascade(label="Edit", menu=self.edit_menu)
 
-        self.frames_menu = tk.Menu(menubar, tearoff=False, postcommand=self._refresh_frames_menu)
-        self._frame_menu_entries: list[tuple[int, str]] = []  # (entry index, op id)
-        for op in menu_groups().get("frames", []):
-            self.frames_menu.add_command(
-                label=op.label,
-                accelerator=op.accel,
-                command=lambda oid=op.id: self.controller.run_op(oid),
-            )
-            self._frame_menu_entries.append((self.frames_menu.index("end"), op.id))
-        self.frames_menu.add_separator()
-        self.frames_menu.add_command(label="Duplicate N times...", command=self._duplicate_n)
-        self._duplicate_n_entry = self.frames_menu.index("end")
-        menubar.add_cascade(label="Frames", menu=self.frames_menu)
+        # One menu per op group, built entirely from the registry. Adding an op
+        # (even a whole new group) needs no change here beyond OP_MENUS.
+        for group_key, title in OP_MENUS:
+            self._build_op_menu(menubar, group_key, title)
 
         self.root.config(menu=menubar)
 
@@ -122,6 +116,8 @@ class MainWindow:
         self.root.bind_all("<Control-Shift-Z>", lambda _e: self.controller.redo())
         self.root.bind_all("<Control-y>", lambda _e: self.controller.redo())
         self.root.bind_all("<Control-a>", lambda _e: self._select_all())
+        # Ctrl+D is the fast path: duplicate once, no dialog. The menu item
+        # "Duplicate Frames..." opens the count dialog instead.
         self.root.bind_all("<Control-d>", lambda _e: self.controller.run_op("frames.duplicate"))
         self.root.bind_all("<Delete>", lambda _e: self.controller.run_op("frames.delete"))
         self.root.bind_all("<BackSpace>", lambda _e: self.controller.run_op("frames.delete"))
@@ -156,6 +152,12 @@ class MainWindow:
 
         self.counter = ttk.Label(bar, text="", width=16, anchor="w")
         self.counter.pack(side="left", padx=(10, 0))
+
+        self.pingpong_var = tk.BooleanVar(value=False)
+        self.pingpong_check = ttk.Checkbutton(
+            bar, text="Ping-pong", variable=self.pingpong_var, command=self._on_pingpong
+        )
+        self.pingpong_check.pack(side="left", padx=(16, 0))
 
         ttk.Label(bar, text="Speed").pack(side="right", padx=(0, 4))
         self.speed = ttk.Combobox(
@@ -239,12 +241,39 @@ class MainWindow:
     def _clear_selection(self) -> None:
         self.controller.set_selection(Selection.empty())
 
-    def _duplicate_n(self) -> None:
-        count = ask_duplicate_count(self.root)
-        if count:
-            self.controller.run_op("frames.duplicate", copies=count)
+    def _invoke_op(self, op_id: str) -> None:
+        """Run an op from a menu: collect its params via a generated dialog
+        first if it has any, otherwise run it straight."""
+        op = get_op(op_id)
+        if op is None or self.controller.doc is None:
+            return
+        if not op_params(op):
+            self.controller.run_op(op_id)
+            return
+        values = ask_params(self.root, op, self.controller.doc, self.controller.selection)
+        if values is not None:  # None == cancelled
+            self.controller.run_op(op_id, **values)
 
-    # ---- menu state ------------------------------------------------------
+    # ---- menu construction / state ---------------------------------------
+
+    def _build_op_menu(self, menubar: tk.Menu, group_key: str, title: str) -> None:
+        menu = tk.Menu(menubar, tearoff=False)
+        entries: list[tuple[int, str]] = []
+        for op in menu_groups().get(group_key, []):
+            # "..." signals a dialog; it's a UI convention, so it lives here
+            # rather than in the op's label (which feeds "Undo <label>").
+            label = op.label + ("..." if op_params(op) else "")
+            menu.add_command(label=label, accelerator=op.accel,
+                             command=lambda oid=op.id: self._invoke_op(oid))
+            entries.append((menu.index("end"), op.id))
+        menu.configure(postcommand=lambda m=menu, e=entries: self._refresh_op_menu(m, e))
+        menubar.add_cascade(label=title, menu=menu)
+
+    def _refresh_op_menu(self, menu: tk.Menu, entries: list[tuple[int, str]]) -> None:
+        for index, op_id in entries:
+            menu.entryconfigure(
+                index, state="normal" if self.controller.can_run(op_id) else "disabled"
+            )
 
     def _refresh_file_menu(self) -> None:
         has_doc = self.controller.doc is not None
@@ -263,16 +292,6 @@ class MainWindow:
         self.edit_menu.entryconfigure(3, state="normal" if has_doc else "disabled")
         self.edit_menu.entryconfigure(4, state="normal" if c.selection else "disabled")
 
-    def _refresh_frames_menu(self) -> None:
-        for entry, op_id in self._frame_menu_entries:
-            self.frames_menu.entryconfigure(
-                entry, state="normal" if self.controller.can_run(op_id) else "disabled"
-            )
-        self.frames_menu.entryconfigure(
-            self._duplicate_n_entry,
-            state="normal" if self.controller.can_run("frames.duplicate") else "disabled",
-        )
-
     def _on_space(self, _event: tk.Event) -> str:
         self.controller.toggle_play()
         return "break"  # keep space from also 'clicking' a focused button
@@ -283,6 +302,9 @@ class MainWindow:
             if text == label:
                 self.controller.set_speed(factor)
                 break
+
+    def _on_pingpong(self) -> None:
+        self.controller.set_pingpong(self.pingpong_var.get())
 
     # ---- the timer -------------------------------------------------------
 
@@ -353,12 +375,14 @@ class MainWindow:
             self.counter.configure(text="")
             self.play_button.configure(text="Play", state="disabled")
             self.speed.configure(state="disabled")
+            self.pingpong_check.configure(state="disabled")
             return
         self.play_button.configure(
             text="Pause" if self.controller.playing else "Play",
             state="normal" if self.controller.can_play else "disabled",
         )
         self.speed.configure(state="readonly")
+        self.pingpong_check.configure(state="normal" if self.controller.can_play else "disabled")
         self.counter.configure(text=f"Frame {self.controller.index + 1} of {len(doc)}")
 
     def _summary(self) -> str:

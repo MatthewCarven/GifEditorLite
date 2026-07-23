@@ -11,6 +11,7 @@ from dataclasses import replace
 
 from giflite.core.model import Document, Frame, Selection
 from giflite.core.ops.registry import OpResult, register_op
+from giflite.core.params import IntParam
 
 
 @register_op
@@ -20,6 +21,7 @@ class DeleteFrames:
     accel = "Delete"
     needs_selection = True
     in_menu = True
+    params = ()
 
     def apply(self, doc: Document, sel: Selection, **_) -> OpResult:
         kept = tuple(f for i, f in enumerate(doc.frames) if i not in sel.indices)
@@ -40,6 +42,9 @@ class DuplicateFrames:
     accel = "Ctrl+D"
     needs_selection = True
     in_menu = True
+    # Now that the schema exists, the copy count is a declared param -- this
+    # retires the hand-written duplicate dialog from M2.
+    params = (IntParam("copies", "Copies", default=1, min=1, max=999),)
 
     def apply(self, doc: Document, sel: Selection, copies: int = 1, **_) -> OpResult:
         copies = max(1, int(copies))
@@ -64,6 +69,7 @@ class MoveFrames:
     accel = None
     needs_selection = True
     in_menu = False  # driven by drag-to-reorder, not a menu command
+    params = ()
 
     def apply(self, doc: Document, sel: Selection, to: int = 0, **_) -> OpResult:
         """Lift the selected frames out and reinsert them as one block before
@@ -90,6 +96,7 @@ class ReverseFrames:
     accel = None
     needs_selection = False  # no selection -> reverse the whole animation
     in_menu = True
+    params = ()
 
     def apply(self, doc: Document, sel: Selection, **_) -> OpResult:
         if len(sel.indices) >= 2:
@@ -114,6 +121,7 @@ class TrimToSelection:
     accel = None
     needs_selection = True
     in_menu = True
+    params = ()
 
     def apply(self, doc: Document, sel: Selection, **_) -> OpResult:
         """Keep only the selected frames, discard the rest."""

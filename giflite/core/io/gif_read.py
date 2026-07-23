@@ -21,6 +21,7 @@ from PIL import Image, ImageSequence
 from giflite.core.model import (
     BYTES_PER_PIXEL,
     DEFAULT_DURATION_MS,
+    MIN_DURATION_MS,
     Document,
     Frame,
     quantise_duration,
@@ -79,12 +80,14 @@ def read_gif(path: Path) -> Document:
                 canvas.paste(image, (0, 0))
                 image = canvas
 
+            # An unknown (0) or sub-threshold delay is what browsers bump to
+            # ~100ms, so mirror that here -- this is the reader's clamp, kept
+            # out of quantise_duration so editing math stays monotonic.
             raw_duration = raw.info.get("duration") or 0
-            duration = (
-                quantise_duration(raw_duration)
-                if raw_duration
-                else DEFAULT_DURATION_MS
-            )
+            if raw_duration < MIN_DURATION_MS:
+                duration = DEFAULT_DURATION_MS
+            else:
+                duration = quantise_duration(raw_duration)
             frames.append(Frame.new(image, duration))
 
     document = Document(

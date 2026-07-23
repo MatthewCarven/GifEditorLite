@@ -22,6 +22,7 @@ from dataclasses import dataclass
 from typing import Protocol, runtime_checkable
 
 from giflite.core.model import Document, Selection
+from giflite.core.params import Param
 
 
 @dataclass(frozen=True, slots=True)
@@ -37,8 +38,27 @@ class Operation(Protocol):
     accel: str | None  # "Ctrl+D" -- frontends translate to their own syntax
     needs_selection: bool  # greys the menu item out when the selection is empty
     in_menu: bool  # False for gesture-only ops like move
+    params: tuple[Param, ...]  # inputs the UI collects before running; () = none
 
     def apply(self, doc: Document, sel: Selection, **params) -> OpResult: ...
+
+
+def op_params(op: "Operation") -> tuple[Param, ...]:
+    """An op's params, tolerant of ops that predate the attribute."""
+    return getattr(op, "params", ())
+
+
+def op_defaults(op: "Operation", doc: Document, sel: Selection) -> dict:
+    """Initial values for an op's dialog.
+
+    An op may expose `default_params(doc, sel)` to seed the dialog from the
+    current document (e.g. Resize pre-filling the current size); otherwise the
+    static `Param.default`s are used.
+    """
+    dynamic = getattr(op, "default_params", None)
+    if dynamic is not None:
+        return dynamic(doc, sel)
+    return {p.name: p.default for p in op_params(op)}
 
 
 _OPS: dict[str, Operation] = {}
