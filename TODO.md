@@ -31,20 +31,28 @@
 - [x] `ui/tk/timeline.py` — single Canvas, virtualised thumbnails, `PhotoImage` strong refs, click-to-seek, auto-scroll
 - [x] `app/cache.py` — PIL-level thumbnails only, keyed by frame uid, plain dict, `retain()` pruning
 - [x] Transport bar: play/pause, frame counter, speed dropdown; spacebar + arrow keys + Home/End
-- [x] 42 new tests (clock, controller playback, cache); Tk smoke now 28 checks, all green on Xvfb
+- [x] Preview composites over a checkerboard + border so canvas bounds and transparency are visible
+- [x] 42 new tests (clock, controller playback, cache); Tk smoke now 29 checks, all green on Xvfb
 
 ## M2 — editing (v1 complete)
 
-- [ ] `core/ops/registry.py` — `@register_op`, menu grouping by id prefix, `accel` per op
-- [ ] `core/ops/frames.py` — delete, duplicate, move, reverse, trim; each returns `OpResult`
-- [ ] `core/history.py` — snapshot `(doc, selection, index, label)`, limit 64, saved-marker for dirty
-- [ ] `can_undo` / `undo_label` / `can_run(op_id)` on the controller so menus don't re-derive state
+**Slice 1 — editing core (done, committed as its own checkpoint):**
+
+- [x] `core/ops/registry.py` — `@register_op`, `menu_groups()` by id prefix, `accel` per op
+- [x] `core/ops/frames.py` — delete, duplicate, move, reverse, trim; each returns `OpResult` + post-op selection
+- [x] `core/history.py` — snapshot `(doc, selection, index, label)`, limit 64, saved-marker for dirty, `amend_current` for pre-op selection
+- [x] `run_op` / `undo` / `redo` / `can_undo` / `undo_label` / `can_run(op_id)` / `dirty` on the controller
+- [x] Immutability test: source images byte-identical after every op (guards risk 3)
+- [x] Event-ordering: one `doc_changed` per op/undo/redo, verified via fake frontend
+- [x] 50 core tests + 14 controller-editing tests, boundary grep still clean
+
+**Slice 2 — editing UI (next):**
+
 - [ ] `ui/tk/dialogs.py` — hardcoded duplicate-count dialog (no param schema yet)
 - [ ] Selection UI: click, shift-range, ctrl-toggle
 - [ ] Drag-to-reorder following the gesture rule: local preview, one op on release
-- [ ] `tests/fake_frontend.py` + event-ordering assertions
-- [ ] Immutability test: source images byte-identical after every op
-- [ ] Boundary grep (incl. `ImageTk`) wired into pre-commit or pytest (§11.4)
+- [ ] Edit + Frames menus built from the registry, live enable/disable, keyboard shortcuts
+- [ ] Extend Tk smoke: select → delete → duplicate → undo → redo, screenshot under Xvfb
 
 ## Later
 

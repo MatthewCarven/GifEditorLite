@@ -22,3 +22,8 @@ scratch/
 
 # Commit messages I leave for you when the sandbox can't commit itself
 COMMIT_MSG.txt
+
+# Sample GIFs dropped in the project root (Matthew's test assets). Ignored at
+# root so they aren't committed by accident; if we want them tracked as
+# fixtures they move to tests/fixtures/, which is NOT ignored.
+/*.gif

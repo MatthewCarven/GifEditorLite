@@ -25,9 +25,11 @@ from PIL import Image
 
 from giflite.app import events as ev
 from giflite.app.events import EventBus
+from giflite.core.history import History, Snapshot
 from giflite.core.io import reader_for
 from giflite.core.io.gif_read import probe_gif
 from giflite.core.model import Document, Selection
+from giflite.core.ops import get_op  # importing this also registers the ops
 from giflite.core.playback import MAX_TICK_MS, PlaybackClock
 
 # Above this, a load is worth mentioning before it happens. 640x480x120 frames
@@ -49,6 +51,7 @@ class AppController:
         self._path: Path | None = None
         self._clock = PlaybackClock()
         self._playing = False
+        self._history = History()
 
     # ---- readable state --------------------------------------------------
 
@@ -81,7 +84,8 @@ class AppController:
 
     @property
     def dirty(self) -> bool:
-        return False  # M2: derived from History's saved-marker
+        # No document -> nothing to be dirty about, regardless of stack state.
+        return self._doc is not None and self._history.dirty
 
     @property
     def frame_count(self) -> int:
@@ -96,14 +100,27 @@ class AppController:
 
     @property
     def can_undo(self) -> bool:
-        return False  # M2
+        return self._history.can_undo
 
     @property
     def can_redo(self) -> bool:
-        return False  # M2
+        return self._history.can_redo
+
+    @property
+    def undo_label(self) -> str | None:
+        return self._history.undo_label
+
+    @property
+    def redo_label(self) -> str | None:
+        return self._history.redo_label
 
     def can_run(self, op_id: str) -> bool:
-        return False  # M2
+        """Whether an op could run right now -- drives menu enable/disable so
+        each frontend doesn't re-derive it from needs_selection + selection."""
+        op = get_op(op_id)
+        if op is None or self._doc is None:
+            return False
+        return not (op.needs_selection and not self._selection)
 
     # ---- documents -------------------------------------------------------
 
@@ -147,6 +164,8 @@ class AppController:
         self._index = 0
         self._selection = Selection.single(0)
         self._clock.loop = doc.loop
+        # A freshly opened file is the baseline saved state.
+        self._history.reset(Snapshot(doc, self._selection, 0, "Open"))
         self._emit_doc_changed("open")
         self.events.emit(ev.TITLE_CHANGED, path=path, dirty=self.dirty)
         # No summary message here on purpose: "12 frames, 80x40, 1.15s" is a
@@ -162,8 +181,73 @@ class AppController:
         self._path = None
         self._index = 0
         self._selection = Selection.empty()
+        self._history.clear()
         self._emit_doc_changed("close")
         self.events.emit(ev.TITLE_CHANGED, path=None, dirty=False)
+
+    # ---- editing ---------------------------------------------------------
+
+    def run_op(self, op_id: str, **params) -> None:
+        """Apply an operation, record it for undo, and announce the change.
+
+        Failures and refusals go to STATUS/ERROR rather than raising: running
+        an op that can't apply (nothing selected, would empty the document) is
+        a normal user action, not an exception.
+        """
+        if self._doc is None:
+            return
+        op = get_op(op_id)
+        if op is None:
+            self.events.emit(ev.ERROR, exception=ValueError(f"Unknown operation {op_id!r}"), context="")
+            return
+        if op.needs_selection and not self._selection:
+            self.events.emit(ev.STATUS, message="Select one or more frames first")
+            return
+
+        try:
+            result = op.apply(self._doc, self._selection, **params)
+        except Exception as exc:  # noqa: BLE001 -- surfaced to the user
+            self.events.emit(ev.ERROR, exception=exc, context=op.label)
+            return
+
+        if result.doc is self._doc:
+            # The op declined (e.g. delete-everything). Say why, change nothing.
+            self.events.emit(ev.STATUS, message=f"{op.label}: nothing to do")
+            return
+        try:
+            result.doc.validate()
+        except ValueError as exc:
+            self.events.emit(ev.STATUS, message=f"{op.label}: {exc}")
+            return
+
+        self._stop_playback()
+        # Capture where the user was (selection + playhead) so undo returns
+        # here, not to a selection frozen at the previous op.
+        self._history.amend_current(self._selection, self._index)
+        self._doc = result.doc
+        self._selection = result.selection
+        self._index = self._clamp(result.selection.first if result.selection else self._index)
+        self._history.push(Snapshot(self._doc, self._selection, self._index, op.label))
+        self._emit_doc_changed(f"op:{op_id}")
+        self.events.emit(ev.TITLE_CHANGED, path=self._path, dirty=self.dirty)
+
+    def undo(self) -> None:
+        snap = self._history.undo()
+        if snap is not None:
+            self._restore(snap, "undo")
+
+    def redo(self) -> None:
+        snap = self._history.redo()
+        if snap is not None:
+            self._restore(snap, "redo")
+
+    def _restore(self, snap: Snapshot, reason: str) -> None:
+        self._stop_playback()
+        self._doc = snap.doc
+        self._selection = snap.selection
+        self._index = snap.index
+        self._emit_doc_changed(reason)
+        self.events.emit(ev.TITLE_CHANGED, path=self._path, dirty=self.dirty)
 
     # ---- playback --------------------------------------------------------
 

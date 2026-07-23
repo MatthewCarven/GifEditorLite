@@ -55,9 +55,12 @@ def main() -> int:
     root.update()
 
     check("open: 8 frames loaded", controller.frame_count == 8, str(controller.frame_count))
-    check("open: canvas shows one image",
-          len(window.canvas.find_all()) == 1
-          and window.canvas.type(window.canvas.find_all()[0]) == "image")
+    canvas_images = [i for i in window.canvas.find_all()
+                     if window.canvas.type(i) == "image"]
+    check("open: canvas shows exactly one image", len(canvas_images) == 1,
+          f"{len(canvas_images)} image items")
+    check("open: canvas boundary drawn",
+          any(window.canvas.type(i) == "rectangle" for i in window.canvas.find_all()))
     check("open: PhotoImage retained (blank-canvas bug)", window.canvas._photo is not None)
     check("open: image scaled up to fit",
           window.canvas._photo is not None and window.canvas._photo.width() > 160,

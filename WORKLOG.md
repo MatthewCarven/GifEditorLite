@@ -139,8 +139,54 @@ the arrow keys, and change speed. Screenshot verified under Xvfb.
 - Same as before: I write files, you commit. The sandbox still can't hold git locks.
 - Please run it on Windows and actually play a GIF — Xvfb proves Linux/Tk 8.6, not your machine.
 
-**Next**
+**"Aspect ratio bug" that wasn't — investigated and resolved**
 
-- Risk 2 still open, still not blocking: an export concern that first bites at M3.
-- M2 is the big one: selection, the five frame ops, undo/redo. This is where "v1 lite" is actually complete. It's also the first milestone that touches history and the immutability invariant (risk 3) in anger, so the byte-identity test earns its keep.
+Matthew tried a real GIF (`claude_advance_1x.gif`) and it looked like a small square sprite, not the wide banner he expected — read as a scaling bug. Chased it properly instead of guessing:
+
+1. Tested the reader on synthetic 2:1 and logical-screen-mismatch GIFs → aspect preserved perfectly.
+2. Tested the `_fit` math in isolation → 2:1 in, 2:1 out. Correct.
+3. Rendered a synthetic 2:1 GIF through the real Tk window under Xvfb → 200×100 → 884×442, correct.
+4. Matthew dropped his three actual GIFs in the folder. Read them directly: `claude_advance` is genuinely **120×26** (4.6:1), 60 frames; the formation ones are 304×90 and 276×90. Reader reports all three exactly right.
+5. Rendered the *actual* 120×26 file under Xvfb → 884×191, aspect 4.63. Provably correct — and it looked exactly like Matthew's Windows screenshot: a lone sprite, apparently square, floating in dark space.
+
+**Root cause: not a bug.** The GIF is a wide, short canvas with a small sprite centred in it and transparent pixels filling the rest of the width. Scaled correctly, the transparent margins rendered against the dark background and were invisible, so only the (roughly square) sprite showed. Nothing scaled wrong; the canvas boundary was just undrawable against the letterbox. Matthew's own read — "it's display handling, not scaling" — was right. (His screen-aspect / DPI hunch wasn't the cause: `_fit` uses the canvas widget's pixel size, and DPI scales uniformly rather than distorting aspect.)
+
+**Fix (folded into M1):** the preview now composites each frame over a checkerboard sized to the *fitted image*, with a thin border. Transparent pixels reveal the checker; the checker's extent plus the border show exactly where the canvas is. Standard image-editor behaviour, and it makes a wide-but-sparse GIF legible instantly. Verified against the real file under Xvfb — the 120×26 canvas now reads as a wide checkered strip. Smoke test +1 check (canvas boundary drawn), 29 total.
+
+Lesson worth keeping: "looks wrong" from a screenshot needed the actual file to resolve. Three layers of correct code can still produce a confusing picture, and the fix was making the truth visible, not changing the maths.
+
+**Note:** Matthew's three GIFs are sitting in the project root. They're good real-world fixtures — if we want them in the repo, `tests/fixtures/` is the place; otherwise add `*.gif` to `.gitignore`. Left as-is for now; his call.
+
+---
+
+## 2026-07-23 — M2 slice 1: editing core
+
+Matthew asked to slice M2 rather than land it in one go, so this is the core:
+the editing engine and undo, fully headless and tested. No UI yet — that's
+slice 2.
+
+**Shipped**
+
+- `core/ops/registry.py` — `@register_op`, `Operation` protocol, `OpResult`, `menu_groups()`.
+- `core/ops/frames.py` — the five ops: delete, duplicate, move, reverse, trim. Each pure, each returns the post-op selection. None touch pixels (duplicate shares the source image + uid, so copies hit the caches free).
+- `core/history.py` — `Snapshot(doc, selection, index, label)` stack, limit 64, saved-marker dirty, `amend_current`.
+- Controller: `run_op`/`undo`/`redo`, `can_undo`/`can_redo`/`undo_label`/`redo_label`/`can_run`, `dirty` from history. Refuses ops with no selection and refuses to empty the document, both via STATUS not exceptions.
+- 64 new tests (ops, history, immutability, controller editing). 164 total, all green.
+
+**Two things worth remembering**
+
+- **`amend_current` — undo restoring the right selection.** First cut had undo restore the selection frozen at the *previous* op, not where the user was when they invoked the current one. A test caught it (undo after seek+select+duplicate came back with the baseline selection). Fix: snapshots for selection/playhead are amended in place at op time, since scrubbing and selecting between ops aren't undoable steps but *are* the view you should return to. Clean once framed that way.
+- **The immutability test earned its keep immediately.** Parametrised over every op × a real selection, asserting source-frame `tobytes()` is unchanged. This is the guard for risk 3 (a frozen dataclass doesn't stop an in-place `paste`). It also has a meta-test that fails if someone adds an op without covering it here.
+
+**Design note:** `run_op(op_id, **params)` passes params through to `apply`; duplicate reads `copies`. No `Param` schema yet — deferred to M3 as planned, where writer options make it plural. Duplicate's count will come via a hardcoded dialog in slice 2.
+
+**Git housekeeping:** the three sample GIFs Matthew dropped are now `/*.gif`-ignored at the root so `git add -A` won't sweep them into history. If we want them as fixtures they move to `tests/fixtures/` (not ignored). Also folded the still-uncommitted checkerboard canvas fix into this checkpoint.
+
+**Next — M2 slice 2 (UI):**
+
+- Selection gestures (click / shift-range / ctrl-toggle) and drag-to-reorder following the gesture rule (local preview, one `move` op on release).
+- Edit + Frames menus from the registry with live enable/disable; keyboard shortcuts (Del, Ctrl+D, Ctrl+Z, Ctrl+Shift+Z, Ctrl+A).
+- Duplicate-count dialog in `ui/tk/dialogs.py`.
+- Extend the Xvfb smoke test with a full edit+undo cycle and a screenshot.
+- Risk 2 still open, still not blocking (first bites at M3).
 - Reminder: the `/tmp/tkroot` tkinter extraction and Xvfb don't survive a reboot — re-extract with `apt-get download python3-tk tk8.6-blt2.5 blt libtk8.6`, `dpkg-deb -x` into `/tmp/tkroot`, point `PYTHONPATH`/`LD_LIBRARY_PATH` at it, and start Xvfb in the *same* bash call as the smoke test.
