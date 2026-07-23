@@ -394,7 +394,7 @@ Measured against Pillow 12.2.0, not recalled from memory. Each of these changed 
 |---|---|---|
 | **M0** | Package skeleton, `Frame`/`Document`, `gif_read`, controller, Tk window | `python -m giflite some.gif` shows frame 0; bare `python -m giflite` shows an empty state ✅ |
 | **M1** | Timeline strip, playback (forward + loop + speed), scrubbing | You can watch a GIF and drag the playhead ✅ |
-| **M2** | Selection, the five frame ops, undo/redo | **"v1 lite" is complete** — the editor edits |
+| **M2** | Selection, the five frame ops, undo/redo | **"v1 lite" is complete** — the editor edits ✅ |
 | **M3** | `gif_write`, Save / Save As, `Param` schema + generated option dialogs | Edits can leave the building |
 | **M4** | Image-sequence IO, IO registry promotion, canvas ops, timing ops, ping-pong | Crop/resize/speed |
 | **M5** | Video import, WebP/APNG export | Optional deps prove the try/except registration pattern |

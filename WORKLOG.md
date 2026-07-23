@@ -189,4 +189,35 @@ slice 2.
 - Duplicate-count dialog in `ui/tk/dialogs.py`.
 - Extend the Xvfb smoke test with a full edit+undo cycle and a screenshot.
 - Risk 2 still open, still not blocking (first bites at M3).
+
+---
+
+## 2026-07-23 — M2 slice 2: editing UI. **v1 lite complete.**
+
+The editor edits. Select frames (click / shift-range / ctrl-toggle / Ctrl+A),
+delete, duplicate, reverse, trim, drag to reorder, and Ctrl+Z it all back.
+Screenshot verified under Xvfb — menu bar now File / Edit / Frames, a shift-range
+of frames 3-5 selected in blue with frame 4 as the playhead.
+
+**Shipped**
+
+- `ui/tk/dialogs.py` — the one hand-written dialog (duplicate count), via `simpledialog`. No `Param` schema; still deferred to M3.
+- `ui/tk/timeline.py` — full mouse handling: plain/shift/ctrl click via most-specific binding dispatch, and drag-to-reorder that draws its own insertion marker and commits one `move` op on release (the gesture rule, honoured). Click-on-already-selected defers collapse-to-single until release so a drag moves the whole multi-selection.
+- `ui/tk/app.py` — Edit + Frames menus built from `menu_groups()`, enable/disable refreshed on open via `postcommand` (so the frontend never tracks menu state per event — it asks `can_run`/`can_undo` at the moment the menu appears). Keyboard shortcuts for undo/redo/delete/duplicate/select-all/deselect. Timeline keeps its scroll position across edits, resets only on open/close.
+- Tk smoke test: 50 checks (was 29), including the real drag path — fake events through `_on_press`/`_on_motion`/`_on_release`, verifying `_index_at`/`_gap_at` and that the drag lands one undoable `move`.
+
+**Design notes worth keeping**
+
+- **Menu state via `postcommand`, not event tracking.** Tk menus refresh themselves each time they open, so the frontend reads `can_undo`/`undo_label`/`can_run` at that instant rather than maintaining shadow state on every doc/selection change. Fewer moving parts, and it leans on exactly the read-only controller members the seam was designed to expose.
+- **The gesture rule held.** Drag-to-reorder needed zero new core plumbing — no provisional-transaction API. The preview is a yellow line on the timeline canvas; the commit is one `frames.move`. Exactly what §11.3 promised, and a good sign the seam is real.
+- **Modifier dispatch is free in Tk.** Binding `<Button-1>`, `<Shift-Button-1>`, `<Control-Button-1>` separately means the toolkit routes each to the right handler; no manual `event.state` bit-testing.
+
+**Verification note:** the smoke test drives selection through the app handlers *and* the drag through the timeline's own mouse path, so both the app→controller wiring and the timeline's gesture geometry are covered. What's still only smoke-tested (not unit-tested) is pixel-level rendering — by design, per §16.
+
+**Handover**
+
+- M2 slices 1+2 are both on disk. Slice 1 has its own `COMMIT_MSG` if not yet committed; this slice's message follows. If slice 1 is already committed, `git add -A; git commit -F COMMIT_MSG.txt` lands slice 2.
+- Please drive it on Windows: shift-click a range, drag a frame, mash Ctrl+Z. The formation GIFs (92 frames) are the real test of timeline feel.
+
+**Next — M3 (save):** `gif_write` + Save/Save As, and the `Param` schema finally earns its place for export options (dither, loop, optimise). Risk 2 (identical-frame merging on save) stops being hypothetical here — decision time on accept / disable-optimiser / project-file. Risk 4 (palette quality) too.
 - Reminder: the `/tmp/tkroot` tkinter extraction and Xvfb don't survive a reboot — re-extract with `apt-get download python3-tk tk8.6-blt2.5 blt libtk8.6`, `dpkg-deb -x` into `/tmp/tkroot`, point `PYTHONPATH`/`LD_LIBRARY_PATH` at it, and start Xvfb in the *same* bash call as the smoke test.

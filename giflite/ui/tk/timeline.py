@@ -4,9 +4,14 @@ Virtualised -- only the thumbnails currently in view get canvas items, so a
 200-frame GIF costs the same to draw as a 20-frame one (ARCHITECTURE.md risk
 4). It is emphatically not 200 Label widgets.
 
-A dumb view: the app pushes document, index and selection in, and a click
-calls back out with the picked index. It holds no playback or document state
-of its own -- that all lives behind the controller.
+A dumb view: the app pushes document, index and selection in, and gestures call
+back out. It holds no playback or document state of its own -- that lives
+behind the controller.
+
+The gesture rule (ARCHITECTURE.md 11.3): drag-to-reorder renders its own
+insertion marker locally and commits exactly one `move` op on release. There is
+no provisional-transaction plumbing in the core; the preview is a line drawn on
+this canvas and nothing more.
 
 Cache split (ARCHITECTURE.md risk 6): PIL thumbnails come from the app-layer
 ThumbnailCache; the PhotoImages built from them are held here, in the toolkit
@@ -25,15 +30,17 @@ from giflite.app.cache import ThumbnailCache
 from giflite.core.model import Document, Selection
 
 BACKGROUND = "#1b1b1e"
-SLOT_BG = "#2c2c31"
+SELECTED_BG = "#3a4a63"
+SELECTED_OUTLINE = "#4a9eff"
 NUMBER_FG = "#8b8b93"
 CURRENT_BORDER = "#4a9eff"
-SELECTED_BG = "#3a3a44"
+DROP_MARKER = "#f0c040"
 
 THUMB_H = 56
 GAP = 6
 VPAD = 8
 NUMBER_H = 14
+DRAG_THRESHOLD = 5  # px before a press becomes a drag rather than a click
 
 
 class Timeline(tk.Frame):
@@ -42,10 +49,16 @@ class Timeline(tk.Frame):
         master: tk.Misc,
         cache: ThumbnailCache,
         on_pick: Callable[[int], None],
+        on_extend: Callable[[int], None],
+        on_toggle: Callable[[int], None],
+        on_reorder: Callable[[int], None],
     ) -> None:
         super().__init__(master, background=BACKGROUND)
         self._cache = cache
         self._on_pick = on_pick
+        self._on_extend = on_extend
+        self._on_toggle = on_toggle
+        self._on_reorder = on_reorder
 
         self._doc: Document | None = None
         self._index = 0
@@ -53,6 +66,13 @@ class Timeline(tk.Frame):
         self._photos: dict[int, ImageTk.PhotoImage] = {}
         self._thumb_w = 0
         self._slot_w = 0
+
+        # drag state
+        self._press_index: int | None = None
+        self._press_x = 0.0
+        self._dragging = False
+        self._drop_gap: int | None = None
+        self._pending_collapse: int | None = None
 
         row_h = NUMBER_H + THUMB_H + 2 * VPAD
         self.canvas = tk.Canvas(
@@ -66,8 +86,13 @@ class Timeline(tk.Frame):
         self.scroll.pack(side="bottom", fill="x")
 
         self.canvas.bind("<Configure>", lambda _e: self._redraw())
-        self.canvas.bind("<Button-1>", self._on_click)
-        # Horizontal strip, so both plain and shifted wheel scroll sideways.
+        # Plain vs modified clicks dispatch to the most specific binding, so
+        # <Button-1> only fires with no modifier held.
+        self.canvas.bind("<Button-1>", self._on_press)
+        self.canvas.bind("<Shift-Button-1>", self._on_shift_press)
+        self.canvas.bind("<Control-Button-1>", self._on_ctrl_press)
+        self.canvas.bind("<B1-Motion>", self._on_motion)
+        self.canvas.bind("<ButtonRelease-1>", self._on_release)
         self.canvas.bind("<MouseWheel>", self._on_wheel)
         self.canvas.bind("<Shift-MouseWheel>", self._on_wheel)
         self.canvas.bind("<Button-4>", lambda _e: self._scroll_units(-3))
@@ -75,7 +100,7 @@ class Timeline(tk.Frame):
 
     # ---- state in --------------------------------------------------------
 
-    def set_document(self, doc: Document | None) -> None:
+    def set_document(self, doc: Document | None, reset_view: bool = True) -> None:
         self._doc = doc
         self._photos.clear()
         if doc is not None:
@@ -83,8 +108,11 @@ class Timeline(tk.Frame):
             self._slot_w = self._thumb_w + GAP
         else:
             self._thumb_w = self._slot_w = 0
-        self.canvas.xview_moveto(0.0)
         self._update_scrollregion()
+        if reset_view:
+            # A fresh document starts at the beginning; an in-place edit keeps
+            # the user where they were scrolled to.
+            self.canvas.xview_moveto(0.0)
         self._redraw()
 
     def set_index(self, index: int) -> None:
@@ -115,11 +143,22 @@ class Timeline(tk.Frame):
             return range(0)
         left = self.canvas.canvasx(0)
         right = self.canvas.canvasx(width)
-        # One slot of margin each side so a partially-scrolled thumbnail is
-        # drawn rather than popping in at the edge.
         first = max(0, int(left // self._slot_w) - 1)
         last = min(self._count - 1, int(right // self._slot_w) + 1)
         return range(first, last + 1)
+
+    def _index_at(self, canvas_x: float) -> int | None:
+        if self._slot_w == 0:
+            return None
+        i = int((canvas_x - GAP) // self._slot_w)
+        return i if 0 <= i < self._count else None
+
+    def _gap_at(self, canvas_x: float) -> int:
+        """Nearest insertion boundary, 0..count (count == after the last frame)."""
+        if self._slot_w == 0:
+            return 0
+        gap = round((canvas_x - GAP) / self._slot_w)
+        return max(0, min(gap, self._count))
 
     # ---- drawing ---------------------------------------------------------
 
@@ -131,6 +170,8 @@ class Timeline(tk.Frame):
         for i in self._visible_indices():
             x = GAP + i * self._slot_w
             self._draw_slot(i, x, top)
+        if self._dragging and self._drop_gap is not None:
+            self._draw_drop_marker(self._drop_gap, top)
 
     def _draw_slot(self, i: int, x: int, top: int) -> None:
         is_current = i == self._index
@@ -139,7 +180,7 @@ class Timeline(tk.Frame):
         if is_selected:
             self.canvas.create_rectangle(
                 x - 2, top - 2, x + self._thumb_w + 2, top + THUMB_H + 2,
-                fill=SELECTED_BG, outline="",
+                fill=SELECTED_BG, outline=SELECTED_OUTLINE, width=1,
             )
 
         photo = self._photo_for(i)
@@ -159,6 +200,12 @@ class Timeline(tk.Frame):
             font=("TkDefaultFont", 8),
         )
 
+    def _draw_drop_marker(self, gap: int, top: int) -> None:
+        x = GAP + gap * self._slot_w - GAP // 2
+        self.canvas.create_line(
+            x, top - 4, x, top + THUMB_H + 4, fill=DROP_MARKER, width=3
+        )
+
     def _photo_for(self, index: int) -> ImageTk.PhotoImage:
         frame = self._doc[index]
         photo = self._photos.get(frame.image_uid)
@@ -169,13 +216,58 @@ class Timeline(tk.Frame):
 
     # ---- interaction -----------------------------------------------------
 
-    def _on_click(self, event: tk.Event) -> None:
-        if self._doc is None or self._slot_w == 0:
+    def _on_press(self, event: tk.Event) -> None:
+        i = self._index_at(self.canvas.canvasx(event.x))
+        self._dragging = False
+        self._drop_gap = None
+        if i is None:
+            self._press_index = None
+            self._pending_collapse = None
+            return
+        self._press_index = i
+        self._press_x = self.canvas.canvasx(event.x)
+        if i in self._selection:
+            # Pressing an already-selected frame might be the start of a drag
+            # of the whole selection, so defer collapsing to a single until we
+            # know it was a plain click (handled on release).
+            self._pending_collapse = i
+        else:
+            self._pending_collapse = None
+            self._on_pick(i)
+
+    def _on_shift_press(self, event: tk.Event) -> None:
+        i = self._index_at(self.canvas.canvasx(event.x))
+        self._press_index = None  # modified clicks don't start drags
+        if i is not None:
+            self._on_extend(i)
+
+    def _on_ctrl_press(self, event: tk.Event) -> None:
+        i = self._index_at(self.canvas.canvasx(event.x))
+        self._press_index = None
+        if i is not None:
+            self._on_toggle(i)
+
+    def _on_motion(self, event: tk.Event) -> None:
+        if self._press_index is None:
             return
         x = self.canvas.canvasx(event.x)
-        index = int((x - GAP) // self._slot_w)
-        if 0 <= index < self._count:
-            self._on_pick(index)
+        if not self._dragging and abs(x - self._press_x) < DRAG_THRESHOLD:
+            return
+        self._dragging = True
+        self._pending_collapse = None  # it's a drag, not a click
+        self._drop_gap = self._gap_at(x)
+        self._redraw()
+
+    def _on_release(self, _event: tk.Event) -> None:
+        if self._dragging and self._drop_gap is not None:
+            self._on_reorder(self._drop_gap)
+        elif self._pending_collapse is not None:
+            # A plain click on an already-selected frame collapses to just it.
+            self._on_pick(self._pending_collapse)
+        self._press_index = None
+        self._dragging = False
+        self._drop_gap = None
+        self._pending_collapse = None
 
     def _on_xscroll(self, lo: str, hi: str) -> None:
         self.scroll.set(lo, hi)

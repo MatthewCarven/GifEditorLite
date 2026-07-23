@@ -3,16 +3,24 @@
 A small, modular GIF editor in Python. Tkinter frontend, Pillow for pixels,
 nothing else.
 
-Status: **M1** — opens a GIF, plays it back, and lets you scrub a thumbnail
-timeline. Editing (delete/duplicate/reorder frames) is M2; saving is M3. See
-[TODO.md](TODO.md) for what's next and [ARCHITECTURE.md](ARCHITECTURE.md) for
-why it's shaped this way.
+Status: **M2 — v1 lite is complete.** Opens a GIF, plays it back, and edits it:
+select frames, delete, duplicate, reorder, reverse, trim, with undo/redo.
+Saving is M3. See [TODO.md](TODO.md) for what's next and
+[ARCHITECTURE.md](ARCHITECTURE.md) for why it's shaped this way.
 
 ## Use
 
-Open a GIF, then: **Space** play/pause, **←/→** step a frame, **Home/End**
-jump to the ends, click a thumbnail to scrub there, and pick a playback speed
-from the dropdown.
+**Playback:** Space play/pause, ←/→ step a frame, Home/End jump to the ends,
+click a thumbnail to scrub, speed from the dropdown.
+
+**Selecting frames:** click to select one, Shift-click to extend a range,
+Ctrl-click to toggle one, Ctrl+A to select all, Esc to deselect.
+
+**Editing** (Frames menu): Delete (Del), Duplicate (Ctrl+D), Reverse, Trim to
+Selection, and drag a frame along the timeline to reorder. Ctrl+Z / Ctrl+Shift+Z
+undo and redo everything.
+
+Nothing saves yet — that's M3 — so edits live only in the session for now.
 
 ## Run
 

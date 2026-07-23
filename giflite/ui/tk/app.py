@@ -18,8 +18,11 @@ from giflite.app import events as ev
 from giflite.app.cache import ThumbnailCache
 from giflite.app.controller import AppController
 from giflite.core.io import open_filter
+from giflite.core.model import Selection
+from giflite.core.ops import menu_groups
 from giflite.ui.base import Frontend
 from giflite.ui.tk.canvas import PreviewCanvas
+from giflite.ui.tk.dialogs import ask_duplicate_count
 from giflite.ui.tk.timeline import Timeline
 
 APP_NAME = "GIF Editor Lite"
@@ -66,12 +69,39 @@ class MainWindow:
 
     def _build_menu(self) -> None:
         menubar = tk.Menu(self.root)
+
         file_menu = tk.Menu(menubar, tearoff=False)
         file_menu.add_command(label="Open...", accelerator="Ctrl+O", command=self.open_file)
         file_menu.add_command(label="Close", accelerator="Ctrl+W", command=self.controller.close)
         file_menu.add_separator()
         file_menu.add_command(label="Exit", command=self.root.destroy)
         menubar.add_cascade(label="File", menu=file_menu)
+
+        # Edit and Frames refresh their own enable/disable state each time they
+        # open (postcommand), so the frontend never tracks it per event -- it
+        # just asks the controller at the moment the menu appears.
+        self.edit_menu = tk.Menu(menubar, tearoff=False, postcommand=self._refresh_edit_menu)
+        self.edit_menu.add_command(label="Undo", accelerator="Ctrl+Z", command=self.controller.undo)
+        self.edit_menu.add_command(label="Redo", accelerator="Ctrl+Shift+Z", command=self.controller.redo)
+        self.edit_menu.add_separator()
+        self.edit_menu.add_command(label="Select All", accelerator="Ctrl+A", command=self._select_all)
+        self.edit_menu.add_command(label="Deselect", accelerator="Esc", command=self._clear_selection)
+        menubar.add_cascade(label="Edit", menu=self.edit_menu)
+
+        self.frames_menu = tk.Menu(menubar, tearoff=False, postcommand=self._refresh_frames_menu)
+        self._frame_menu_entries: list[tuple[int, str]] = []  # (entry index, op id)
+        for op in menu_groups().get("frames", []):
+            self.frames_menu.add_command(
+                label=op.label,
+                accelerator=op.accel,
+                command=lambda oid=op.id: self.controller.run_op(oid),
+            )
+            self._frame_menu_entries.append((self.frames_menu.index("end"), op.id))
+        self.frames_menu.add_separator()
+        self.frames_menu.add_command(label="Duplicate N times...", command=self._duplicate_n)
+        self._duplicate_n_entry = self.frames_menu.index("end")
+        menubar.add_cascade(label="Frames", menu=self.frames_menu)
+
         self.root.config(menu=menubar)
 
         # bind_all so shortcuts work regardless of which widget has focus
@@ -82,13 +112,29 @@ class MainWindow:
         self.root.bind_all("<Right>", lambda _e: self.controller.step(1))
         self.root.bind_all("<Home>", lambda _e: self.controller.seek(0))
         self.root.bind_all("<End>", lambda _e: self.controller.seek(self.controller.frame_count - 1))
+        # editing shortcuts -- the controller no-ops these when they can't apply
+        self.root.bind_all("<Control-z>", lambda _e: self.controller.undo())
+        self.root.bind_all("<Control-Shift-Z>", lambda _e: self.controller.redo())
+        self.root.bind_all("<Control-y>", lambda _e: self.controller.redo())
+        self.root.bind_all("<Control-a>", lambda _e: self._select_all())
+        self.root.bind_all("<Control-d>", lambda _e: self.controller.run_op("frames.duplicate"))
+        self.root.bind_all("<Delete>", lambda _e: self.controller.run_op("frames.delete"))
+        self.root.bind_all("<BackSpace>", lambda _e: self.controller.run_op("frames.delete"))
+        self.root.bind_all("<Escape>", lambda _e: self._clear_selection())
 
     def _build_body(self) -> None:
         # Packed bottom-up so the preview canvas takes all the slack.
         self.status = ttk.Label(self.root, text="Ready", anchor="w", padding=(8, 3))
         self.status.pack(side="bottom", fill="x")
 
-        self.timeline = Timeline(self.root, self.thumbnails, on_pick=self._on_pick)
+        self.timeline = Timeline(
+            self.root,
+            self.thumbnails,
+            on_pick=self._pick,
+            on_extend=self._extend,
+            on_toggle=self._toggle,
+            on_reorder=self._reorder,
+        )
         self.timeline.pack(side="bottom", fill="x")
 
         self._build_transport()
@@ -136,11 +182,64 @@ class MainWindow:
     def open_path(self, path: Path) -> None:
         self._with_busy_cursor(lambda: self.controller.open(path))
 
-    def _on_pick(self, index: int) -> None:
-        from giflite.core.model import Selection
+    # ---- selection gestures (called by the timeline) ---------------------
 
+    def _pick(self, index: int) -> None:
+        """Plain click: select just this frame and move the playhead to it."""
         self.controller.seek(index)
         self.controller.set_selection(Selection.single(index))
+
+    def _extend(self, index: int) -> None:
+        """Shift-click: extend the range from the existing anchor."""
+        sel = self.controller.selection
+        anchor = sel.anchor if sel.anchor is not None else self.controller.index
+        self.controller.set_selection(Selection.span(anchor, index, anchor))
+        self.controller.seek(index)
+
+    def _toggle(self, index: int) -> None:
+        """Ctrl-click: add or remove this frame from the selection."""
+        self.controller.set_selection(self.controller.selection.toggled(index))
+        self.controller.seek(index)
+
+    def _reorder(self, to: int) -> None:
+        """Drag release: move the current selection to the drop point."""
+        self.controller.run_op("frames.move", to=to)
+
+    def _select_all(self) -> None:
+        if self.controller.frame_count:
+            self.controller.set_selection(
+                Selection(frozenset(range(self.controller.frame_count)))
+            )
+
+    def _clear_selection(self) -> None:
+        self.controller.set_selection(Selection.empty())
+
+    def _duplicate_n(self) -> None:
+        count = ask_duplicate_count(self.root)
+        if count:
+            self.controller.run_op("frames.duplicate", copies=count)
+
+    # ---- menu state ------------------------------------------------------
+
+    def _refresh_edit_menu(self) -> None:
+        c = self.controller
+        undo_text = f"Undo {c.undo_label}" if c.undo_label else "Undo"
+        redo_text = f"Redo {c.redo_label}" if c.redo_label else "Redo"
+        self.edit_menu.entryconfigure(0, label=undo_text, state="normal" if c.can_undo else "disabled")
+        self.edit_menu.entryconfigure(1, label=redo_text, state="normal" if c.can_redo else "disabled")
+        has_doc = c.doc is not None
+        self.edit_menu.entryconfigure(3, state="normal" if has_doc else "disabled")
+        self.edit_menu.entryconfigure(4, state="normal" if c.selection else "disabled")
+
+    def _refresh_frames_menu(self) -> None:
+        for entry, op_id in self._frame_menu_entries:
+            self.frames_menu.entryconfigure(
+                entry, state="normal" if self.controller.can_run(op_id) else "disabled"
+            )
+        self.frames_menu.entryconfigure(
+            self._duplicate_n_entry,
+            state="normal" if self.controller.can_run("frames.duplicate") else "disabled",
+        )
 
     def _on_space(self, _event: tk.Event) -> str:
         self.controller.toggle_play()
@@ -164,13 +263,15 @@ class MainWindow:
 
     # ---- event handlers (payloads are keyword args; **_ tolerates growth) -
 
-    def _on_doc_changed(self, doc=None, selection=None, index=0, **_) -> None:
+    def _on_doc_changed(self, doc=None, selection=None, index=0, reason="", **_) -> None:
         self.canvas.invalidate()
         if doc is not None:
             self.thumbnails.retain({f.image_uid for f in doc})
         else:
             self.thumbnails.clear()
-        self.timeline.set_document(doc)
+        # Keep the timeline scrolled where it was during an edit; only jump back
+        # to the start for a genuinely new document.
+        self.timeline.set_document(doc, reset_view=reason in ("open", "close"))
         if selection is not None:
             self.timeline.set_selection(selection)
         self.timeline.set_index(index)

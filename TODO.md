@@ -46,13 +46,16 @@
 - [x] Event-ordering: one `doc_changed` per op/undo/redo, verified via fake frontend
 - [x] 50 core tests + 14 controller-editing tests, boundary grep still clean
 
-**Slice 2 — editing UI (next):**
+**Slice 2 — editing UI (done):**
 
-- [ ] `ui/tk/dialogs.py` — hardcoded duplicate-count dialog (no param schema yet)
-- [ ] Selection UI: click, shift-range, ctrl-toggle
-- [ ] Drag-to-reorder following the gesture rule: local preview, one op on release
-- [ ] Edit + Frames menus built from the registry, live enable/disable, keyboard shortcuts
-- [ ] Extend Tk smoke: select → delete → duplicate → undo → redo, screenshot under Xvfb
+- [x] `ui/tk/dialogs.py` — hardcoded duplicate-count dialog (no param schema yet)
+- [x] Selection UI: click, shift-range, ctrl-toggle, select-all, deselect
+- [x] Drag-to-reorder following the gesture rule: local insertion marker, one `move` op on release
+- [x] Edit + Frames menus built from the registry, live enable/disable via postcommand, keyboard shortcuts
+- [x] Timeline preserves scroll on edits, resets only on open/close
+- [x] Tk smoke now 50 checks incl. the real drag gesture path, screenshot under Xvfb
+
+**M2 is complete — v1 lite edits.** Next stop is M3 (save), below.
 
 ## Later
 

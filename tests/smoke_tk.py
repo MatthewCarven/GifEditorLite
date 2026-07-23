@@ -97,16 +97,103 @@ def main() -> int:
     check("pause: controller stopped", not controller.playing)
 
     # --- scrub via timeline click --------------------------------------
-    window._on_pick(5)
+    window._pick(5)
     root.update()
     check("click: playhead jumped to picked frame", controller.index == 5,
           f"index={controller.index}")
     check("click: frame selected", 5 in controller.selection.indices)
 
+    # --- shift / ctrl selection ----------------------------------------
+    window._pick(2)
+    window._extend(4)
+    check("shift-extend: range selected", controller.selection.ordered == (2, 3, 4),
+          str(controller.selection.ordered))
+    window._toggle(6)
+    check("ctrl-toggle: added a frame", controller.selection.ordered == (2, 3, 4, 6),
+          str(controller.selection.ordered))
+    window._select_all()
+    check("select all: everything selected", len(controller.selection) == 8)
+
     # --- keyboard stepping ---------------------------------------------
+    window._pick(5)
     window.root.event_generate("<Left>")
     root.update()
     check("Left: stepped back one frame", controller.index == 4, f"index={controller.index}")
+
+    # --- editing: delete, then undo/redo -------------------------------
+    window._pick(1)
+    window._extend(2)  # select frames 2 and 3 (indices 1,2)
+    controller.run_op("frames.delete")
+    root.update()
+    check("delete: two frames removed", controller.frame_count == 6,
+          f"count={controller.frame_count}")
+    check("delete: made the doc dirty", controller.dirty)
+    check("delete: title shows unsaved marker", window.root.title().startswith("*"),
+          window.root.title())
+    tl_after_delete = len([i for i in window.timeline.canvas.find_all()
+                           if window.timeline.canvas.type(i) == "image"])
+    check("delete: timeline redrew fewer thumbs", tl_after_delete == 6,
+          f"{tl_after_delete} thumbs")
+
+    controller.undo()
+    root.update()
+    check("undo: frames restored", controller.frame_count == 8)
+    check("undo: back to clean", not controller.dirty)
+    check("undo: title marker cleared", not window.root.title().startswith("*"))
+
+    controller.redo()
+    root.update()
+    check("redo: delete reapplied", controller.frame_count == 6)
+
+    # --- editing: duplicate --------------------------------------------
+    window._pick(0)
+    controller.run_op("frames.duplicate")
+    root.update()
+    check("duplicate: one frame added", controller.frame_count == 7)
+    check("duplicate: selection on the new copy", controller.selection.ordered == (1,))
+
+    # --- editing: reorder via the move op (drag's commit) --------------
+    window._pick(0)
+    controller.run_op("frames.move", to=controller.frame_count)  # send to end
+    root.update()
+    check("move: selection followed to the end",
+          controller.selection.ordered == (controller.frame_count - 1,),
+          str(controller.selection.ordered))
+
+    controller.undo()  # undo move
+    controller.undo()  # undo duplicate
+    controller.undo()  # undo delete
+    root.update()
+    check("undo x3: back to the original 8 frames", controller.frame_count == 8,
+          f"count={controller.frame_count}")
+    check("undo x3: clean again", not controller.dirty)
+
+    # --- drag-to-reorder via the timeline's real mouse path ------------
+    # Exercises _on_press/_on_motion/_on_release + _index_at/_gap_at, not just
+    # the move op underneath. Fake events carry the widget-x the handlers read.
+    class _Event:
+        def __init__(self, x):
+            self.x = x
+            self.state = 0
+
+    tl = window.timeline
+    window._pick(0)
+    root.update()
+    press_x = 6 + tl._slot_w // 2          # centre of frame 0
+    drop_x = 6 + 3 * tl._slot_w            # gap before original index 3
+    check("gesture: press lands on frame 0", tl._index_at(press_x) == 0,
+          f"index_at={tl._index_at(press_x)}")
+    tl._on_press(_Event(press_x))
+    tl._on_motion(_Event(drop_x))
+    check("gesture: motion past threshold starts a drag", tl._dragging)
+    check("gesture: drop gap computed", tl._drop_gap == 3, f"gap={tl._drop_gap}")
+    tl._on_release(_Event(drop_x))
+    root.update()
+    check("gesture: frame 0 moved to index 2", controller.selection.ordered == (2,),
+          str(controller.selection.ordered))
+    check("gesture: recorded as an undoable edit", controller.can_undo)
+    controller.undo()
+    root.update()
 
     # --- speed ----------------------------------------------------------
     window.speed.set("2x")
@@ -128,7 +215,10 @@ def main() -> int:
         try:
             from PIL import ImageGrab
 
-            controller.seek(5)  # a frame with the dot mid-strip, for a nicer shot
+            # Show a multi-frame selection so the shot demonstrates editing.
+            window._pick(2)
+            window._extend(4)
+            controller.seek(3)
             root.update()
             ImageGrab.grab(xdisplay=os.environ.get("DISPLAY", ":99")).save(args.shot)
             print(f"screenshot -> {args.shot}")
