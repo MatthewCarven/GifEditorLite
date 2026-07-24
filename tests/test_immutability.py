@@ -37,6 +37,8 @@ CASES = [
     ("canvas.rotate", {"angle": "cw"}),
     ("canvas.flip", {"direction": "horizontal"}),
     ("canvas.crop", {"x": 1, "y": 1, "width": 4, "height": 4}),
+    ("paint.stroke", {"index": 1, "points": ((2, 2), (5, 5)), "size": 2, "color": (255, 0, 0, 255)}),
+    ("paint.erase", {"index": 2, "points": ((3, 3), (6, 6)), "size": 2}),
 ]
 
 

@@ -98,6 +98,32 @@ Post-M4 additive slice. Crop wanted a canvas gesture, not a typed-coords dialog 
 - [x] Image → Crop menu item + **C** shortcut; rides the canvas group's enable/disable refresh via `can_run("canvas.crop")`
 - [x] Tk smoke 74 checks (was 61) incl. the mapped drag + undo + Esc-cancel; screenshot under Xvfb
 
+## Painting — the tool layer (in progress)
+
+Design in ARCHITECTURE §19. Tools live in the frontend and commit pure core ops; the brush is a coverage **mask**, so soft/AA brushes are a future drop-in (a new mask generator, op + tool unchanged). v1 set (Matthew's call): **Pencil, Eraser, Eyedropper** — hard-edged, current frame only, at fit scale (zoom later).
+
+**Slice 1 — painting core (headless): ✅**
+
+- [x] `core/ops/paint.py` — `paint.stroke` (paint) + `paint.erase`, pure, mask-based; target a frame `index`; fresh uid on the one edited frame; decline no-ops (empty / off-canvas / bad index); registered via `core/ops/__init__.py`
+- [x] `_brush_mask` = the pluggable stamp (hard 0/255 now; soft feathered later changes only this)
+- [x] Tests: paint paints, erase clears alpha, disc size, target-index, declines, fresh uid; + immutability CASES (the coverage guard forced it). 268 tests (was 253); boundary rule still clean
+
+**Slice 2 — the tool system + tools (UI):**
+
+- [ ] `ui/tk/tools.py` — minimal `Tool` protocol + Pencil / Eraser / Eyedropper
+- [ ] Canvas: one mouse-dispatch to the active tool (generalise crop-mode), reuse `_image_geom` mapping, provisional stroke overlay
+- [ ] Tool palette: tool buttons + colour swatch (Tk `colorchooser`) + size spinner; active-tool state; B / E / I keys
+- [ ] Eyedropper sets the FG colour (no op — the Tool≠Operation case)
+- [ ] Xvfb smoke: drive a pencil stroke / erase / eyedropper; screenshot
+
+**Later (additive):**
+
+- [ ] Fold crop into the tool system — one interaction mechanism, not two
+- [ ] Fill bucket; line / rect / ellipse shape tools
+- [ ] Soft / anti-aliased brushes (a new mask generator; op + tool unchanged)
+- [ ] Zoom / pan (the fit calc in `canvas.py` is already factored for it) — precise pixel work
+- [ ] **Memory-aware undo** — track the bytes `History` holds and warn + report when it climbs past ~128 MB, rather than silently trimming. The plain 64-snapshot cap is fine initially; this is the bespoke follow-up Matthew flagged (concrete form of risk 1's `FrameStore` note)
+
 ## Later
 
 - [ ] **Image-sequence IO** — import a folder of PNGs as frames / export frames out. Promotes the IO dict to a real registry (folder-based source is a new shape)

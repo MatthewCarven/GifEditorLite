@@ -303,3 +303,19 @@ Matthew picked crop from the post-M4 fork. It's the first *canvas gesture* op �
 - Xvfb smoke screenshots (marquee mid-drag + the post-save window) are in my scratch outputs, not committed to the repo.
 
 **Next (all optional, your call):** image-sequence IO + IO-registry promotion, the `.gifproj` project format you want eventually, or M5 (video import / WebP·APNG export). A second frontend would finally exercise the seam for real.
+
+## 2026-07-24 — Painting: design session
+
+Matthew wants painting tools and asked to co-design a coherent modular plan first. Painting is a bigger shift than crop — crop fit the pure-op model, painting stresses it — so we talked it through and locked a shape before any code.
+
+**The decision that keeps it modular: Tools (frontend) commit Operations (core).** Crop was a one-off gesture in the canvas; painting generalises it. A Tool owns the drag, its settings and its cursor and lives in `ui/`; on release it hands a finished stroke to a pure core op that bakes pixels — the same shape as every other op. The clincher for making "Tool" its own concept rather than "an op with a drag": the eyedropper (and pan/zoom) commit *no op* — they only read a pixel or move the view. Full rationale in ARCHITECTURE §19.
+
+**Brush = mask.** A brush produces a coverage mask; the op composites colour through it (paint) or subtracts it from the frame's alpha (erase). Hard vs soft is only *which mask you generate* — the op and the tool don't change. That's how "hard now, soft/AA later" costs a mask function and nothing else, which was Matthew's explicit ask.
+
+**Forks he called:** tool set = Pencil + Eraser + Eyedropper (minimal, proves the seam end to end); hard-edged brushes now; current frame only; paint at fit scale, zoom later. Defaults he took: one snapshot per stroke on the existing 64-cap, and destructive painting (no layers in "lite").
+
+**Noted for later at his request:** undo becomes memory-aware — track the bytes `History` holds and warn/report past ~128 MB rather than trimming silently. Not now ("so long as there's *some* undo available"); it's in TODO as the bespoke follow-up.
+
+**Plan:** slice 1 = the pure ops + tests (headless), slice 2 = the tool system + palette + canvas dispatch + smoke.
+
+**Slice 1 built (core ops).** `core/ops/paint.py` — `paint.stroke` and `paint.erase`, two thin registered ops over a shared `_apply_stroke`, so undo reads "Paint" / "Erase" correctly. The mask idea works cleanly: `_brush_mask` stamps a round hard brush (discs at each point + a thick round-joined line; single pixels for size 1, and `draw.*` clips off-canvas points for free), paint alpha-composites the colour through it, erase `ImageChops.subtract`s it from the frame's alpha. Both copy the target frame before drawing (immutability) and only that frame gets a fresh uid. Decline is byte-based: if the composited result equals the source (empty stroke, off-canvas, or erasing already-transparent pixels) it returns the same doc, so no identity snapshot lands on undo — same convention as crop. Verified with a pure-PIL proof render (green stroke + red dot + an erased hole over a checkerboard — transparency reads correctly) as well as the suite. 268 tests (was 253: +11 paint, +4 immutability instances). Boundary rule clean — the op is toolkit-free. **Next: slice 2, the tool layer + palette.**

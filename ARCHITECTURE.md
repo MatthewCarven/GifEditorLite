@@ -448,3 +448,24 @@ The need: a GIF can't represent "two identical frames held separately" — it me
 The shape, when it comes: a small container (a zip is the obvious choice — `.gifproj` or similar) holding each frame as lossless PNG plus a manifest (JSON) of durations, loop, and canvas size. It slots into the existing IO layer as one more `read_x`/`write_x` pair (§8, §11.2) — no new architecture, just a reader and writer that happen to be lossless. The `Document` model already carries everything such a format needs, which is the point of having kept it toolkit- and format-agnostic.
 
 Not designed further until there's a felt need; the hook is that adding it changes nothing else.
+
+---
+
+## 19. Painting: the tool layer
+
+Crop was the first *gesture* op, wired straight into the canvas. Painting turns that one-off into a concept, because "draw on the frame" is many tools, not one, and because a stroke stresses three things crop didn't: it isn't dialog- or param-shaped (a stroke is a live polyline, not a form), it allocates a fresh full-frame image every time (so undo memory is no longer nearly-free), and it needs interactive, stateful behaviour on the canvas.
+
+**The split: Tools live in the frontend and commit Operations in the core.**
+
+- A **Tool** is a frontend object. It owns interactive behaviour (press/drag/release on the preview, mapped to image pixels via the canvas's `_image_geom` — the same mapping crop introduced), its settings (brush size, colour, mode), and its cursor. Tools live under `ui/`, never in `core/`.
+- On commit (release) a tool calls a **pure core op** with the finished stroke — `paint.stroke(index, points, size, colour)` / `paint.erase(index, points, size)` — which bakes pixels into one frame and returns a new document, exactly like every other op. Pure, headless-testable, undoable.
+
+This keeps the seam the whole project rests on: the core never hears about mouse events; the frontend never implements pixel algorithms. It also names the thing crop couldn't — some tools commit *no op at all*. The **eyedropper** reads a pixel and sets the foreground colour; **pan/zoom** only moves the view. Those are tools, not operations, which is exactly why "Tool" has to be its own concept and not just "an Operation with a drag."
+
+**The brush is a mask — and that is the whole future-proofing story.** A brush does not draw; it produces a coverage mask (an `L`-mode image, 0–255) along the stroke. The op then composites: *paint* alpha-composites the colour through the mask, *erase* subtracts the mask from the frame's alpha. A hard-edged brush is a 0/255 mask; a soft / anti-aliased brush (deferred — Matthew's call) is a feathered mask, and **nothing else changes** — same op, same compositing, same tool. Adding soft brushes is a new mask generator and no more.
+
+**Which frame, which memory.** A stroke targets the *playhead* frame only (the tool passes `index`); it allocates a fresh-uid image for that one frame and shares the rest. Undo is one snapshot per *stroke* (the gesture rule already collapses a drag to a single op), bounded by the 64-snapshot cap — so a long session has a finite stroke-undo horizon. That is the deliberate lite default. The planned escalation (see TODO): make history **memory-aware** — track the bytes it holds and warn/report past a threshold (~128 MB) rather than silently trimming — the concrete form of risk 1's `FrameStore` note for the painting workload.
+
+**Deferred by choice:** layers (painting is destructive, it bakes into the frame; layers would change the `Document` model and aren't "lite"), soft/AA brushes, fill and shape tools, and zoom/pan. Crop stays its own mode for now but is the natural first citizen to fold into the tool system once it exists — one interaction mechanism instead of two.
+
+**Recipe — add a tool.** A pure op in `core/ops/` for whatever it commits (skip if it commits nothing, like the eyedropper), plus a `Tool` in `ui/tk/tools.py` that maps the gesture and renders its own provisional preview. Same "one file, no edits elsewhere" shape as adding an op.
