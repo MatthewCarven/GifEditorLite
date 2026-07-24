@@ -97,7 +97,15 @@ class MainWindow:
         # One menu per op group, built entirely from the registry. Adding an op
         # (even a whole new group) needs no change here beyond OP_MENUS.
         for group_key, title in OP_MENUS:
-            self._build_op_menu(menubar, group_key, title)
+            menu, entries = self._build_op_menu(menubar, group_key, title)
+            if group_key == "canvas":
+                # Crop is a canvas op but gesture-driven (in_menu=False), so it
+                # isn't in menu_groups(). Add it here and let it ride the group's
+                # existing enable/disable refresh via can_run("canvas.crop").
+                menu.add_separator()
+                menu.add_command(label="Crop", accelerator="C",
+                                 command=self._enter_crop_mode)
+                entries.append((menu.index("end"), "canvas.crop"))
 
         self.root.config(menu=menubar)
 
@@ -121,6 +129,9 @@ class MainWindow:
         self.root.bind_all("<Control-d>", lambda _e: self.controller.run_op("frames.duplicate"))
         self.root.bind_all("<Delete>", lambda _e: self.controller.run_op("frames.delete"))
         self.root.bind_all("<BackSpace>", lambda _e: self.controller.run_op("frames.delete"))
+        # Crop enters a gesture mode on the preview; the canvas owns Esc while
+        # active, so the global Esc below still deselects the rest of the time.
+        self.root.bind_all("<c>", lambda _e: self._enter_crop_mode())
         self.root.bind_all("<Escape>", lambda _e: self._clear_selection())
 
     def _build_body(self) -> None:
@@ -254,9 +265,31 @@ class MainWindow:
         if values is not None:  # None == cancelled
             self.controller.run_op(op_id, **values)
 
+    # ---- crop (a canvas gesture, not a dialog) ---------------------------
+
+    def _enter_crop_mode(self) -> None:
+        """Arm the preview's rubber-band. Crop is coordinate-driven, and typing
+        four numbers is poor UX, so it's a drawn gesture rather than a dialog."""
+        if self.controller.doc is None or self.canvas.is_cropping:
+            return
+        self.controller.pause()  # a running preview would repaint over the marquee
+        if self.canvas.begin_crop(self._do_crop, self._crop_ended):
+            self.status.configure(
+                text="Crop: drag a rectangle on the image   |   Esc to cancel"
+            )
+
+    def _do_crop(self, x: int, y: int, width: int, height: int) -> None:
+        self.controller.run_op("canvas.crop", x=x, y=y, width=width, height=height)
+
+    def _crop_ended(self, committed: bool) -> None:
+        # On commit the DOC_CHANGED render already refreshed the status line; on
+        # cancel nothing fired, so restore it from current state.
+        if not committed:
+            self.status.configure(text=self._summary())
+
     # ---- menu construction / state ---------------------------------------
 
-    def _build_op_menu(self, menubar: tk.Menu, group_key: str, title: str) -> None:
+    def _build_op_menu(self, menubar: tk.Menu, group_key: str, title: str):
         menu = tk.Menu(menubar, tearoff=False)
         entries: list[tuple[int, str]] = []
         for op in menu_groups().get(group_key, []):
@@ -268,6 +301,9 @@ class MainWindow:
             entries.append((menu.index("end"), op.id))
         menu.configure(postcommand=lambda m=menu, e=entries: self._refresh_op_menu(m, e))
         menubar.add_cascade(label=title, menu=menu)
+        # Returned so callers can append non-registry items (e.g. gesture-driven
+        # Crop) that still share the group's enable/disable refresh.
+        return menu, entries
 
     def _refresh_op_menu(self, menu: tk.Menu, entries: list[tuple[int, str]]) -> None:
         for index, op_id in entries:

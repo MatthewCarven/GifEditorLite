@@ -93,6 +93,49 @@ class TestFlip:
         assert red_at(r.doc.frames[0]) == (0, 1)  # top-left -> bottom-left
 
 
+class TestCrop:
+    def test_crops_to_box_and_shrinks_canvas(self):
+        r = run("canvas.crop", doc(3, (8, 8)), x=2, y=1, width=4, height=3)
+        assert r.doc.size == (4, 3)
+        assert all(f.image.size == (4, 3) for f in r.doc.frames)
+        assert len(r.doc) == 3
+
+    def test_box_is_clamped_to_canvas(self):
+        # Origin near the edge with an oversized box -> clamped to what's left.
+        r = run("canvas.crop", doc(1, (8, 8)), x=6, y=5, width=100, height=100)
+        assert r.doc.size == (2, 3)
+
+    def test_full_canvas_box_is_declined(self):
+        d = doc(2, (8, 8))
+        r = run("canvas.crop", d, x=0, y=0, width=8, height=8)
+        assert r.doc is d  # identity -> controller treats it as "nothing to do"
+
+    def test_empty_box_is_declined(self):
+        d = doc(2, (8, 8))
+        assert run("canvas.crop", d, x=3, y=3, width=0, height=0).doc is d
+
+    def test_offset_box_moves_content_to_new_origin(self):
+        im = Image.new("RGBA", (4, 4), (0, 0, 0, 255))
+        im.putpixel((2, 1), (255, 0, 0, 255))
+        d = Document((Frame.new(im, 100),), (4, 4))
+        r = run("canvas.crop", d, x=2, y=1, width=2, height=2)
+        assert r.doc.size == (2, 2)
+        assert red_at(r.doc.frames[0]) == (0, 0)  # (2,1) becomes the new origin
+
+    def test_output_frames_get_fresh_uids(self):
+        d = doc(2, (8, 8))
+        r = run("canvas.crop", d, x=0, y=0, width=4, height=4)
+        assert r.doc.frames[0].image_uid != d.frames[0].image_uid
+
+    def test_default_params_seed_whole_canvas(self):
+        d = doc(1, (30, 20))
+        defaults = op_defaults(get_op("canvas.crop"), d, Selection.empty())
+        assert defaults == {"x": 0, "y": 0, "width": 30, "height": 20}
+
+    def test_result_validates(self):
+        run("canvas.crop", doc(3, (8, 8)), x=1, y=1, width=5, height=6).doc.validate()
+
+
 class TestGlobalNature:
     def test_canvas_ops_ignore_selection_and_hit_every_frame(self):
         d = doc(4, (8, 8))

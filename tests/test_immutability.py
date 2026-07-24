@@ -36,6 +36,7 @@ CASES = [
     ("canvas.resize", {"width": 4, "height": 4, "keep_aspect": False}),
     ("canvas.rotate", {"angle": "cw"}),
     ("canvas.flip", {"direction": "horizontal"}),
+    ("canvas.crop", {"x": 1, "y": 1, "width": 4, "height": 4}),
 ]
 
 

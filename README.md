@@ -5,8 +5,8 @@ nothing else.
 
 Status: **M4 — a working lite GIF editor.** Opens, plays (with ping-pong),
 edits frames (delete/duplicate/reorder/reverse/trim), re-times them (set delay,
-scale speed), transforms the canvas (resize/rotate/flip), undo/redo, and saves
-back to GIF. See [TODO.md](TODO.md) for what's next and
+scale speed), transforms the canvas (resize/rotate/flip/crop), undo/redo, and
+saves back to GIF. See [TODO.md](TODO.md) for what's next and
 [ARCHITECTURE.md](ARCHITECTURE.md) for why it's shaped this way.
 
 ## Use
@@ -19,9 +19,13 @@ Ctrl-click to toggle one, Ctrl+A to select all, Esc to deselect.
 
 **Editing:** Frames menu — Delete (Del), Duplicate (Ctrl+D, or the menu for a
 count), Reverse, Trim to Selection; drag a frame along the timeline to reorder.
-Timing menu — Set Frame Delay, Scale Speed. Image menu — Resize, Rotate, Flip.
+Timing menu — Set Frame Delay, Scale Speed. Image menu — Resize, Rotate, Flip, Crop.
 Ctrl+Z / Ctrl+Shift+Z undo and redo everything. Ops that need input open a small
 dialog generated from the operation itself.
+
+**Cropping** is a gesture rather than a dialog (typing four numbers is poor UX):
+press **C** or pick Image → Crop, drag a rectangle on the preview — a live box
+shows the pixel size — and release to crop every frame to it. Esc cancels.
 
 **Saving:** Ctrl+S to save, Ctrl+Shift+S for Save As. One quirk to know about —
 GIF merges identical *consecutive* frames and sums their durations, so a frame

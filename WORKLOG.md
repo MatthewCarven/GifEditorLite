@@ -278,3 +278,28 @@ Matthew picked M4 over the project file, and told me to take my time on correct 
 
 **Next:** crop (canvas rubber-band), or image-sequence IO + registry promotion, or the project-file format, or M5 (video import / WebP export). All genuinely optional now — the editor is complete and useful. Matthew's call.
 - Reminder: the `/tmp/tkroot` tkinter extraction and Xvfb don't survive a reboot — re-extract with `apt-get download python3-tk tk8.6-blt2.5 blt libtk8.6`, `dpkg-deb -x` into `/tmp/tkroot`, point `PYTHONPATH`/`LD_LIBRARY_PATH` at it, and start Xvfb in the *same* bash call as the smoke test.
+
+## 2026-07-24 — Crop: a rubber-band gesture on the preview
+
+Matthew picked crop from the post-M4 fork. It's the first *canvas gesture* op — the thing M4 deferred on purpose, because typing x/y/w/h is a poor way to choose a rectangle. Sliced core-then-UI like M2, green in between.
+
+**Slice 1 — the core op.** `canvas.crop` joins resize/rotate/flip in `core/ops/canvas.py`: pure, takes an image-space box, clamps it into the canvas (a gesture can overshoot the edges), allocates fresh-uid frames, shrinks `doc.size`. Three things worth recording:
+
+- **`in_menu = False`.** Crop is gesture-driven, exactly like `frames.move` — the op still carries its params as the data contract the gesture fills in, but there's no generated dialog. Keeping it a normal op (rather than a bespoke non-op) means it's testable headlessly and the seam stays uniform.
+- **Decline the no-op.** A box covering the whole canvas, or with zero area, returns the *same* document, so `run_op`'s `result.doc is doc` check reports "nothing to do" instead of pushing an identity snapshot onto undo — the same guard delete-everything uses.
+- Checked up front that Pillow's `Image.crop` fully materialises a new image (it `load()`s then does a C-level copy), so it can't alias a source buffer and break the immutability invariant. The immutability suite's coverage guard then *forced* me to add crop to its cases — the test insisting is exactly the point.
+
+**Slice 2 — the gesture.** §11.3's rule ("gestures render their own preview and commit one op on release") already had drag-to-reorder as its instance in the timeline; crop is the same rule on the preview canvas. `PreviewCanvas` now remembers where the fitted image landed (`_image_geom`, recomputed every redraw) and maps widget pixels back to image pixels through it. Press/drag draws a dashed marquee with a live "W×H" label in image pixels; release maps + clamps the box and fires `canvas.crop`; Esc cancels. Wiring notes:
+
+- The Image menu is registry-generated, so `_build_op_menu` now hands its menu back and I append Crop (a non-registry item) to it, reusing the group's `can_run` refresh so it greys out with no document.
+- Esc: the canvas binds its own `<Escape>` (the widget bindtag runs before the global `bind_all`) and returns `"break"` *only while cropping*, so normal Esc-to-deselect is untouched otherwise. Entering crop mode focuses the canvas so the key lands there, and pauses playback so a tick can't repaint over the marquee. A window resize mid-crop cancels — the box would otherwise map against stale geometry.
+
+**Numbers:** 253 headless tests (was 243: +8 crop, +2 immutability cases). Tk smoke 74 checks (was 61: +13, incl. the display→image mapped drag producing an exact half-size crop, undo restoring the canvas, and Esc changing nothing). Boundary rule still clean — the op is toolkit-free.
+
+**Handover**
+
+- Crop on disk, uncommitted. `COMMIT_MSG.txt` refreshed (it still held the M4 message).
+- Try it on a real GIF: press **C** or Image → Crop, drag a box on the preview, release. Esc to bail, Ctrl+Z to undo.
+- Xvfb smoke screenshots (marquee mid-drag + the post-save window) are in my scratch outputs, not committed to the repo.
+
+**Next (all optional, your call):** image-sequence IO + IO-registry promotion, the `.gifproj` project format you want eventually, or M5 (video import / WebP·APNG export). A second frontend would finally exercise the seam for real.

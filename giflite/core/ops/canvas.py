@@ -1,4 +1,4 @@
-"""Canvas operations: resize, rotate, flip.
+"""Canvas operations: resize, rotate, flip, crop.
 
 The first ops that allocate pixels. Frame ops (M2) and timing ops (M4 s1) only
 rearrange or re-time existing frames; these produce genuinely new images, so:
@@ -126,3 +126,58 @@ class FlipCanvas:
             Frame.new(f.image.transpose(const), f.duration_ms) for f in doc.frames
         )
         return OpResult(replace(doc, frames=frames), sel)
+
+
+@register_op
+class CropCanvas:
+    """Crop every frame to a rectangle given in image-space pixels.
+
+    Gesture-driven, not menu-driven: `in_menu = False` like `frames.move`. A
+    crop box typed as four numbers is poor UX (TODO), so the Tk frontend draws
+    a rubber-band on the preview canvas, maps it to image pixels, and calls this
+    op with the result. The params still exist as the data contract the gesture
+    fills in -- and make the op testable without a window.
+
+    Global by nature (every frame must stay the same size), so the selection is
+    ignored and passed through untouched. Like the other canvas ops it allocates
+    new pixels, hence fresh uids per output frame.
+    """
+
+    id = "canvas.crop"
+    label = "Crop"
+    accel = None
+    needs_selection = False
+    in_menu = False
+    params = (
+        IntParam("x", "Left", default=0, min=0, max=4096, unit="px"),
+        IntParam("y", "Top", default=0, min=0, max=4096, unit="px"),
+        IntParam("width", "Width", default=1, min=1, max=4096, unit="px"),
+        IntParam("height", "Height", default=1, min=1, max=4096, unit="px"),
+    )
+
+    def default_params(self, doc: Document, sel: Selection) -> dict:
+        # Seed a would-be dialog with the whole canvas -- a crop that selects
+        # everything, i.e. the identity, which the user then shrinks.
+        w, h = doc.size
+        return {"x": 0, "y": 0, "width": w, "height": h}
+
+    def apply(self, doc: Document, sel: Selection,
+              x: int = 0, y: int = 0, width: int = 0, height: int = 0, **_) -> OpResult:
+        cw, ch = doc.size
+        # Clamp the box into the canvas: a gesture can overshoot the edges, and
+        # Pillow would happily crop past them into transparent padding.
+        left = max(0, min(int(x), cw))
+        top = max(0, min(int(y), ch))
+        right = max(left, min(left + int(width), cw))
+        bottom = max(top, min(top + int(height), ch))
+        new_size = (right - left, bottom - top)
+        # A full-canvas or empty box changes nothing. Return the same document
+        # so the controller reports "nothing to do" instead of pushing a no-op
+        # onto the undo stack (controller.run_op keys off `result.doc is doc`).
+        if new_size == (cw, ch) or new_size[0] <= 0 or new_size[1] <= 0:
+            return OpResult(doc, sel)
+        box = (left, top, right, bottom)
+        frames = tuple(
+            Frame.new(f.image.crop(box), f.duration_ms) for f in doc.frames
+        )
+        return OpResult(replace(doc, frames=frames, size=new_size), sel)

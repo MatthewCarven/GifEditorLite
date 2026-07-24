@@ -164,8 +164,9 @@ class DuplicateFrames:
 
 Menus and keybindings read from `op_registry.all()`; menu grouping comes from the dotted id prefix (`frames.*` → Frames menu). The registry stores instances, constructed once at import.
 
-**v1 op set:** `frames.delete`, `frames.duplicate`, `frames.move`, `frames.reverse`, `frames.trim`.
-**Later:** `canvas.crop`, `canvas.resize`, `canvas.rotate`, `timing.set_delay`, `timing.scale_speed`, `text.caption`.
+**v1 op set (M2):** `frames.delete`, `frames.duplicate`, `frames.move`, `frames.reverse`, `frames.trim`.
+**Added since:** `timing.set_delay`, `timing.scale_speed`, `canvas.resize`, `canvas.rotate`, `canvas.flip` (M4); `canvas.crop` (gesture-driven — see §11.3).
+**Later:** `text.caption`.
 
 ---
 
@@ -340,7 +341,7 @@ Implement `Frontend.run(controller)`. Subscribe to the events in §9, call the m
 
 > **Gestures render their own preview locally and commit exactly one operation on release.**
 
-That single rule is what keeps drag-to-reorder, trim handles and M4's speed slider from leaking a transaction system into the core. Its absence is what would make the seam leak.
+That single rule is what keeps drag-to-reorder, the crop rubber-band, trim handles and M4's speed slider from leaking a transaction system into the core. Its absence is what would make the seam leak. Crop is the rule's second concrete instance: `canvas.crop` is `in_menu = False` (like `frames.move`), the preview canvas draws the marquee itself and maps it to image pixels, and release commits exactly one op — the core never hears about the drag.
 
 ### 11.4 Enforce the boundary
 
@@ -396,7 +397,8 @@ Measured against Pillow 12.2.0, not recalled from memory. Each of these changed 
 | **M1** | Timeline strip, playback (forward + loop + speed), scrubbing | You can watch a GIF and drag the playhead ✅ |
 | **M2** | Selection, the five frame ops, undo/redo | **"v1 lite" is complete** — the editor edits ✅ |
 | **M3** | `gif_write`, Save / Save As | Edits can leave the building ✅ (Param schema deferred again — see below) |
-| **M4** | Param schema, timing ops, canvas ops (resize/rotate/flip), ping-pong | Crop/resize/speed ✅ (image-sequence IO + crop-by-selection deferred) |
+| **M4** | Param schema, timing ops, canvas ops (resize/rotate/flip), ping-pong | Resize/rotate/flip/speed ✅ |
+| **M4+** | Crop, as a preview rubber-band gesture (§11.3) | Draw a box on the image, release crops every frame ✅ (image-sequence IO still deferred) |
 | **M5** | Video import, WebP/APNG export | Optional deps prove the try/except registration pattern |
 
 M0–M2 is the real project; everything after is additive by construction. Export sitting at M3 is deliberate and matches "I don't care if save doesn't show up for a while" — but it does mean M0–M2 cannot produce output, so keep test GIFs handy and don't edit anything precious before M3.

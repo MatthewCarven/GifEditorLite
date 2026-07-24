@@ -5,7 +5,7 @@
 - [x] `git init` — done
 - [x] M0 committed (`95cf542`), line endings pinned to LF (`92fd44e`)
 - [ ] Sweep `tmp_obj_*` cruft from `.git\objects` after a reboot frees the handles (harmless if left)
-- [ ] Commit M1: `git add -A; git commit -F COMMIT_MSG.txt`
+- [ ] Commit the crop feature: `git add -A; git commit -F COMMIT_MSG.txt` (M0–M4 already committed through `8b19fe4`)
 - [ ] Decide risk #2: identical-frame merging on export (accept / disable optimiser / project file) — **not urgent, first bites at M3**
 - [ ] Run `python -m giflite` on Windows and confirm the window looks right
 - [ ] Confirm Python version on the Windows box (targeting 3.10+)
@@ -80,12 +80,30 @@
 - [x] Ping-pong playback (clock bounce mode + transport toggle)
 - [x] 243 tests (was 182); Tk smoke 61 checks incl. dialog-seeding + resize + ping-pong, screenshot under Xvfb
 
+## Crop — rubber-band gesture ✅
+
+Post-M4 additive slice. Crop wanted a canvas gesture, not a typed-coords dialog (deferred at M4 on purpose). Sliced core-then-UI, same as M2.
+
+**Slice 1 — core op (headless):**
+
+- [x] `canvas.crop` in `core/ops/canvas.py` — pure, image-space box (x/y/w/h), clamped to the canvas, fresh uids per frame, new `doc.size`, selection passed through untouched
+- [x] `in_menu = False` — gesture-driven like `frames.move`; a full-canvas or empty box returns the same doc so no no-op lands on the undo stack
+- [x] `default_params` seeds the whole canvas (identity box) for any future typed-coords fallback
+- [x] 8 op tests + immutability coverage (the `test_every_registered_op_is_covered_here` guard forced it) — 253 tests total
+
+**Slice 2 — the gesture UI:**
+
+- [x] `PreviewCanvas` records where the fitted image sits (`_image_geom`) and maps widget coords → image pixels
+- [x] Rubber-band: press/drag draws a dashed marquee + a live pixel-size label; release commits one `canvas.crop`; Esc cancels; a window resize mid-crop cancels (geometry would be stale)
+- [x] Image → Crop menu item + **C** shortcut; rides the canvas group's enable/disable refresh via `can_run("canvas.crop")`
+- [x] Tk smoke 74 checks (was 61) incl. the mapped drag + undo + Esc-cancel; screenshot under Xvfb
+
 ## Later
 
-- [ ] **Crop** — best as a rubber-band selection on the preview canvas (param-by-coordinates is poor UX). Its own slice with a canvas gesture
 - [ ] **Image-sequence IO** — import a folder of PNGs as frames / export frames out. Promotes the IO dict to a real registry (folder-based source is a new shape)
 - [ ] **Project / sidecar format** (`.gifproj`?) — lossless zip of PNG frames + JSON manifest, so authored frames/timing survive a round-trip GIF can't represent. One `read_x`/`write_x` pair; see ARCHITECTURE §18. Matthew wants this eventually
 - [ ] M5 video import (`imageio-ffmpeg`, try/except registration), WebP/APNG export
 - [ ] Second frontend to actually prove the seam (Qt or Dear PyGui)
 - [ ] Polish: warn before overwriting the *original* source on Ctrl+S (GIF re-save is lossy); default Save As to `<name>_edited.gif`?
 - [ ] Polish: `default_params` could seed Set-Delay from the current frame's delay
+- [ ] Polish: crop is apply-on-release; a draggable/adjustable marquee with an explicit confirm (and maybe a keep-aspect modifier) would be nicer

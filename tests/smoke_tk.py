@@ -233,6 +233,57 @@ def main() -> int:
     window._on_pingpong()
     check("pingpong: toggles back off", not controller.pingpong)
 
+    # --- M-crop: the rubber-band crop gesture on the preview -----------
+    # Drives _crop_press/_crop_drag/_crop_release directly (fake events carry
+    # widget x/y), exercising the display->image mapping, not just the op.
+    class _XY:
+        def __init__(self, x, y):
+            self.x = x
+            self.y = y
+            self.state = 0
+
+    root.update()
+    before_crop_size = controller.doc.size
+    window._enter_crop_mode()
+    check("crop: gesture armed", window.canvas.is_cropping)
+    geom = window.canvas._image_geom
+    check("crop: image geometry known", geom is not None, str(geom))
+    left, top, fw, fh = geom
+    # Drag the central half of the image -> crop to roughly half in each axis.
+    window.canvas._crop_press(_XY(left + fw // 4, top + fh // 4))
+    window.canvas._crop_drag(_XY(left + (fw * 3) // 4, top + (fh * 3) // 4))
+    check("crop: marquee drawn during drag", len(window.canvas._crop_items) >= 1,
+          f"{len(window.canvas._crop_items)} items")
+    window.canvas._crop_release(_XY(left + (fw * 3) // 4, top + (fh * 3) // 4))
+    root.update()
+    check("crop: mode exited after release", not window.canvas.is_cropping)
+    cw, ch = controller.doc.size
+    check("crop: canvas shrank in both dimensions",
+          cw < before_crop_size[0] and ch < before_crop_size[1],
+          f"{before_crop_size} -> {(cw, ch)}")
+    check("crop: every frame matches the new canvas",
+          all(f.image.size == (cw, ch) for f in controller.doc.frames))
+    check("crop: preview refit to the cropped canvas", window.canvas._photo is not None)
+    check("crop: recorded as an undoable edit", controller.can_undo)
+    check("crop: made the doc dirty", controller.dirty)
+    controller.undo()
+    root.update()
+    check("crop: undo restored the canvas size",
+          controller.doc.size == before_crop_size,
+          f"{controller.doc.size} vs {before_crop_size}")
+
+    # --- M-crop: Esc cancels crop mode and changes nothing -------------
+    size_before_cancel = controller.doc.size
+    window._enter_crop_mode()
+    window.canvas._crop_press(_XY(left + fw // 4, top + fh // 4))
+    window.canvas._crop_drag(_XY(left + fw // 2, top + fh // 2))
+    window.canvas._crop_escape()
+    root.update()
+    check("crop: Esc left crop mode", not window.canvas.is_cropping)
+    check("crop: Esc changed nothing", controller.doc.size == size_before_cancel,
+          str(controller.doc.size))
+    check("crop: Esc cleared the marquee", len(window.canvas._crop_items) == 0)
+
     # reset to a clean single edit for the save section
     while controller.can_undo:
         controller.undo()
