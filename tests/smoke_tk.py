@@ -284,6 +284,49 @@ def main() -> int:
           str(controller.doc.size))
     check("crop: Esc cleared the marquee", len(window.canvas._crop_items) == 0)
 
+    # --- M-paint: pencil / eraser / eyedropper via the canvas dispatch ---
+    # Drives the canvas _on_press/_on_drag/_on_release with display coords mapped
+    # from known image pixels, so the whole tool -> op path runs, not just the op.
+    root.update()
+    window._set_fg_color((255, 0, 0, 255))
+    window._brush_size = 3
+    window._select_tool("pencil")
+    check("paint: pencil is the active tool", window.canvas.has_tool)
+    cxi, cyi = controller.doc.size[0] // 2, controller.doc.size[1] // 2
+    d0 = window.canvas._image_to_display(cxi - 3, cyi - 3)
+    dm = window.canvas._image_to_display(cxi, cyi)
+    d1 = window.canvas._image_to_display(cxi + 3, cyi + 3)
+    frames_before = controller.frame_count
+    window.canvas._on_press(_XY(int(d0[0]), int(d0[1])))
+    window.canvas._on_drag(_XY(int(dm[0]), int(dm[1])))
+    check("paint: stroke previewed mid-drag", len(window.canvas._stroke_items) >= 1)
+    window.canvas._on_release(_XY(int(d1[0]), int(d1[1])))
+    root.update()
+    painted = controller.doc[controller.index].image.getpixel((cxi, cyi))
+    check("paint: centre pixel is now the fg colour", painted == (255, 0, 0, 255), str(painted))
+    check("paint: frame count unchanged", controller.frame_count == frames_before)
+    check("paint: one undoable edit recorded", controller.can_undo and controller.dirty)
+    check("paint: preview cleared on commit", len(window.canvas._stroke_items) == 0)
+
+    window._set_fg_color((0, 0, 0, 255))  # clear the fg, then pick the red back
+    window._select_tool("eyedropper")
+    dp = window.canvas._image_to_display(cxi, cyi)
+    window.canvas._on_press(_XY(int(dp[0]), int(dp[1])))
+    check("eyedropper: adopted the painted colour", window._fg_color == (255, 0, 0, 255),
+          str(window._fg_color))
+
+    window._select_tool("eraser")
+    window._brush_size = 3
+    de = window.canvas._image_to_display(cxi, cyi)
+    window.canvas._on_press(_XY(int(de[0]), int(de[1])))
+    window.canvas._on_release(_XY(int(de[0]), int(de[1])))
+    root.update()
+    erased = controller.doc[controller.index].image.getpixel((cxi, cyi))
+    check("eraser: centre pixel alpha cleared", erased[3] == 0, str(erased))
+
+    window._select_tool("cursor")
+    check("tools: put away (back to cursor)", not window.canvas.has_tool)
+
     # reset to a clean single edit for the save section
     while controller.can_undo:
         controller.undo()

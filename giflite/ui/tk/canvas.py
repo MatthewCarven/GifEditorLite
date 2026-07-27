@@ -74,11 +74,16 @@ class PreviewCanvas(tk.Canvas):
         self._crop_on_end: "Callable[[bool], None] | None" = None
         self._crop_start: tuple[int, int] | None = None
         self._crop_items: list[int] = []
+        # Active paint tool (a ui.tk.tools.Tool) and its context, or None. The
+        # mouse handlers below dispatch to crop first, then to the active tool.
+        self._tool = None
+        self._tool_ctx = None
+        self._stroke_items: list[int] = []
         self.bind("<Configure>", self._on_configure)
-        self.bind("<ButtonPress-1>", self._crop_press)
-        self.bind("<B1-Motion>", self._crop_drag)
-        self.bind("<ButtonRelease-1>", self._crop_release)
-        self.bind("<Escape>", self._crop_escape)
+        self.bind("<ButtonPress-1>", self._on_press)
+        self.bind("<B1-Motion>", self._on_drag)
+        self.bind("<ButtonRelease-1>", self._on_release)
+        self.bind("<Escape>", self._on_escape)
 
     # ---- public ----------------------------------------------------------
 
@@ -202,6 +207,94 @@ class PreviewCanvas(tk.Canvas):
         # Remember exactly where the image landed; the crop gesture maps widget
         # coordinates back to image pixels through this.
         self._image_geom = (left, top, fw, fh)
+
+    # ---- mouse dispatch: crop mode first, then the active tool -----------
+
+    def _on_press(self, event: tk.Event) -> None:
+        if self._crop_mode:
+            self._crop_press(event)
+            return
+        if self._tool is not None and self._image_geom is not None:
+            self._tool.on_press(self._tool_ctx, *self._display_to_image(event.x, event.y))
+
+    def _on_drag(self, event: tk.Event) -> None:
+        if self._crop_mode:
+            self._crop_drag(event)
+            return
+        if self._tool is not None and self._image_geom is not None:
+            self._tool.on_drag(self._tool_ctx, *self._display_to_image(event.x, event.y))
+
+    def _on_release(self, event: tk.Event) -> None:
+        if self._crop_mode:
+            self._crop_release(event)
+            return
+        if self._tool is not None and self._image_geom is not None:
+            self._tool.on_release(self._tool_ctx, *self._display_to_image(event.x, event.y))
+
+    def _on_escape(self, event: tk.Event) -> "str | None":
+        if self._crop_mode:
+            return self._crop_escape(event)
+        return None
+
+    # ---- active tool -----------------------------------------------------
+
+    def set_tool(self, tool, ctx) -> None:
+        """Make `tool` the active paint tool (its `cursor` shows over the image).
+        Pass tool=None to clear back to plain viewing."""
+        self.clear_stroke_preview()
+        self._tool = tool
+        self._tool_ctx = ctx
+        self.configure(cursor=(tool.cursor if tool is not None else ""))
+
+    def clear_tool(self) -> None:
+        self.set_tool(None, None)
+
+    @property
+    def has_tool(self) -> bool:
+        return self._tool is not None
+
+    # ---- provisional stroke overlay --------------------------------------
+
+    def _image_to_display(self, ix: float, iy: float) -> tuple[float, float]:
+        """Inverse of _display_to_image: an image pixel -> a widget point."""
+        left, top, fw, fh = self._image_geom
+        src_w, src_h = self._source.size
+        return (left + ix / src_w * fw, top + iy / src_h * fh)
+
+    def clear_stroke_preview(self) -> None:
+        for item in self._stroke_items:
+            self.delete(item)
+        self._stroke_items = []
+
+    def show_stroke_preview(self, points, color: str, size: int, erase: bool) -> None:
+        """Draw the in-progress stroke as scaled canvas items. `color` is a Tk
+        colour string; `size` is the brush diameter in image pixels. This is the
+        tool's own local preview -- the real pixels land on commit (the gesture
+        rule, ARCHITECTURE.md 11.3 / 19)."""
+        self.clear_stroke_preview()
+        if self._image_geom is None or self._source is None or not points:
+            return
+        _, _, fw, _ = self._image_geom
+        width = max(1, int(round(size * fw / self._source.size[0])))
+        disp = [self._image_to_display(x, y) for x, y in points]
+        if len(disp) == 1:
+            x, y = disp[0]
+            r = max(1, width // 2)
+            self._stroke_items.append(self.create_oval(
+                x - r, y - r, x + r, y + r,
+                outline=(CROP_MARQUEE if erase else color),
+                fill=("" if erase else color), width=1,
+            ))
+        else:
+            flat = [c for pt in disp for c in pt]
+            if erase:
+                self._stroke_items.append(self.create_line(
+                    *flat, fill=CROP_MARQUEE, width=width, dash=(3, 2),
+                    capstyle="round", joinstyle="round"))
+            else:
+                self._stroke_items.append(self.create_line(
+                    *flat, fill=color, width=width,
+                    capstyle="round", joinstyle="round"))
 
     # ---- crop mode (rubber-band selection) -------------------------------
     #

@@ -12,7 +12,7 @@ from __future__ import annotations
 import time
 import tkinter as tk
 from pathlib import Path
-from tkinter import filedialog, messagebox, ttk
+from tkinter import colorchooser, filedialog, messagebox, ttk
 
 from giflite.app import events as ev
 from giflite.app.cache import ThumbnailCache
@@ -24,6 +24,7 @@ from giflite.ui.base import Frontend
 from giflite.ui.tk.canvas import PreviewCanvas
 from giflite.ui.tk.dialogs import ask_params
 from giflite.ui.tk.timeline import Timeline
+from giflite.ui.tk.tools import default_tools
 
 APP_NAME = "GIF Editor Lite"
 EMPTY_TEXT = "No animation open\n\nCtrl+O to open a GIF"
@@ -47,6 +48,12 @@ def _format_bytes(nbytes: int) -> str:
     return f"{nbytes / (1024 * 1024):.1f} MB"
 
 
+def _rgb_hex(color) -> str:
+    """(r, g, b, a) -> '#rrggbb' for Tk; alpha is ignored (Tk has no alpha)."""
+    r, g, b = int(color[0]), int(color[1]), int(color[2])
+    return f"#{r:02x}{g:02x}{b:02x}"
+
+
 class MainWindow:
     def __init__(self, root: tk.Tk, controller: AppController) -> None:
         self.root = root
@@ -56,6 +63,13 @@ class MainWindow:
         root.title(APP_NAME)
         root.geometry("900x680")
         root.minsize(480, 400)
+
+        # Painting tool state (frontend-owned; ARCHITECTURE.md 19). The active
+        # tool, plus the settings it reads through the ToolContext (this window).
+        self._tools = default_tools()
+        self._active_tool = None
+        self._fg_color = (0, 0, 0, 255)
+        self._brush_size = 4
 
         self._build_menu()
         self._build_body()
@@ -132,9 +146,16 @@ class MainWindow:
         # Crop enters a gesture mode on the preview; the canvas owns Esc while
         # active, so the global Esc below still deselects the rest of the time.
         self.root.bind_all("<c>", lambda _e: self._enter_crop_mode())
+        # Paint tools: brush / eraser / eyedropper.
+        self.root.bind_all("<b>", lambda _e: self._select_tool("pencil"))
+        self.root.bind_all("<e>", lambda _e: self._select_tool("eraser"))
+        self.root.bind_all("<i>", lambda _e: self._select_tool("eyedropper"))
         self.root.bind_all("<Escape>", lambda _e: self._clear_selection())
 
     def _build_body(self) -> None:
+        # Tool palette across the top; the preview canvas takes the slack below.
+        self._build_toolbar()
+
         # Packed bottom-up so the preview canvas takes all the slack.
         self.status = ttk.Label(self.root, text="Ready", anchor="w", padding=(8, 3))
         self.status.pack(side="bottom", fill="x")
@@ -177,6 +198,34 @@ class MainWindow:
         self.speed.set("1x")
         self.speed.bind("<<ComboboxSelected>>", self._on_speed)
         self.speed.pack(side="right")
+
+    def _build_toolbar(self) -> None:
+        bar = ttk.Frame(self.root, padding=(8, 4))
+        bar.pack(side="top", fill="x")
+
+        ttk.Label(bar, text="Tools").pack(side="left", padx=(0, 6))
+        self._tool_var = tk.StringVar(value="cursor")
+        # "cursor" is the no-tool default (plain viewing); the other three map to
+        # entries in self._tools. Radiobuttons give a free single-selection UI.
+        for tid, text in (("cursor", "Cursor"), ("pencil", "Pencil"),
+                          ("eraser", "Eraser"), ("eyedropper", "Eyedropper")):
+            ttk.Radiobutton(
+                bar, text=text, value=tid, variable=self._tool_var,
+                command=lambda t=tid: self._select_tool(t),
+            ).pack(side="left")
+
+        ttk.Separator(bar, orient="vertical").pack(side="left", fill="y", padx=10)
+
+        ttk.Label(bar, text="Colour").pack(side="left", padx=(0, 4))
+        # Classic tk.Button so the swatch can carry the colour as its background.
+        self._swatch = tk.Button(bar, width=3, bg=_rgb_hex(self._fg_color),
+                                 relief="sunken", command=self._choose_color)
+        self._swatch.pack(side="left")
+
+        ttk.Label(bar, text="Size").pack(side="left", padx=(10, 4))
+        self._size_var = tk.StringVar(value=str(self._brush_size))
+        self._size_var.trace_add("write", lambda *_: self._on_size_change())
+        ttk.Spinbox(bar, from_=1, to=64, width=4, textvariable=self._size_var).pack(side="left")
 
     def _subscribe(self) -> None:
         bus = self.controller.events
@@ -287,6 +336,72 @@ class MainWindow:
         if not committed:
             self.status.configure(text=self._summary())
 
+    # ---- painting tools (the canvas tools call the ToolContext below) -----
+
+    def _select_tool(self, tool_id: str) -> None:
+        """Activate a paint tool, or 'cursor' to put tools away."""
+        self._tool_var.set(tool_id)
+        tool = self._tools.get(tool_id)
+        self._active_tool = tool
+        if tool is None:
+            self.canvas.clear_tool()
+            self.status.configure(text=self._summary())
+            return
+        self.controller.pause()  # painting is an editing mode, not a viewing one
+        self.canvas.set_tool(tool, self)
+        self.status.configure(text=f"{tool.label}: drag on the image")
+
+    def _choose_color(self) -> None:
+        rgb, _hex = colorchooser.askcolor(
+            color=_rgb_hex(self._fg_color), parent=self.root, title="Foreground colour")
+        if rgb is not None:
+            self._set_fg_color((int(rgb[0]), int(rgb[1]), int(rgb[2]), 255))
+
+    def _set_fg_color(self, rgba) -> None:
+        self._fg_color = (int(rgba[0]), int(rgba[1]), int(rgba[2]),
+                          int(rgba[3]) if len(rgba) > 3 else 255)
+        self._swatch.configure(bg=_rgb_hex(self._fg_color))
+
+    def _on_size_change(self) -> None:
+        try:
+            self._brush_size = max(1, min(int(float(self._size_var.get())), 256))
+        except (TypeError, ValueError):
+            pass  # mid-edit garbage in the spinbox; keep the last good size
+
+    # ToolContext protocol -- see ui/tk/tools.py -------------------------------
+
+    @property
+    def frame_index(self) -> int:
+        return self.controller.index
+
+    @property
+    def brush_size(self) -> int:
+        return self._brush_size
+
+    @property
+    def fg_color(self):
+        return self._fg_color
+
+    def commit(self, op_id: str, **params) -> None:
+        self.controller.run_op(op_id, **params)
+
+    def pick_color(self, x: int, y: int) -> None:
+        image = self.controller.frame_image()
+        if image is None:
+            return
+        w, h = image.size
+        px = max(0, min(int(x), w - 1))
+        py = max(0, min(int(y), h - 1))
+        r, g, b, _a = image.getpixel((px, py))
+        self._set_fg_color((r, g, b, 255))  # adopt it opaque, so it always paints
+
+    def preview(self, points, erase: bool = False) -> None:
+        self.canvas.show_stroke_preview(points, _rgb_hex(self._fg_color),
+                                        self._brush_size, erase)
+
+    def clear_preview(self) -> None:
+        self.canvas.clear_stroke_preview()
+
     # ---- menu construction / state ---------------------------------------
 
     def _build_op_menu(self, menubar: tk.Menu, group_key: str, title: str):
@@ -359,6 +474,7 @@ class MainWindow:
             self.thumbnails.retain({f.image_uid for f in doc})
         else:
             self.thumbnails.clear()
+            self._select_tool("cursor")  # no document -> put tools away
         # Keep the timeline scrolled where it was during an edit; only jump back
         # to the start for a genuinely new document.
         self.timeline.set_document(doc, reset_view=reason in ("open", "close"))

@@ -58,6 +58,14 @@ class TestPaint:
         r = run("paint.stroke", d, index=0, points=((2, 2),), size=1, color=(10, 20, 30))
         assert r.doc.frames[0].image.getpixel((2, 2)) == (10, 20, 30, 255)
 
+    def test_selection_follows_to_the_painted_frame(self):
+        # run_op moves the playhead to result.selection.first, so a stroke must
+        # select the frame it painted or the playhead jumps off it.
+        d = doc(4, (8, 8))
+        r = run("paint.stroke", d, sel=Selection(frozenset({0})), index=2,
+                points=((1, 1),), size=1, color=(9, 9, 9, 255))
+        assert r.selection.ordered == (2,)
+
     def test_result_validates(self):
         run("paint.stroke", doc(2, (8, 8)), index=0, points=((3, 3),), size=2,
             color=(1, 2, 3, 255)).doc.validate()

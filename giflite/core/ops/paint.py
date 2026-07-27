@@ -97,7 +97,10 @@ def _apply_stroke(doc: Document, sel: Selection, index: int,
         return OpResult(doc, sel)  # stroke missed / erased nothing -> decline
     frames = list(doc.frames)
     frames[index] = Frame.new(out, frame.duration_ms)  # fresh uid, same timing
-    return OpResult(replace(doc, frames=tuple(frames)), sel)  # selection untouched
+    # Keep the playhead on the frame just painted (and select it). The op must
+    # own this: run_op moves the index to result.selection.first, so passing the
+    # old selection through would jump the playhead off the frame we just edited.
+    return OpResult(replace(doc, frames=tuple(frames)), Selection.single(index))
 
 
 @register_op

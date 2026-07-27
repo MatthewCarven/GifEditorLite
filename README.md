@@ -5,8 +5,8 @@ nothing else.
 
 Status: **M4 — a working lite GIF editor.** Opens, plays (with ping-pong),
 edits frames (delete/duplicate/reorder/reverse/trim), re-times them (set delay,
-scale speed), transforms the canvas (resize/rotate/flip/crop), undo/redo, and
-saves back to GIF. See [TODO.md](TODO.md) for what's next and
+scale speed), transforms the canvas (resize/rotate/flip/crop), paints
+(pencil/eraser/eyedropper), undo/redo, and saves back to GIF. See [TODO.md](TODO.md) for what's next and
 [ARCHITECTURE.md](ARCHITECTURE.md) for why it's shaped this way.
 
 ## Use
@@ -26,6 +26,12 @@ dialog generated from the operation itself.
 **Cropping** is a gesture rather than a dialog (typing four numbers is poor UX):
 press **C** or pick Image → Crop, drag a rectangle on the preview — a live box
 shows the pixel size — and release to crop every frame to it. Esc cancels.
+
+**Painting** uses the tool palette across the top: pick **Pencil** (B), **Eraser**
+(E) or **Eyedropper** (I), choose a colour and brush size, and drag on the preview
+to paint the current frame. The stroke previews as you drag and commits as one
+undoable edit on release. Hard-edged brushes for now; soft brushes, a fill bucket
+and shapes are on the roadmap.
 
 **Saving:** Ctrl+S to save, Ctrl+Shift+S for Save As. One quirk to know about —
 GIF merges identical *consecutive* frames and sums their durations, so a frame

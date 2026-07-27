@@ -108,13 +108,14 @@ Design in ARCHITECTURE §19. Tools live in the frontend and commit pure core ops
 - [x] `_brush_mask` = the pluggable stamp (hard 0/255 now; soft feathered later changes only this)
 - [x] Tests: paint paints, erase clears alpha, disc size, target-index, declines, fresh uid; + immutability CASES (the coverage guard forced it). 268 tests (was 253); boundary rule still clean
 
-**Slice 2 — the tool system + tools (UI):**
+**Slice 2 — the tool system + tools (UI): ✅**
 
-- [ ] `ui/tk/tools.py` — minimal `Tool` protocol + Pencil / Eraser / Eyedropper
-- [ ] Canvas: one mouse-dispatch to the active tool (generalise crop-mode), reuse `_image_geom` mapping, provisional stroke overlay
-- [ ] Tool palette: tool buttons + colour swatch (Tk `colorchooser`) + size spinner; active-tool state; B / E / I keys
-- [ ] Eyedropper sets the FG colour (no op — the Tool≠Operation case)
-- [ ] Xvfb smoke: drive a pencil stroke / erase / eyedropper; screenshot
+- [x] `ui/tk/tools.py` — minimal `Tool` base + Pencil / Eraser (a shared `StrokeTool`) / Eyedropper; toolkit-neutral, talks to a duck-typed `ToolContext`
+- [x] Canvas: one mouse-dispatch to crop-mode-or-active-tool, `_image_to_display` inverse map, provisional stroke overlay (scaled polyline; neutral dashed for erase)
+- [x] Tool palette: Cursor/Pencil/Eraser/Eyedropper radios + colour swatch (Tk `colorchooser`) + size spinbox; active-tool state; B / E / I keys
+- [x] Eyedropper sets the FG colour (no op — the Tool≠Operation case)
+- [x] Caught a real bug: paint must return `Selection.single(index)` or `run_op` moves the playhead off the frame just painted
+- [x] Xvfb smoke 83 checks (was 74) incl. mapped pencil stroke + eyedropper + erase; screenshot
 
 **Later (additive):**
 
