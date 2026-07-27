@@ -38,6 +38,10 @@ from giflite.core.playback import MAX_TICK_MS, PlaybackClock
 # "twice a big GIF" rather than an arbitrary round number.
 MEMORY_WARN_BYTES = 250 * 1024 * 1024
 
+# Appended to the stem when offering a Save As name for a freshly opened file,
+# so the default action never overwrites the user's original.
+EDITED_SUFFIX = "_edited"
+
 
 def _format_size(nbytes: int) -> str:
     return f"{nbytes / (1024 * 1024):.0f} MB"
@@ -50,6 +54,11 @@ class AppController:
         self._selection = Selection.empty()
         self._index = 0
         self._path: Path | None = None
+        # True while `_path` is still the file we *read*, i.e. nothing has been
+        # written over it yet. Saving to it would re-encode the user's original
+        # in place, which for GIF is lossy and irreversible, so the frontend gets
+        # to warn once. Cleared by the first successful write to any path.
+        self._path_is_source = False
         self._clock = PlaybackClock()
         self._playing = False
         self._history = History()
@@ -162,6 +171,7 @@ class AppController:
         self._stop_playback()
         self._doc = doc
         self._path = path
+        self._path_is_source = True  # untouched original until something writes
         self._index = 0
         self._selection = Selection.single(0)
         self._clock.loop = doc.loop
@@ -180,6 +190,7 @@ class AppController:
         self._stop_playback()
         self._doc = None
         self._path = None
+        self._path_is_source = False
         self._index = 0
         self._selection = Selection.empty()
         self._history.clear()
@@ -192,6 +203,34 @@ class AppController:
     def has_path(self) -> bool:
         """Whether Save can write in place, or must fall back to Save As."""
         return self._path is not None
+
+    @property
+    def overwrites_source(self) -> bool:
+        """Whether a plain Save would write over the file that was opened.
+
+        Worth knowing because saving is *not* a round trip: writing a GIF rebuilds
+        the palette and merges identical consecutive frames into longer holds
+        (ARCHITECTURE.md 12, 18). Do that in place and the original is gone. The
+        judgement of whether to warn, and how, is frontend policy -- this is just
+        the fact it needs, so a second frontend doesn't have to re-derive it.
+        """
+        return self._path is not None and self._path_is_source
+
+    @property
+    def suggested_save_name(self) -> str:
+        """A filename to offer in Save As, steered away from the original.
+
+        Suffixes `_edited` while the path is still the untouched source, and does
+        so idempotently -- saving twice must not produce `a_edited_edited.gif`.
+        """
+        if self._path is None:
+            return "untitled.gif"
+        if not self._path_is_source:
+            return self._path.name
+        stem = self._path.stem
+        if not stem.endswith(EDITED_SUFFIX):
+            stem += EDITED_SUFFIX
+        return stem + self._path.suffix
 
     def save(self) -> bool:
         """Write to the current path. False if there's nowhere to write yet
@@ -224,6 +263,9 @@ class AppController:
             return False
 
         self._path = path
+        # Whatever this path was before, it now holds *our* output, so a further
+        # Save can't destroy anything the user didn't already replace.
+        self._path_is_source = False
         self._history.mark_saved()  # this state now matches disk -> not dirty
         self.events.emit(ev.TITLE_CHANGED, path=path, dirty=self.dirty)
         message = f"Saved {path.name}"

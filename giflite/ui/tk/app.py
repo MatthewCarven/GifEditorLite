@@ -29,6 +29,9 @@ from giflite.ui.tk.tools import default_tools
 APP_NAME = "GIF Editor Lite"
 EMPTY_TEXT = "No animation open\n\nCtrl+O to open a GIF"
 
+# The palette's no-tool selection: plain viewing, no gesture armed.
+CURSOR_TOOL = "cursor"
+
 # Op id prefix -> menu title. Order here is menu order in the bar.
 OP_MENUS = (("frames", "Frames"), ("timing", "Timing"), ("canvas", "Image"))
 
@@ -64,8 +67,9 @@ class MainWindow:
         root.geometry("900x680")
         root.minsize(480, 400)
 
-        # Painting tool state (frontend-owned; ARCHITECTURE.md 19). The active
-        # tool, plus the settings it reads through the ToolContext (this window).
+        # Tool state (frontend-owned; ARCHITECTURE.md 19). The active tool --
+        # crop, pencil, eraser or eyedropper -- plus the settings tools read
+        # through the ToolContext (implemented by this window).
         self._tools = default_tools()
         self._active_tool = None
         self._fg_color = (0, 0, 0, 255)
@@ -114,11 +118,12 @@ class MainWindow:
             menu, entries = self._build_op_menu(menubar, group_key, title)
             if group_key == "canvas":
                 # Crop is a canvas op but gesture-driven (in_menu=False), so it
-                # isn't in menu_groups(). Add it here and let it ride the group's
-                # existing enable/disable refresh via can_run("canvas.crop").
+                # isn't in menu_groups(). The menu item just selects the crop
+                # tool; it rides the group's existing enable/disable refresh via
+                # can_run("canvas.crop").
                 menu.add_separator()
                 menu.add_command(label="Crop", accelerator="C",
-                                 command=self._enter_crop_mode)
+                                 command=lambda: self._select_tool("crop"))
                 entries.append((menu.index("end"), "canvas.crop"))
 
         self.root.config(menu=menubar)
@@ -143,10 +148,10 @@ class MainWindow:
         self.root.bind_all("<Control-d>", lambda _e: self.controller.run_op("frames.duplicate"))
         self.root.bind_all("<Delete>", lambda _e: self.controller.run_op("frames.delete"))
         self.root.bind_all("<BackSpace>", lambda _e: self.controller.run_op("frames.delete"))
-        # Crop enters a gesture mode on the preview; the canvas owns Esc while
-        # active, so the global Esc below still deselects the rest of the time.
-        self.root.bind_all("<c>", lambda _e: self._enter_crop_mode())
-        # Paint tools: brush / eraser / eyedropper.
+        # Tool shortcuts. Each selects a tool on the preview; the canvas owns Esc
+        # while one is active, so the global Esc below still deselects the rest
+        # of the time.
+        self.root.bind_all("<c>", lambda _e: self._select_tool("crop"))
         self.root.bind_all("<b>", lambda _e: self._select_tool("pencil"))
         self.root.bind_all("<e>", lambda _e: self._select_tool("eraser"))
         self.root.bind_all("<i>", lambda _e: self._select_tool("eyedropper"))
@@ -204,10 +209,12 @@ class MainWindow:
         bar.pack(side="top", fill="x")
 
         ttk.Label(bar, text="Tools").pack(side="left", padx=(0, 6))
-        self._tool_var = tk.StringVar(value="cursor")
-        # "cursor" is the no-tool default (plain viewing); the other three map to
-        # entries in self._tools. Radiobuttons give a free single-selection UI.
-        for tid, text in (("cursor", "Cursor"), ("pencil", "Pencil"),
+        self._tool_var = tk.StringVar(value=CURSOR_TOOL)
+        # "cursor" is the no-tool default (plain viewing); the rest map to entries
+        # in self._tools. Radiobuttons give a free single-selection UI, and
+        # exactly one tool being active is the point -- that's what having folded
+        # crop in here buys (it used to be a mode running alongside them).
+        for tid, text in (("cursor", "Cursor"), ("crop", "Crop"), ("pencil", "Pencil"),
                           ("eraser", "Eraser"), ("eyedropper", "Eyedropper")):
             ttk.Radiobutton(
                 bar, text=text, value=tid, variable=self._tool_var,
@@ -251,20 +258,53 @@ class MainWindow:
 
     def save_file(self) -> None:
         # Save writes to the current path; with none yet, fall back to Save As.
-        if self.controller.has_path:
-            self._with_busy_cursor(self.controller.save)
-        else:
+        if not self.controller.has_path:
             self.save_file_as()
+            return
+        if self.controller.overwrites_source and not self._confirm_overwrite_source():
+            return
+        self._with_busy_cursor(self.controller.save)
+
+    def _confirm_overwrite_source(self) -> bool:
+        """Ask before Ctrl+S re-encodes the file the user opened.
+
+        Saving is not a round trip -- the palette is rebuilt and identical
+        consecutive frames are merged -- so an absent-minded Ctrl+S silently
+        degrades someone's source file with no way back. Asking once (the
+        controller clears the flag after any write) is cheap; a lost original
+        isn't. Returns True to go ahead with the in-place save.
+        """
+        answer = messagebox.askyesnocancel(
+            APP_NAME,
+            f"Overwrite the original {self.controller.path.name}?",
+            detail=(
+                "Saving re-encodes the animation: the palette is rebuilt and "
+                "identical consecutive frames are merged into longer holds. The "
+                "file you opened cannot be recovered afterwards.\n\n"
+                "Yes  -  overwrite it\n"
+                "No  -  save to a new file instead"
+            ),
+            icon=messagebox.WARNING,
+            default=messagebox.NO,  # the safe button is the one Enter picks
+            parent=self.root,
+        )
+        if answer is None:
+            return False  # Cancel: don't save, don't open a dialog either
+        if answer:
+            return True
+        self.save_file_as()
+        return False
 
     def save_file_as(self) -> None:
         if self.controller.doc is None:
             return
-        current = self.controller.path
         path = filedialog.asksaveasfilename(
             title="Save animation",
             defaultextension=".gif",
             filetypes=save_filter(),
-            initialfile=current.name if current else "untitled.gif",
+            # Naming policy lives in the controller so a second frontend inherits
+            # it: "<name>_edited.gif" while the current path is still the original.
+            initialfile=self.controller.suggested_save_name,
         )
         if path:
             self._with_busy_cursor(lambda: self.controller.save_as(Path(path)))
@@ -314,32 +354,14 @@ class MainWindow:
         if values is not None:  # None == cancelled
             self.controller.run_op(op_id, **values)
 
-    # ---- crop (a canvas gesture, not a dialog) ---------------------------
-
-    def _enter_crop_mode(self) -> None:
-        """Arm the preview's rubber-band. Crop is coordinate-driven, and typing
-        four numbers is poor UX, so it's a drawn gesture rather than a dialog."""
-        if self.controller.doc is None or self.canvas.is_cropping:
-            return
-        self.controller.pause()  # a running preview would repaint over the marquee
-        if self.canvas.begin_crop(self._do_crop, self._crop_ended):
-            self.status.configure(
-                text="Crop: drag a rectangle on the image   |   Esc to cancel"
-            )
-
-    def _do_crop(self, x: int, y: int, width: int, height: int) -> None:
-        self.controller.run_op("canvas.crop", x=x, y=y, width=width, height=height)
-
-    def _crop_ended(self, committed: bool) -> None:
-        # On commit the DOC_CHANGED render already refreshed the status line; on
-        # cancel nothing fired, so restore it from current state.
-        if not committed:
-            self.status.configure(text=self._summary())
-
-    # ---- painting tools (the canvas tools call the ToolContext below) -----
+    # ---- tools (the canvas tools call the ToolContext below) -------------
 
     def _select_tool(self, tool_id: str) -> None:
-        """Activate a paint tool, or 'cursor' to put tools away."""
+        """Activate a tool -- crop, pencil, eraser, eyedropper -- or 'cursor' to
+        put tools away. One entry point for the palette, the shortcuts and the
+        Image > Crop menu item alike."""
+        if tool_id != CURSOR_TOOL and self.controller.doc is None:
+            return  # nothing to work on; leave the palette on Cursor
         self._tool_var.set(tool_id)
         tool = self._tools.get(tool_id)
         self._active_tool = tool
@@ -347,9 +369,15 @@ class MainWindow:
             self.canvas.clear_tool()
             self.status.configure(text=self._summary())
             return
-        self.controller.pause()  # painting is an editing mode, not a viewing one
+        # Every tool is an editing mode, not a viewing one: a running preview
+        # would repaint over the live overlay on the next tick.
+        self.controller.pause()
         self.canvas.set_tool(tool, self)
-        self.status.configure(text=f"{tool.label}: drag on the image")
+        self.status.configure(text=f"{tool.label}: {tool.hint}")
+
+    def end_tool(self) -> None:
+        """ToolContext hook: put tools away (the canvas calls this on Esc)."""
+        self._select_tool(CURSOR_TOOL)
 
     def _choose_color(self) -> None:
         rgb, _hex = colorchooser.askcolor(
@@ -395,12 +423,15 @@ class MainWindow:
         r, g, b, _a = image.getpixel((px, py))
         self._set_fg_color((r, g, b, 255))  # adopt it opaque, so it always paints
 
-    def preview(self, points, erase: bool = False) -> None:
-        self.canvas.show_stroke_preview(points, _rgb_hex(self._fg_color),
+    def preview_stroke(self, points, erase: bool = False) -> None:
+        self.canvas.show_stroke_overlay(points, _rgb_hex(self._fg_color),
                                         self._brush_size, erase)
 
+    def preview_rect(self, box) -> None:
+        self.canvas.show_rect_overlay(box)
+
     def clear_preview(self) -> None:
-        self.canvas.clear_stroke_preview()
+        self.canvas.clear_overlay()
 
     # ---- menu construction / state ---------------------------------------
 
@@ -474,7 +505,7 @@ class MainWindow:
             self.thumbnails.retain({f.image_uid for f in doc})
         else:
             self.thumbnails.clear()
-            self._select_tool("cursor")  # no document -> put tools away
+            self._select_tool(CURSOR_TOOL)  # no document -> put tools away
         # Keep the timeline scrolled where it was during an edit; only jump back
         # to the start for a genuinely new document.
         self.timeline.set_document(doc, reset_view=reason in ("open", "close"))

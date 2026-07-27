@@ -21,7 +21,6 @@ from __future__ import annotations
 
 import tkinter as tk
 from collections import OrderedDict
-from typing import Callable
 
 from PIL import Image, ImageDraw, ImageTk
 
@@ -31,7 +30,7 @@ CHECKER_LIGHT = (58, 58, 64, 255)
 CHECKER_DARK = (48, 48, 54, 255)
 CHECKER_SQUARE = 8          # displayed pixels per square
 CANVAS_BORDER = "#55555c"
-CROP_MARQUEE = "#4a9eff"    # accent used for the rubber-band crop rectangle
+MARQUEE = "#4a9eff"         # accent for provisional overlays (crop box, erase)
 
 # How many composed frames to keep. During playback each frame is drawn once at
 # the current window size, so a GIF-sized cache lets a second viewing (or a
@@ -64,21 +63,16 @@ class PreviewCanvas(tk.Canvas):
         self._boards: dict[tuple[int, int], Image.Image] = {}
         self._last_size = (0, 0)
         # Where the fitted image currently sits on the canvas, (left, top, w, h)
-        # in widget pixels -- the reference frame the crop gesture maps against.
-        # None whenever no image is shown. Recomputed on every _redraw.
+        # in widget pixels -- the reference frame every tool gesture maps
+        # against. None whenever no image is shown. Recomputed on every _redraw.
         self._image_geom: tuple[int, int, int, int] | None = None
-        # Crop-mode (rubber-band) state; see begin_crop. Inert until then, so the
-        # mouse bindings below no-op during normal viewing.
-        self._crop_mode = False
-        self._crop_on_commit: "Callable[[int, int, int, int], None] | None" = None
-        self._crop_on_end: "Callable[[bool], None] | None" = None
-        self._crop_start: tuple[int, int] | None = None
-        self._crop_items: list[int] = []
-        # Active paint tool (a ui.tk.tools.Tool) and its context, or None. The
-        # mouse handlers below dispatch to crop first, then to the active tool.
+        # The active tool (a ui.tk.tools.Tool) and its context, or None for plain
+        # viewing. This is the *only* mouse path on the canvas: crop, pencil,
+        # eraser and eyedropper all arrive as tools, so there is one dispatch to
+        # reason about rather than a mode flag racing a tool.
         self._tool = None
         self._tool_ctx = None
-        self._stroke_items: list[int] = []
+        self._overlay_items: list[int] = []
         self.bind("<Configure>", self._on_configure)
         self.bind("<ButtonPress-1>", self._on_press)
         self.bind("<B1-Motion>", self._on_drag)
@@ -114,10 +108,13 @@ class PreviewCanvas(tk.Canvas):
         if size == self._last_size:
             return
         self._last_size = size
-        # A resize moves and rescales the image, so an in-progress crop box would
-        # now map against stale geometry -- cancel it rather than crop wrongly.
-        if self._crop_mode:
-            self._end_crop(committed=False)
+        # A resize moves and rescales the image, so coordinates a gesture has
+        # already collected now map against stale geometry. Cancel rather than
+        # commit something that lands in the wrong place. (Crop had this guard
+        # from the start; folding painting into the same path gave strokes the
+        # same protection, which they were previously missing.)
+        if self._tool is not None and self._tool.is_gesturing:
+            self._tool.on_cancel(self._tool_ctx)
         self._redraw()
 
     def _fit(self, image: Image.Image, width: int, height: int) -> Image.Image:
@@ -204,47 +201,62 @@ class PreviewCanvas(tk.Canvas):
             left, top, left + fw, top + fh,
             outline=CANVAS_BORDER, width=1,
         )
-        # Remember exactly where the image landed; the crop gesture maps widget
+        # Remember exactly where the image landed; tool gestures map widget
         # coordinates back to image pixels through this.
         self._image_geom = (left, top, fw, fh)
 
-    # ---- mouse dispatch: crop mode first, then the active tool -----------
+    # ---- mouse dispatch: one path, straight to the active tool ------------
+    #
+    # Every gesture on the preview is a tool (ARCHITECTURE.md 19), crop included,
+    # so there is exactly one place mouse events are routed and exactly one
+    # coordinate mapping. Tools receive image pixels and never see a widget
+    # coordinate; the canvas never learns what a tool does with them.
+
+    def _dispatch(self, handler_name: str, event: tk.Event) -> None:
+        if self._tool is None or self._image_geom is None or self._source is None:
+            return
+        handler = getattr(self._tool, handler_name)
+        handler(self._tool_ctx, *self._display_to_image(event.x, event.y))
 
     def _on_press(self, event: tk.Event) -> None:
-        if self._crop_mode:
-            self._crop_press(event)
-            return
-        if self._tool is not None and self._image_geom is not None:
-            self._tool.on_press(self._tool_ctx, *self._display_to_image(event.x, event.y))
+        self._dispatch("on_press", event)
 
     def _on_drag(self, event: tk.Event) -> None:
-        if self._crop_mode:
-            self._crop_drag(event)
-            return
-        if self._tool is not None and self._image_geom is not None:
-            self._tool.on_drag(self._tool_ctx, *self._display_to_image(event.x, event.y))
+        self._dispatch("on_drag", event)
 
     def _on_release(self, event: tk.Event) -> None:
-        if self._crop_mode:
-            self._crop_release(event)
-            return
-        if self._tool is not None and self._image_geom is not None:
-            self._tool.on_release(self._tool_ctx, *self._display_to_image(event.x, event.y))
+        self._dispatch("on_release", event)
 
-    def _on_escape(self, event: tk.Event) -> "str | None":
-        if self._crop_mode:
-            return self._crop_escape(event)
-        return None
+    def _on_escape(self, _event: tk.Event | None = None) -> "str | None":
+        """Two-stage Esc, and only ours while a tool is active.
+
+        Mid-gesture it abandons the gesture but keeps the tool (you meant to
+        redraw the box, not to leave crop). Otherwise it puts the tool away.
+        With no tool it returns None so the global Esc still deselects frames --
+        this widget's bindtag runs before `bind_all`, so returning "break"
+        unconditionally would swallow that.
+        """
+        if self._tool is None:
+            return None
+        if self._tool.is_gesturing:
+            self._tool.on_cancel(self._tool_ctx)
+        elif self._tool_ctx is not None:
+            self._tool_ctx.end_tool()
+        return "break"
 
     # ---- active tool -----------------------------------------------------
 
     def set_tool(self, tool, ctx) -> None:
-        """Make `tool` the active paint tool (its `cursor` shows over the image).
+        """Make `tool` the active tool (its `cursor` shows over the image).
         Pass tool=None to clear back to plain viewing."""
-        self.clear_stroke_preview()
+        if self._tool is not None and self._tool.is_gesturing:
+            self._tool.on_cancel(self._tool_ctx)  # don't leave a gesture dangling
+        self.clear_overlay()
         self._tool = tool
         self._tool_ctx = ctx
         self.configure(cursor=(tool.cursor if tool is not None else ""))
+        if tool is not None:
+            self.focus_set()  # so <Escape> reaches this widget before the global one
 
     def clear_tool(self) -> None:
         self.set_tool(None, None)
@@ -253,7 +265,15 @@ class PreviewCanvas(tk.Canvas):
     def has_tool(self) -> bool:
         return self._tool is not None
 
-    # ---- provisional stroke overlay --------------------------------------
+    @property
+    def active_tool(self):
+        return self._tool
+
+    # ---- provisional overlays --------------------------------------------
+    #
+    # A tool renders its gesture locally and the real pixels land on commit (the
+    # gesture rule, ARCHITECTURE.md 11.3 / 19). Overlays are plain canvas items,
+    # so no provisional state ever reaches the core.
 
     def _image_to_display(self, ix: float, iy: float) -> tuple[float, float]:
         """Inverse of _display_to_image: an image pixel -> a widget point."""
@@ -261,17 +281,24 @@ class PreviewCanvas(tk.Canvas):
         src_w, src_h = self._source.size
         return (left + ix / src_w * fw, top + iy / src_h * fh)
 
-    def clear_stroke_preview(self) -> None:
-        for item in self._stroke_items:
-            self.delete(item)
-        self._stroke_items = []
+    def _display_to_image(self, dx: float, dy: float) -> tuple[int, int]:
+        """Map a widget point to image pixel coordinates, clamped to 0..w / 0..h
+        so a drag that overshoots the edge pins to it instead of going negative."""
+        left, top, fw, fh = self._image_geom
+        src_w, src_h = self._source.size
+        ix = round((dx - left) / fw * src_w)
+        iy = round((dy - top) / fh * src_h)
+        return (max(0, min(ix, src_w)), max(0, min(iy, src_h)))
 
-    def show_stroke_preview(self, points, color: str, size: int, erase: bool) -> None:
+    def clear_overlay(self) -> None:
+        for item in self._overlay_items:
+            self.delete(item)
+        self._overlay_items = []
+
+    def show_stroke_overlay(self, points, color: str, size: int, erase: bool) -> None:
         """Draw the in-progress stroke as scaled canvas items. `color` is a Tk
-        colour string; `size` is the brush diameter in image pixels. This is the
-        tool's own local preview -- the real pixels land on commit (the gesture
-        rule, ARCHITECTURE.md 11.3 / 19)."""
-        self.clear_stroke_preview()
+        colour string; `size` is the brush diameter in image pixels."""
+        self.clear_overlay()
         if self._image_geom is None or self._source is None or not points:
             return
         _, _, fw, _ = self._image_geom
@@ -280,127 +307,38 @@ class PreviewCanvas(tk.Canvas):
         if len(disp) == 1:
             x, y = disp[0]
             r = max(1, width // 2)
-            self._stroke_items.append(self.create_oval(
+            self._overlay_items.append(self.create_oval(
                 x - r, y - r, x + r, y + r,
-                outline=(CROP_MARQUEE if erase else color),
+                outline=(MARQUEE if erase else color),
                 fill=("" if erase else color), width=1,
             ))
         else:
             flat = [c for pt in disp for c in pt]
             if erase:
-                self._stroke_items.append(self.create_line(
-                    *flat, fill=CROP_MARQUEE, width=width, dash=(3, 2),
+                self._overlay_items.append(self.create_line(
+                    *flat, fill=MARQUEE, width=width, dash=(3, 2),
                     capstyle="round", joinstyle="round"))
             else:
-                self._stroke_items.append(self.create_line(
+                self._overlay_items.append(self.create_line(
                     *flat, fill=color, width=width,
                     capstyle="round", joinstyle="round"))
 
-    # ---- crop mode (rubber-band selection) -------------------------------
-    #
-    # The canvas analog of the timeline's drag-to-reorder (ARCHITECTURE.md 11.3):
-    # it draws its own marquee locally and commits exactly one `canvas.crop` op
-    # on release. No provisional state reaches the core -- the preview is just a
-    # rectangle drawn on this canvas.
-
-    @property
-    def is_cropping(self) -> bool:
-        return self._crop_mode
-
-    def begin_crop(
-        self,
-        on_commit: Callable[[int, int, int, int], None],
-        on_end: Callable[[bool], None],
-    ) -> bool:
-        """Enter crop mode. The next click-drag draws a rectangle that becomes
-        an image-space crop box.
-
-        Returns False if there's nothing to crop (no image shown). `on_commit(x,
-        y, w, h)` fires with an image-pixel box on a valid drag; `on_end(
-        committed)` fires exactly once when the mode exits either way, so the
-        frontend can restore its cursor and status line.
-        """
-        if self._source is None or self._image_geom is None:
-            return False
-        self._clear_crop_items()
-        self._crop_mode = True
-        self._crop_on_commit = on_commit
-        self._crop_on_end = on_end
-        self._crop_start = None
-        self.configure(cursor="crosshair")
-        self.focus_set()  # so <Escape> reaches this widget before the global one
-        return True
-
-    def _end_crop(self, committed: bool) -> None:
-        on_end = self._crop_on_end
-        self._crop_mode = False
-        self._crop_start = None
-        self._crop_on_commit = None
-        self._crop_on_end = None
-        self._clear_crop_items()
-        self.configure(cursor="")
-        if on_end is not None:
-            on_end(committed)
-
-    def _clear_crop_items(self) -> None:
-        for item in self._crop_items:
-            self.delete(item)
-        self._crop_items = []
-
-    def _clamp_to_image(self, dx: float, dy: float) -> tuple[int, int]:
-        """A widget point pinned inside the drawn image rectangle."""
-        left, top, fw, fh = self._image_geom
-        return (int(max(left, min(dx, left + fw))),
-                int(max(top, min(dy, top + fh))))
-
-    def _display_to_image(self, dx: float, dy: float) -> tuple[int, int]:
-        """Map a widget point to image pixel coordinates (0..w, 0..h)."""
-        left, top, fw, fh = self._image_geom
-        src_w, src_h = self._source.size
-        ix = round((dx - left) / fw * src_w)
-        iy = round((dy - top) / fh * src_h)
-        return (max(0, min(ix, src_w)), max(0, min(iy, src_h)))
-
-    def _crop_press(self, event: tk.Event) -> None:
-        if not self._crop_mode or self._image_geom is None:
+    def show_rect_overlay(self, box: tuple[int, int, int, int]) -> None:
+        """Draw a dashed marquee for `box` = (x0, y0, x1, y1) in *image* pixels,
+        with a live size label. Used by the crop gesture; any future rectangular
+        tool (rect select, shapes) gets it for free."""
+        self.clear_overlay()
+        if self._image_geom is None or self._source is None:
             return
-        self._crop_start = self._clamp_to_image(event.x, event.y)
-        self._clear_crop_items()
-
-    def _crop_drag(self, event: tk.Event) -> None:
-        if not self._crop_mode or self._crop_start is None:
-            return
-        x0, y0 = self._crop_start
-        x1, y1 = self._clamp_to_image(event.x, event.y)
-        self._clear_crop_items()
-        self._crop_items.append(self.create_rectangle(
-            x0, y0, x1, y1, outline=CROP_MARQUEE, width=1, dash=(4, 3),
+        x0, y0, x1, y1 = box
+        dx0, dy0 = self._image_to_display(x0, y0)
+        dx1, dy1 = self._image_to_display(x1, y1)
+        self._overlay_items.append(self.create_rectangle(
+            dx0, dy0, dx1, dy1, outline=MARQUEE, width=1, dash=(4, 3),
         ))
-        ix0, iy0 = self._display_to_image(x0, y0)
-        ix1, iy1 = self._display_to_image(x1, y1)
-        self._crop_items.append(self.create_text(
-            x1 + 5, y1 + 5, text=f"{abs(ix1 - ix0)}×{abs(iy1 - iy0)}",
-            fill=CROP_MARQUEE, anchor="nw", font=("TkDefaultFont", 8),
+        # Label in image pixels -- the number that matters is the crop size, not
+        # however many screen pixels it happens to occupy at this zoom.
+        self._overlay_items.append(self.create_text(
+            dx1 + 5, dy1 + 5, text=f"{abs(x1 - x0)}×{abs(y1 - y0)}",
+            fill=MARQUEE, anchor="nw", font=("TkDefaultFont", 8),
         ))
-
-    def _crop_release(self, event: tk.Event) -> None:
-        if not self._crop_mode or self._crop_start is None:
-            return
-        ix0, iy0 = self._display_to_image(*self._crop_start)
-        ix1, iy1 = self._display_to_image(event.x, event.y)
-        left, right = sorted((ix0, ix1))
-        top, bottom = sorted((iy0, iy1))
-        width, height = right - left, bottom - top
-        commit = self._crop_on_commit
-        if width >= 1 and height >= 1 and commit is not None:
-            commit(left, top, width, height)
-            self._end_crop(committed=True)
-        else:
-            # A stray click or zero-area drag: cancel rather than crop nothing.
-            self._end_crop(committed=False)
-
-    def _crop_escape(self, _event: tk.Event | None = None) -> str | None:
-        if not self._crop_mode:
-            return None  # not our key -- let the global Esc (deselect) handle it
-        self._end_crop(committed=False)
-        return "break"

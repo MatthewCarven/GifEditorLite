@@ -466,6 +466,27 @@ This keeps the seam the whole project rests on: the core never hears about mouse
 
 **Which frame, which memory.** A stroke targets the *playhead* frame only (the tool passes `index`); it allocates a fresh-uid image for that one frame and shares the rest. Undo is one snapshot per *stroke* (the gesture rule already collapses a drag to a single op), bounded by the 64-snapshot cap — so a long session has a finite stroke-undo horizon. That is the deliberate lite default. The planned escalation (see TODO): make history **memory-aware** — track the bytes it holds and warn/report past a threshold (~128 MB) rather than silently trimming — the concrete form of risk 1's `FrameStore` note for the painting workload.
 
-**Deferred by choice:** layers (painting is destructive, it bakes into the frame; layers would change the `Document` model and aren't "lite"), soft/AA brushes, fill and shape tools, and zoom/pan. Crop stays its own mode for now but is the natural first citizen to fold into the tool system once it exists — one interaction mechanism instead of two.
+**Deferred by choice:** layers (painting is destructive, it bakes into the frame; layers would change the `Document` model and aren't "lite"), soft/AA brushes, fill and shape tools, and zoom/pan.
 
-**Recipe — add a tool.** A pure op in `core/ops/` for whatever it commits (skip if it commits nothing, like the eyedropper), plus a `Tool` in `ui/tk/tools.py` that maps the gesture and renders its own provisional preview. Same "one file, no edits elsewhere" shape as adding an op.
+### 19.1 Crop folded in — one interaction mechanism
+
+Crop predates this layer, so for one milestone the canvas carried two parallel mechanisms: a `_crop_mode` flag with its own press/drag/release/escape handlers, and the tool dispatch beside it. Both did the same job — map widget pixels to image pixels, render a local preview, commit one op on release — so crop is now simply a `CropTool`. The canvas has exactly one mouse path and one coordinate mapping.
+
+What the fold bought beyond tidiness:
+
+- **A latent painting bug fixed.** Crop cancelled itself on a window resize, because a rescaled image makes collected coordinates stale. Strokes had no such guard, so a resize mid-drag would have committed a stroke against stale geometry and painted in the wrong place. The canvas now cancels *whatever* gesture is in progress, so painting inherited the guard the moment it shared the path.
+- **`is_gesturing` + `on_cancel(ctx)` on the `Tool` base.** These are the two hooks the canvas needs to intervene in a gesture it didn't start, and they're what make the resize guard and the two-stage Esc generic rather than crop-specific.
+- **Two-stage Esc.** Mid-gesture, Esc abandons the gesture and keeps the tool (you meant to redraw the box, not to leave crop); otherwise it puts the tool away. With no tool active the canvas returns `None` so the global Esc still deselects frames — the widget bindtag runs before `bind_all`, so returning `"break"` unconditionally would swallow it.
+- **A reusable rectangle overlay.** `show_rect_overlay` takes a box in *image* pixels (the tool never sees a widget coordinate) and labels it with the image-pixel size, which is the number that matters — not however many screen pixels it occupies at this fit scale. Any future rect-select or shape tool gets it free.
+
+Crop is now sticky like every other tool rather than a one-shot armed mode: it stays selected after a commit, so a second crop is another drag. A stray click (zero area) commits nothing.
+
+**Recipe — add a tool.** A pure op in `core/ops/` for whatever it commits (skip if it commits nothing, like the eyedropper), plus a `Tool` in `ui/tk/tools.py` that maps the gesture and renders its own provisional preview. Same "one file, no edits elsewhere" shape as adding an op. `tools.py` imports no toolkit, so tools are tested headlessly against a fake `ToolContext` (`tests/test_tools.py`) — only the display mapping needs the Xvfb smoke.
+
+### 19.2 Save is not a round trip
+
+Writing a GIF rebuilds the palette and merges identical consecutive frames into longer holds (§12, §18) — both unconditional in Pillow. So an in-place save *destroys* the file that was opened, and Ctrl+S is one keystroke away at all times.
+
+The guard is split along the seam. The controller reports the fact — `overwrites_source` (the current path is still the file we read, nothing has written to it yet) and `suggested_save_name` (`<stem>_edited.gif`, applied idempotently so saving twice never yields `a_edited_edited.gif`) — and the frontend owns the policy: a warning dialog whose default button is the safe one, offering overwrite / save elsewhere / cancel. The flag clears on the first successful write to any path, so the warning appears once per opened file rather than on every save.
+
+Naming policy lives in the controller deliberately: a second frontend should inherit "don't clobber the original" rather than reinvent it.

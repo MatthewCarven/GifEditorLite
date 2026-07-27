@@ -233,9 +233,10 @@ def main() -> int:
     window._on_pingpong()
     check("pingpong: toggles back off", not controller.pingpong)
 
-    # --- M-crop: the rubber-band crop gesture on the preview -----------
-    # Drives _crop_press/_crop_drag/_crop_release directly (fake events carry
-    # widget x/y), exercising the display->image mapping, not just the op.
+    # --- crop as a tool: one dispatch path, same rubber-band ------------
+    # Crop used to be a bespoke mode on the canvas; it is now a Tool like the
+    # paint ones, so this drives the *shared* _on_press/_on_drag/_on_release with
+    # fake widget events, exercising the display->image mapping and the tool.
     class _XY:
         def __init__(self, x, y):
             self.x = x
@@ -244,19 +245,24 @@ def main() -> int:
 
     root.update()
     before_crop_size = controller.doc.size
-    window._enter_crop_mode()
-    check("crop: gesture armed", window.canvas.is_cropping)
+    window._select_tool("crop")
+    check("crop: tool active", window.canvas.has_tool)
+    check("crop: palette shows crop selected", window._tool_var.get() == "crop",
+          window._tool_var.get())
+    check("crop: selecting the tool paused playback", not controller.playing)
     geom = window.canvas._image_geom
     check("crop: image geometry known", geom is not None, str(geom))
     left, top, fw, fh = geom
     # Drag the central half of the image -> crop to roughly half in each axis.
-    window.canvas._crop_press(_XY(left + fw // 4, top + fh // 4))
-    window.canvas._crop_drag(_XY(left + (fw * 3) // 4, top + (fh * 3) // 4))
-    check("crop: marquee drawn during drag", len(window.canvas._crop_items) >= 1,
-          f"{len(window.canvas._crop_items)} items")
-    window.canvas._crop_release(_XY(left + (fw * 3) // 4, top + (fh * 3) // 4))
+    window.canvas._on_press(_XY(left + fw // 4, top + fh // 4))
+    window.canvas._on_drag(_XY(left + (fw * 3) // 4, top + (fh * 3) // 4))
+    check("crop: marquee drawn during drag", len(window.canvas._overlay_items) >= 1,
+          f"{len(window.canvas._overlay_items)} items")
+    check("crop: gesture in progress", window.canvas.active_tool.is_gesturing)
+    window.canvas._on_release(_XY(left + (fw * 3) // 4, top + (fh * 3) // 4))
     root.update()
-    check("crop: mode exited after release", not window.canvas.is_cropping)
+    check("crop: gesture finished on release", not window.canvas.active_tool.is_gesturing)
+    check("crop: overlay cleared on commit", len(window.canvas._overlay_items) == 0)
     cw, ch = controller.doc.size
     check("crop: canvas shrank in both dimensions",
           cw < before_crop_size[0] and ch < before_crop_size[1],
@@ -272,17 +278,62 @@ def main() -> int:
           controller.doc.size == before_crop_size,
           f"{controller.doc.size} vs {before_crop_size}")
 
-    # --- M-crop: Esc cancels crop mode and changes nothing -------------
+    # --- two-stage Esc: abandon the gesture, then put the tool away -----
     size_before_cancel = controller.doc.size
-    window._enter_crop_mode()
-    window.canvas._crop_press(_XY(left + fw // 4, top + fh // 4))
-    window.canvas._crop_drag(_XY(left + fw // 2, top + fh // 2))
-    window.canvas._crop_escape()
+    geom = window.canvas._image_geom
+    left, top, fw, fh = geom
+    window._select_tool("crop")
+    window.canvas._on_press(_XY(left + fw // 4, top + fh // 4))
+    window.canvas._on_drag(_XY(left + fw // 2, top + fh // 2))
+    handled = window.canvas._on_escape()
     root.update()
-    check("crop: Esc left crop mode", not window.canvas.is_cropping)
-    check("crop: Esc changed nothing", controller.doc.size == size_before_cancel,
+    check("crop: first Esc was consumed by the canvas", handled == "break", str(handled))
+    check("crop: first Esc kept the tool", window.canvas.has_tool)
+    check("crop: first Esc cleared the marquee", len(window.canvas._overlay_items) == 0)
+    check("crop: first Esc changed nothing", controller.doc.size == size_before_cancel,
           str(controller.doc.size))
-    check("crop: Esc cleared the marquee", len(window.canvas._crop_items) == 0)
+    window.canvas._on_escape()
+    check("crop: second Esc put the tool away", not window.canvas.has_tool)
+    check("crop: palette back to Cursor", window._tool_var.get() == "cursor",
+          window._tool_var.get())
+    check("crop: Esc with no tool defers to the global binding",
+          window.canvas._on_escape() is None)
+
+    # --- a stray click in crop mode commits nothing ---------------------
+    window._select_tool("crop")
+    size_before_click = controller.doc.size
+    undo_before_click = controller.undo_label
+    window.canvas._on_press(_XY(left + fw // 2, top + fh // 2))
+    window.canvas._on_release(_XY(left + fw // 2, top + fh // 2))
+    root.update()
+    check("crop: a click (zero area) changed nothing",
+          controller.doc.size == size_before_click)
+    check("crop: a click added nothing to the undo stack",
+          controller.undo_label == undo_before_click, str(controller.undo_label))
+    window._select_tool("cursor")
+
+    # --- a resize mid-gesture cancels it (stale geometry) ---------------
+    # Crop always had this guard; folding painting into the same dispatch gave
+    # strokes the same protection, which they previously lacked.
+    window._select_tool("pencil")
+    geom = window.canvas._image_geom
+    left, top, fw, fh = geom
+    window.canvas._on_press(_XY(left + fw // 3, top + fh // 3))
+    window.canvas._on_drag(_XY(left + fw // 2, top + fh // 2))
+    check("resize-guard: stroke in progress", window.canvas.active_tool.is_gesturing)
+    root.geometry("820x640")
+    root.update()
+    check("resize-guard: resize cancelled the gesture",
+          not window.canvas.active_tool.is_gesturing)
+    check("resize-guard: overlay cleared", len(window.canvas._overlay_items) == 0)
+    undo_before_stale = controller.undo_label
+    window.canvas._on_release(_XY(left + fw // 2, top + fh // 2))
+    root.update()
+    check("resize-guard: the stale release committed nothing",
+          controller.undo_label == undo_before_stale, str(controller.undo_label))
+    window._select_tool("cursor")
+    root.geometry("900x680")
+    root.update()
 
     # --- M-paint: pencil / eraser / eyedropper via the canvas dispatch ---
     # Drives the canvas _on_press/_on_drag/_on_release with display coords mapped
@@ -299,14 +350,14 @@ def main() -> int:
     frames_before = controller.frame_count
     window.canvas._on_press(_XY(int(d0[0]), int(d0[1])))
     window.canvas._on_drag(_XY(int(dm[0]), int(dm[1])))
-    check("paint: stroke previewed mid-drag", len(window.canvas._stroke_items) >= 1)
+    check("paint: stroke previewed mid-drag", len(window.canvas._overlay_items) >= 1)
     window.canvas._on_release(_XY(int(d1[0]), int(d1[1])))
     root.update()
     painted = controller.doc[controller.index].image.getpixel((cxi, cyi))
     check("paint: centre pixel is now the fg colour", painted == (255, 0, 0, 255), str(painted))
     check("paint: frame count unchanged", controller.frame_count == frames_before)
     check("paint: one undoable edit recorded", controller.can_undo and controller.dirty)
-    check("paint: preview cleared on commit", len(window.canvas._stroke_items) == 0)
+    check("paint: preview cleared on commit", len(window.canvas._overlay_items) == 0)
 
     window._set_fg_color((0, 0, 0, 255))  # clear the fg, then pick the red back
     window._select_tool("eyedropper")
@@ -340,15 +391,91 @@ def main() -> int:
     window._pick(3)
     controller.run_op("frames.delete")
     check("save: dirty before saving", controller.dirty)
+    # Save-safety: the opened file is still the untouched original, so a plain
+    # Ctrl+S would re-encode it in place. window.save_file() is deliberately NOT
+    # called here -- it would open a modal confirm and hang a scripted run (the
+    # same trap as driving a param op through _invoke_op).
+    check("save-safety: opened file is flagged as the source",
+          controller.overwrites_source)
+    check("save-safety: Save As is offered a non-destructive name",
+          controller.suggested_save_name == "smoke_edited.gif",
+          controller.suggested_save_name)
     controller.save_as(save_path)
     root.update()
     check("save: file written to disk", save_path.exists())
     check("save: dirty cleared after save", not controller.dirty)
     check("save: title marker gone", not window.root.title().startswith("*"))
+    check("save-safety: no longer the source after writing",
+          not controller.overwrites_source)
+    check("save-safety: Save As now keeps our own name",
+          controller.suggested_save_name == "smoke_out.gif",
+          controller.suggested_save_name)
     from giflite.core.io.gif_read import read_gif  # noqa: E402
     check("save: file reopens with the edited frame count",
           len(read_gif(save_path)) == controller.frame_count,
           f"{len(read_gif(save_path))} vs {controller.frame_count}")
+
+    # --- save-safety: the three ways out of the overwrite prompt ---------
+    # save_file() opens a modal confirm, which would hang a scripted run, so the
+    # answer is stubbed and what's checked is the *routing*: Cancel writes
+    # nothing, No diverts to Save As, Yes overwrites in place. (That the dialog's
+    # own option set is valid Tk is proved separately -- it constructs with
+    # -detail and -default no, and Enter picks the safe button.)
+    from tkinter import filedialog as _fd  # noqa: E402
+    from tkinter import messagebox as _mb  # noqa: E402
+
+    original_ask = _mb.askyesnocancel
+    original_saveas = _fd.asksaveasfilename
+    answer = {"value": None}
+    _mb.askyesnocancel = lambda *a, **k: answer["value"]
+
+    source = Path(tempfile.mkdtemp()) / "original.gif"
+    make_gif(source, frames=4, size=(80, 40))
+    source_bytes = source.read_bytes()
+    diverted = Path(tempfile.mkdtemp()) / "diverted.gif"
+    _fd.asksaveasfilename = lambda *a, **k: str(diverted)
+
+    try:
+        # Cancel: nothing written anywhere.
+        window.open_path(source)
+        window._pick(1)
+        controller.run_op("frames.delete")
+        answer["value"] = None
+        window.save_file()
+        root.update()
+        check("save-safety: Cancel left the original untouched",
+              source.read_bytes() == source_bytes)
+        check("save-safety: Cancel left the edit unsaved", controller.dirty)
+
+        # No: diverted to Save As, original still intact.
+        answer["value"] = False
+        window.save_file()
+        root.update()
+        check("save-safety: No diverted to Save As", diverted.exists())
+        check("save-safety: No left the original untouched",
+              source.read_bytes() == source_bytes)
+        check("save-safety: No still counts as saved", not controller.dirty)
+        check("save-safety: path followed the diversion", controller.path == diverted,
+              str(controller.path))
+
+        # Yes: overwrite the original, and don't ask a second time.
+        window.open_path(source)
+        window._pick(1)
+        controller.run_op("frames.delete")
+        answer["value"] = True
+        window.save_file()
+        root.update()
+        check("save-safety: Yes overwrote the original",
+              source.read_bytes() != source_bytes)
+        check("save-safety: Yes cleared dirty", not controller.dirty)
+        check("save-safety: warned only once per file", not controller.overwrites_source)
+    finally:
+        _mb.askyesnocancel = original_ask
+        _fd.asksaveasfilename = original_saveas
+
+    # Back to the edited document for the remaining view checks.
+    window.open_path(gif)
+    root.update()
 
     # --- speed ----------------------------------------------------------
     window.speed.set("2x")

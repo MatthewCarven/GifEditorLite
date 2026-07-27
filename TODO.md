@@ -5,7 +5,9 @@
 - [x] `git init` — done
 - [x] M0 committed (`95cf542`), line endings pinned to LF (`92fd44e`)
 - [ ] Sweep `tmp_obj_*` cruft from `.git\objects` after a reboot frees the handles (harmless if left)
-- [ ] Commit the crop feature: `git add -A; git commit -F COMMIT_MSG.txt` (M0–M4 already committed through `8b19fe4`)
+- [x] Crop and both painting slices are committed (HEAD `01feb8a`) — that old "commit the crop feature" item was stale
+- [ ] Commit this session's work: `git add -A; git commit -F COMMIT_MSG.txt` (crop-as-a-tool + save safety)
+- [ ] Check the overwrite-warning wording reads right to you (`_confirm_overwrite_source` in `ui/tk/app.py`) — it's the one dialog standing between you and a lost original
 - [ ] Decide risk #2: identical-frame merging on export (accept / disable optimiser / project file) — **not urgent, first bites at M3**
 - [ ] Run `python -m giflite` on Windows and confirm the window looks right
 - [ ] Confirm Python version on the Windows box (targeting 3.10+)
@@ -117,10 +119,37 @@ Design in ARCHITECTURE §19. Tools live in the frontend and commit pure core ops
 - [x] Caught a real bug: paint must return `Selection.single(index)` or `run_op` moves the playhead off the frame just painted
 - [x] Xvfb smoke 83 checks (was 74) incl. mapped pencil stroke + eyedropper + erase; screenshot
 
+## Crop folded into the tool system ✅
+
+Post-painting tidy-up, and the cheapest kind of win: two mechanisms doing one
+job became one. Design in ARCHITECTURE §19.1.
+
+- [x] `CropTool` in `ui/tk/tools.py`; `canvas.crop` op untouched (still `in_menu=False`)
+- [x] Canvas down to one mouse path (`_dispatch`) and one coordinate mapping — deleted `begin_crop`, `_end_crop`, `_clamp_to_image`, the four `_crop_*` handlers and the mode flag
+- [x] `Tool.is_gesturing` + `Tool.on_cancel(ctx)`: the hooks that make the resize-cancel guard and two-stage Esc generic rather than crop-specific
+- [x] **Fixed a real bug in painting:** a resize mid-stroke would have committed against stale geometry (crop had the guard, strokes didn't); sharing the dispatch fixed it
+- [x] Two-stage Esc: abandon the gesture, then put the tool away; still defers to the global deselect with no tool active
+- [x] Overlays generalised — `show_stroke_overlay` + `show_rect_overlay` (box in image pixels, so a future rect-select/shape tool is free)
+- [x] `Tool.hint` drives the status line, retiring the per-tool if-chain in the frontend
+- [x] Crop joins the palette (Cursor / Crop / Pencil / Eraser / Eyedropper); sticky like the others, C still selects it
+- [x] `tests/test_tools.py` — 25 headless tests against a fake `ToolContext`; Xvfb smoke 110 checks (was 83). 299 headless total
+
+## Save safety ✅
+
+Ctrl+S on a freshly-opened file re-encoded the user's original in place. Design
+in ARCHITECTURE §19.2.
+
+- [x] Controller reports the fact: `overwrites_source` (path is still the file we read) and `suggested_save_name` (`<stem>_edited.gif`, idempotent — no `a_edited_edited.gif`)
+- [x] Frontend owns the policy: overwrite / save-elsewhere / cancel, with the *safe* button as the default
+- [x] Warns once per opened file — the flag clears on the first write to any path
+- [x] Save As defaults to the non-destructive name
+- [x] Routing covered in the smoke test with a stubbed answer; the dialog's real option set (`-detail`, `-default no`) proved to construct under Xvfb separately, since a modal would hang a scripted run
+- [ ] Possible follow-up: a non-dirty Save over the source is pure loss (re-encodes for no gain) — could skip the write entirely with "No changes to save"
+- [ ] Possible follow-up: single-key tool shortcuts (B/E/I/C) are `bind_all`, so they fire while the Size spinbox has focus. Pre-existing, but more noticeable now crop is one of them
+
 **Later (additive):**
 
-- [ ] Fold crop into the tool system — one interaction mechanism, not two
-- [ ] Fill bucket; line / rect / ellipse shape tools
+- [ ] Fill bucket; line / rect / ellipse shape tools (cheap now — one op + one Tool)
 - [ ] Soft / anti-aliased brushes (a new mask generator; op + tool unchanged)
 - [ ] Zoom / pan (the fit calc in `canvas.py` is already factored for it) — precise pixel work
 - [ ] **Memory-aware undo** — track the bytes `History` holds and warn + report when it climbs past ~128 MB, rather than silently trimming. The plain 64-snapshot cap is fine initially; this is the bespoke follow-up Matthew flagged (concrete form of risk 1's `FrameStore` note)
@@ -131,6 +160,6 @@ Design in ARCHITECTURE §19. Tools live in the frontend and commit pure core ops
 - [ ] **Project / sidecar format** (`.gifproj`?) — lossless zip of PNG frames + JSON manifest, so authored frames/timing survive a round-trip GIF can't represent. One `read_x`/`write_x` pair; see ARCHITECTURE §18. Matthew wants this eventually
 - [ ] M5 video import (`imageio-ffmpeg`, try/except registration), WebP/APNG export
 - [ ] Second frontend to actually prove the seam (Qt or Dear PyGui)
-- [ ] Polish: warn before overwriting the *original* source on Ctrl+S (GIF re-save is lossy); default Save As to `<name>_edited.gif`?
+- [x] Polish: warn before overwriting the *original* source on Ctrl+S (GIF re-save is lossy); default Save As to `<name>_edited.gif` — done 2026-07-27
 - [ ] Polish: `default_params` could seed Set-Delay from the current frame's delay
 - [ ] Polish: crop is apply-on-release; a draggable/adjustable marquee with an explicit confirm (and maybe a keep-aspect modifier) would be nicer

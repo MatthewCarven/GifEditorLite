@@ -106,3 +106,72 @@ class TestBadTarget:
         controller, frontend, tmp_path = loaded
         assert controller.save_as(tmp_path / "out.xyz") is False
         assert frontend.count(ev.ERROR) == 1
+
+
+class TestOverwritesSource:
+    """The fact a frontend needs to warn before Save re-encodes the original.
+
+    GIF write-back rebuilds the palette and merges identical consecutive frames,
+    so an in-place save destroys the file that was opened. The controller only
+    reports whether that's what a Save would do; the warning itself is UI policy.
+    """
+
+    def test_a_freshly_opened_file_is_the_source(self, loaded):
+        controller, _, _ = loaded
+        assert controller.overwrites_source is True
+
+    def test_saving_elsewhere_clears_it(self, loaded):
+        controller, _, tmp_path = loaded
+        controller.save_as(tmp_path / "out.gif")
+        assert controller.overwrites_source is False
+
+    def test_overwriting_the_source_clears_it_too(self, loaded):
+        """Warn once, not on every Ctrl+S: after the first overwrite there is no
+        untouched original left to protect."""
+        controller, _, tmp_path = loaded
+        controller.save()
+        assert controller.overwrites_source is False
+
+    def test_no_document_never_overwrites_anything(self):
+        assert AppController().overwrites_source is False
+
+    def test_closing_resets_it(self, loaded):
+        controller, _, _ = loaded
+        controller.close()
+        assert controller.overwrites_source is False
+
+    def test_reopening_makes_the_new_file_a_source_again(self, loaded):
+        controller, _, tmp_path = loaded
+        controller.save_as(tmp_path / "out.gif")
+        assert controller.overwrites_source is False
+        make_gif(tmp_path / "b.gif", frames=3)
+        controller.open(tmp_path / "b.gif")
+        assert controller.overwrites_source is True
+
+
+class TestSuggestedSaveName:
+    def test_steers_away_from_the_opened_original(self, loaded):
+        controller, _, _ = loaded
+        assert controller.suggested_save_name == "a_edited.gif"
+
+    def test_keeps_the_name_once_it_is_ours(self, loaded):
+        controller, _, tmp_path = loaded
+        controller.save_as(tmp_path / "out.gif")
+        assert controller.suggested_save_name == "out.gif"
+
+    def test_does_not_stack_the_suffix(self, loaded):
+        """Open a file already called *_edited and Save As must not offer
+        'a_edited_edited.gif'."""
+        controller, _, tmp_path = loaded
+        make_gif(tmp_path / "a_edited.gif", frames=3)
+        controller.open(tmp_path / "a_edited.gif")
+        assert controller.suggested_save_name == "a_edited.gif"
+
+    def test_preserves_the_extension(self, loaded):
+        controller, _, tmp_path = loaded
+        make_gif(tmp_path / "clip.gif", frames=2)
+        controller.open(tmp_path / "clip.gif")
+        assert controller.suggested_save_name.endswith(".gif")
+
+    def test_falls_back_with_no_path(self):
+        assert AppController().suggested_save_name == "untitled.gif"

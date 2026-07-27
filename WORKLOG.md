@@ -331,3 +331,88 @@ Matthew wants painting tools and asked to co-design a coherent modular plan firs
 - Painting slice 2 on disk, uncommitted. `COMMIT_MSG.txt` refreshed.
 - Take the pencil for a spin: pick a colour, drag on the preview; B/E/I switch tools; each stroke is one Ctrl+Z. Erase reveals the checkerboard (real transparency). Crop still works alongside (C).
 - **Next (optional):** fold crop into the tool system (one mechanism), fill bucket + shapes, soft/AA brushes (a new mask generator), zoom/pan, or the memory-aware undo you flagged.
+
+## 2026-07-27 — Crop becomes a tool; saving stops eating originals
+
+Matthew asked to spend the session on editing and saving. Both were already
+functionally complete at v1, so this was extension: he picked the two
+"recommended" forks — fold crop into the tool system, and stop Ctrl+S quietly
+degrading source files. Two small, low-risk slices rather than one big one.
+
+**Slice 1 — crop is a `CropTool`.** Painting's tool layer landed last session and
+immediately made crop look wrong: the canvas carried a `_crop_mode` flag with its
+own press/drag/release/escape handlers *alongside* the tool dispatch, two
+mechanisms doing the identical job. `CropTool` now lives in `ui/tk/tools.py` with
+the others, and the canvas has exactly one mouse path (`_dispatch`) and one
+coordinate mapping. Deleted: `begin_crop`, `_end_crop`, `_clamp_to_image`, the
+four `_crop_*` handlers and the mode flag. Design notes in ARCHITECTURE §19.1.
+
+**The fold paid for itself immediately — it fixed a real painting bug.** Crop
+cancelled itself on a window resize, because rescaling the image makes any
+coordinates collected so far stale. Strokes had *no* such guard: resize mid-drag
+and the release would have committed a stroke mapped against the old geometry,
+painting in the wrong place. Sharing one dispatch means the canvas now cancels
+whatever gesture is in progress, so painting inherited the guard for free. This
+is the second time this project has found a bug by making two similar things
+actually be the same thing.
+
+Two hooks made that generic instead of crop-specific: `is_gesturing` (is a press
+outstanding?) and `on_cancel(ctx)` (abandon, commit nothing) on the `Tool` base.
+They also buy **two-stage Esc**: mid-gesture Esc abandons the gesture but keeps
+the tool (you meant to redraw the box, not leave crop), otherwise it puts the tool
+away. With no tool active the canvas returns `None` so the global Esc still
+deselects — the widget bindtag runs before `bind_all`, so an unconditional
+`"break"` would have swallowed frame deselection.
+
+Behaviour changes worth knowing: crop is **sticky** now, like every other tool
+(it stays selected after a commit, so a second crop is another drag) instead of a
+one-shot armed mode; and selecting *any* tool now focuses the canvas, so Esc
+lands there. The status-line hint moved onto the tool (`Tool.hint`), which
+retired the per-tool if-chain in the frontend. The preview overlay generalised:
+`show_stroke_overlay` + `show_rect_overlay`, the latter taking a box in *image*
+pixels and labelling it with the image-pixel size — a free rect-select/shape
+overlay later.
+
+**Slice 2 — save safety.** Writing a GIF rebuilds the palette and merges
+identical consecutive frames; both are unconditional. So Ctrl+S on a
+freshly-opened file re-encodes and overwrites the user's original, irreversibly,
+and it's one keystroke away at all times. Split along the seam (ARCHITECTURE
+§19.2): the controller reports the fact — `overwrites_source` and
+`suggested_save_name` — and the frontend owns the policy, a warning dialog with
+overwrite / save-elsewhere / cancel whose *default* button is the safe one. The
+flag clears on the first write to any path, so it warns once per opened file, not
+on every save. `suggested_save_name` suffixes `_edited` idempotently, so saving
+twice can't produce `a_edited_edited.gif` (a test insists).
+
+Naming policy sits in the controller on purpose: a second frontend should
+inherit "don't clobber the original" rather than reinvent it.
+
+**Testing note worth keeping.** `ui/tk/tools.py` imports no toolkit, so the whole
+interaction layer — crop included, now — is testable headlessly against a fake
+`ToolContext`: `tests/test_tools.py` is 25 tests with no display. Only the
+display↔image mapping still needs Xvfb. That's the boundary rule paying rent.
+
+The modal confirm can't be driven by a scripted run (it would block forever —
+same trap as `_invoke_op` on a param op, noted at M4). So it's covered in two
+halves: the smoke test stubs the answer and checks the *routing* (Cancel writes
+nothing / No diverts to Save As / Yes overwrites and doesn't ask again), and a
+throwaway Xvfb probe showed the real dialog and had Tcl click its default button,
+proving the `-detail` + `-default no` option set actually constructs and that
+Enter picks the safe answer. Guessing that a dialog "probably renders" is how you
+ship a `TclError` to the user.
+
+**Numbers:** 299 headless tests (was 269: +25 tools, +11 save-safety, minus none).
+Xvfb smoke 110 checks (was 83: +27). Boundary rule still clean.
+
+**Handover**
+
+- On disk, uncommitted. `COMMIT_MSG.txt` refreshed.
+- Try it: **C** or Image → Crop, drag, release — then note crop stays armed for a
+  second drag; Esc once clears a half-drawn box, Esc again puts the tool away.
+  The palette now reads Cursor / Crop / Pencil / Eraser / Eyedropper.
+- Then open one of your real GIFs and press **Ctrl+S** — that's the new warning.
+  "No" should offer `<name>_edited.gif`. Worth confirming the wording reads right
+  to you, since it's the one dialog that stands between you and a lost original.
+- **Next (optional):** fill bucket + shape tools (now cheap — one op + one Tool),
+  soft/AA brushes, zoom/pan, frame clipboard (cut/copy/paste + insert blank), or
+  the `.gifproj` project format you want eventually.
