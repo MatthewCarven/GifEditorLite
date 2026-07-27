@@ -481,6 +481,19 @@ What the fold bought beyond tidiness:
 
 Crop is now sticky like every other tool rather than a one-shot armed mode: it stays selected after a commit, so a second crop is another drag. A stray click (zero area) commits nothing.
 
+### 19.1.1 Two coordinate conventions, and why the tool picks
+
+The canvas maps a cursor position to an image coordinate, and there is no single right answer — the two kinds of tool are asking different questions, so `Tool.coords` declares which:
+
+- **`"pixel"` — which pixel is under the cursor** (brushes, eyedropper). This is `floor`, not `round`. A pixel spans `[i, i+1)`, so rounding sends everything past its midpoint to the neighbour and clicking the *visible centre* of a pixel paints the one to its right. Not clamped: the paint ops clip off-canvas points for free, and clamping would smear a stroke that runs off the edge along the border instead of letting it leave.
+- **`"edge"` — the nearest pixel boundary** (crop). A crop box is described by the lines *between* pixels, so rounding is correct here, and the result clamps to `0..src` inclusive because the box must be a valid rectangle.
+
+The matching subtlety on the way back out: `_image_to_display(..., center=True)` puts a brush preview on the middle of the pixel rather than its top-left corner.
+
+Both errors are half a pixel, which is why they hid: at fit scale on a photo-sized GIF, half a pixel is sub-pixel and invisible. On pixel art blown up 30x it is 15 screen pixels, and the two errors compound in the same direction — the tool visibly draws up and to the left of the cursor. **Anything that converts between screen and image space has to be tested at high zoom, not just at 1:1.**
+
+A related trap fixed alongside it: a `tk.Canvas` with no `scrollregion` will scroll itself over the bounding box of its items, after which widget coordinates no longer equal canvas coordinates and *every* gesture is offset by the scroll amount. `_redraw` now pins the region to the visible area (this is a viewport; panning, when it comes, will be an explicit transform) and `_dispatch` converts through `canvasx`/`canvasy` regardless.
+
 **Recipe — add a tool.** A pure op in `core/ops/` for whatever it commits (skip if it commits nothing, like the eyedropper), plus a `Tool` in `ui/tk/tools.py` that maps the gesture and renders its own provisional preview. Same "one file, no edits elsewhere" shape as adding an op. `tools.py` imports no toolkit, so tools are tested headlessly against a fake `ToolContext` (`tests/test_tools.py`) — only the display mapping needs the Xvfb smoke.
 
 ### 19.2 Save is not a round trip

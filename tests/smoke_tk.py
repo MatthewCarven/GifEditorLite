@@ -233,16 +233,128 @@ def main() -> int:
     window._on_pingpong()
     check("pingpong: toggles back off", not controller.pingpong)
 
-    # --- crop as a tool: one dispatch path, same rubber-band ------------
-    # Crop used to be a bespoke mode on the canvas; it is now a Tool like the
-    # paint ones, so this drives the *shared* _on_press/_on_drag/_on_release with
-    # fake widget events, exercising the display->image mapping and the tool.
+    # Fake mouse events carrying widget x/y, shared by every gesture check below.
     class _XY:
         def __init__(self, x, y):
             self.x = x
             self.y = y
             self.state = 0
 
+    # --- the mapping is anchored to where Tk actually drew the image -----
+    # This checks _image_geom against ground truth (the image item's bbox) and
+    # feeds _display_to_image real *widget* coordinates. The gesture checks below
+    # can't do that job: they derive their click points from _image_to_display, so
+    # a wrong origin stays self-consistent and passes. That hole hid a live bug --
+    # a scrolled canvas offset every stroke up and to the left.
+    root.update()
+    img_item = [i for i in window.canvas.find_all()
+                if window.canvas.type(i) == "image"][0]
+    bbox = window.canvas.bbox(img_item)
+    geom = window.canvas._image_geom
+    check("mapping: _image_geom matches the drawn image's bbox",
+          bbox[:2] == geom[:2], f"bbox {bbox} vs geom {geom}")
+
+    # Widget points computed by hand -- no help from _image_to_display, which is
+    # the point: the two functions agreeing with each other proves nothing.
+    left, top, fw, fh = geom
+    src_w, src_h = controller.doc.size
+    sx, sy = fw / src_w, fh / src_h
+    hand_x = left + round((src_w // 2 + 0.5) * sx)   # the pixel's visible middle
+    hand_y = top + round((src_h // 2 + 0.5) * sy)
+    check("mapping: a hand-computed widget point maps to the centre pixel",
+          window.canvas._display_to_image(hand_x, hand_y) == (src_w // 2, src_h // 2),
+          str(window.canvas._display_to_image(hand_x, hand_y)))
+
+    # The regression Matthew hit: clicking the visible centre of a pixel used to
+    # paint its right-hand neighbour, because the mapping rounded instead of
+    # flooring. Invisible at 1:1 zoom, a whole pixel off at 30x.
+    wrong_centres = [(px, py, window.canvas._display_to_image(
+                          left + (px + 0.5) * sx, top + (py + 0.5) * sy))
+                     for px in range(0, src_w, 7) for py in range(0, src_h, 5)
+                     if window.canvas._display_to_image(
+                          left + (px + 0.5) * sx, top + (py + 0.5) * sy) != (px, py)]
+    check("mapping: every pixel centre maps to its own pixel",
+          not wrong_centres, str(wrong_centres[:3]))
+
+    # ...and every point *within* a pixel, not just its centre.
+    strays = [(px, frac) for px in range(0, src_w, 7) for frac in (0.02, 0.5, 0.98)
+              if window.canvas._display_to_image(
+                     left + (px + frac) * sx, top + 2.5 * sy)[0] != px]
+    check("mapping: any point inside a pixel maps to that pixel",
+          not strays, str(strays[:3]))
+
+    # Crop must NOT share that rule: its coordinates are edges between pixels, so
+    # it snaps to the nearest boundary and spans 0..src inclusive.
+    check("mapping: crop still snaps to pixel boundaries",
+          window.canvas._display_to_image(left, top, snap="edge") == (0, 0)
+          and window.canvas._display_to_image(left + fw, top + fh, snap="edge")
+              == (src_w, src_h),
+          str(window.canvas._display_to_image(left + fw, top + fh, snap="edge")))
+    check("mapping: crop tool asks for edge coordinates, brushes for pixels",
+          window._tools["crop"].coords == "edge"
+          and window._tools["pencil"].coords == "pixel")
+
+    # The preview overlay must sit on the pixel, not on its top-left corner.
+    # Checked against the *drawn item's* bbox, not by re-deriving the number --
+    # re-deriving it would pass even if show_stroke_overlay ignored the centring.
+    px, py = src_w // 2, src_h // 2
+    window.canvas.show_stroke_overlay([(px, py)], "#ff0000", 1, False)
+    ov = window.canvas._overlay_items
+    ob = window.canvas.bbox(ov[0]) if ov else None
+    # Comparative, not a tolerance: is the drawn item nearer the pixel's centre
+    # than its top-left corner? That holds at any zoom, whereas an absolute
+    # tolerance passes by luck when the fit scale is small (half a pixel is only
+    # ~1.4 screen px here, but ~15 on the blown-up pixel art this bug showed up on).
+    centre = (left + (px + 0.5) * sx, top + (py + 0.5) * sy)
+    corner = (left + px * sx, top + py * sy)
+    item = ((ob[0] + ob[2]) / 2, (ob[1] + ob[3]) / 2) if ob else None
+    check("mapping: stroke preview is centred on the pixel, not its corner",
+          item is not None
+          and abs(item[0] - centre[0]) < abs(item[0] - corner[0])
+          and abs(item[1] - centre[1]) < abs(item[1] - corner[1]),
+          f"item {item} | centre {tuple(round(v, 1) for v in centre)} "
+          f"| corner {tuple(round(v, 1) for v in corner)}")
+    window.canvas.clear_overlay()
+
+    # The regression itself: a tk.Canvas with no scrollregion will scroll over its
+    # items' bounding box, and then widget != canvas coordinates.
+    window.canvas.yview_scroll(3, "units")
+    window.canvas.xview_scroll(2, "units")
+    root.update()
+    check("mapping: the preview refuses to scroll away from the origin",
+          window.canvas.canvasx(0) == 0 and window.canvas.canvasy(0) == 0,
+          f"canvasx={window.canvas.canvasx(0)} canvasy={window.canvas.canvasy(0)}")
+
+    # And belt-and-braces: even with the view forced off the origin, the dispatch
+    # converts widget -> canvas coordinates, so a press still lands on the pixel
+    # under the cursor.
+    window.canvas.configure(scrollregion=(-500, -500, 2000, 2000))
+    window.canvas.xview_moveto(0.3)
+    window.canvas.yview_moveto(0.3)
+    root.update()
+    off_x, off_y = window.canvas.canvasx(0), window.canvas.canvasy(0)
+    check("mapping: view forced off the origin for the test", off_x or off_y,
+          f"({off_x}, {off_y})")
+    window._set_fg_color((0, 255, 0, 255))
+    window._brush_size = 1
+    window._select_tool("pencil")
+    tx, ty = src_w // 2, src_h // 2
+    window.canvas._on_press(_XY(int(hand_x - off_x), int(hand_y - off_y)))
+    window.canvas._on_release(_XY(int(hand_x - off_x), int(hand_y - off_y)))
+    root.update()
+    hit = controller.doc[controller.index].image.getpixel((tx, ty))
+    check("mapping: a scrolled view still paints under the cursor",
+          hit == (0, 255, 0, 255), f"{hit} at {(tx, ty)}")
+    controller.undo()
+    window._select_tool("cursor")
+    root.update()  # _redraw re-pins the scrollregion and restores the origin
+    check("mapping: redraw restored the origin",
+          window.canvas.canvasx(0) == 0 and window.canvas.canvasy(0) == 0)
+
+    # --- crop as a tool: one dispatch path, same rubber-band ------------
+    # Crop used to be a bespoke mode on the canvas; it is now a Tool like the
+    # paint ones, so this drives the *shared* _on_press/_on_drag/_on_release with
+    # fake widget events, exercising the display->image mapping and the tool.
     root.update()
     before_crop_size = controller.doc.size
     window._select_tool("crop")
@@ -344,9 +456,11 @@ def main() -> int:
     window._select_tool("pencil")
     check("paint: pencil is the active tool", window.canvas.has_tool)
     cxi, cyi = controller.doc.size[0] // 2, controller.doc.size[1] // 2
-    d0 = window.canvas._image_to_display(cxi - 3, cyi - 3)
-    dm = window.canvas._image_to_display(cxi, cyi)
-    d1 = window.canvas._image_to_display(cxi + 3, cyi + 3)
+    # center=True: aim at the visible middle of each pixel, which is where a user
+    # actually clicks -- and the case that used to land on the neighbour.
+    d0 = window.canvas._image_to_display(cxi - 3, cyi - 3, center=True)
+    dm = window.canvas._image_to_display(cxi, cyi, center=True)
+    d1 = window.canvas._image_to_display(cxi + 3, cyi + 3, center=True)
     frames_before = controller.frame_count
     window.canvas._on_press(_XY(int(d0[0]), int(d0[1])))
     window.canvas._on_drag(_XY(int(dm[0]), int(dm[1])))
@@ -361,14 +475,14 @@ def main() -> int:
 
     window._set_fg_color((0, 0, 0, 255))  # clear the fg, then pick the red back
     window._select_tool("eyedropper")
-    dp = window.canvas._image_to_display(cxi, cyi)
+    dp = window.canvas._image_to_display(cxi, cyi, center=True)
     window.canvas._on_press(_XY(int(dp[0]), int(dp[1])))
     check("eyedropper: adopted the painted colour", window._fg_color == (255, 0, 0, 255),
           str(window._fg_color))
 
     window._select_tool("eraser")
     window._brush_size = 3
-    de = window.canvas._image_to_display(cxi, cyi)
+    de = window.canvas._image_to_display(cxi, cyi, center=True)
     window.canvas._on_press(_XY(int(de[0]), int(de[1])))
     window.canvas._on_release(_XY(int(de[0]), int(de[1])))
     root.update()

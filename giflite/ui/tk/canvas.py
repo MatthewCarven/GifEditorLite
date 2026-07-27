@@ -19,6 +19,7 @@ still deferred; the fit calculation is factored out so they slot in later.
 
 from __future__ import annotations
 
+import math
 import tkinter as tk
 from collections import OrderedDict
 
@@ -178,6 +179,20 @@ class PreviewCanvas(tk.Canvas):
         if width <= 1 or height <= 1:
             return  # not laid out yet; <Configure> will call us again
 
+        # This is a viewport, not a scrollable surface. A tk.Canvas with no
+        # scrollregion happily scrolls itself over the bounding box of its items
+        # -- a stray mouse wheel or arrow key is enough -- and that silently
+        # breaks every gesture, because widget coordinates then no longer equal
+        # canvas coordinates. Pinning the region to the visible area makes such a
+        # scroll a no-op, and moving the view back recovers from one that already
+        # happened. Panning, when it arrives, will be an explicit transform, not
+        # an accidental one. (_dispatch converts coordinates properly regardless;
+        # this keeps the *view* from drifting in the first place.)
+        self.configure(scrollregion=(0, 0, width, height))
+        if self.canvasx(0) or self.canvasy(0):
+            self.xview_moveto(0)
+            self.yview_moveto(0)
+
         if self._source is None:
             self._photo = None
             self._image_geom = None
@@ -216,7 +231,18 @@ class PreviewCanvas(tk.Canvas):
         if self._tool is None or self._image_geom is None or self._source is None:
             return
         handler = getattr(self._tool, handler_name)
-        handler(self._tool_ctx, *self._display_to_image(event.x, event.y))
+        # canvasx/canvasy, not event.x/event.y: a mouse event carries *widget*
+        # coordinates while items (and so `_image_geom`) live in *canvas*
+        # coordinates, and the two differ by however far the view has scrolled.
+        # They coincide while the view sits at the origin -- which _redraw now
+        # enforces -- so this is belt and braces rather than the live fix.
+        #
+        # `snap` is the tool's call: a brush wants the pixel under the cursor, a
+        # crop box wants the nearest pixel boundary. See _display_to_image.
+        handler(self._tool_ctx,
+                *self._display_to_image(self.canvasx(event.x),
+                                        self.canvasy(event.y),
+                                        snap=getattr(self._tool, "coords", "pixel")))
 
     def _on_press(self, event: tk.Event) -> None:
         self._dispatch("on_press", event)
@@ -275,20 +301,48 @@ class PreviewCanvas(tk.Canvas):
     # gesture rule, ARCHITECTURE.md 11.3 / 19). Overlays are plain canvas items,
     # so no provisional state ever reaches the core.
 
-    def _image_to_display(self, ix: float, iy: float) -> tuple[float, float]:
-        """Inverse of _display_to_image: an image pixel -> a widget point."""
-        left, top, fw, fh = self._image_geom
-        src_w, src_h = self._source.size
-        return (left + ix / src_w * fw, top + iy / src_h * fh)
+    def _image_to_display(self, ix: float, iy: float,
+                          center: bool = False) -> tuple[float, float]:
+        """An image coordinate -> a canvas point.
 
-    def _display_to_image(self, dx: float, dy: float) -> tuple[int, int]:
-        """Map a widget point to image pixel coordinates, clamped to 0..w / 0..h
-        so a drag that overshoots the edge pins to it instead of going negative."""
+        `center=False` gives the pixel's top-left *corner*, which is what a crop
+        marquee wants (its coordinates are boundaries). `center=True` gives the
+        middle of the pixel, which is what a brush preview wants: a stroke drawn
+        through corners sits visibly half a pixel up and to the left of the
+        cursor, and at 30x zoom half a pixel is 15 screen pixels of "the tool is
+        off".
+        """
         left, top, fw, fh = self._image_geom
         src_w, src_h = self._source.size
-        ix = round((dx - left) / fw * src_w)
-        iy = round((dy - top) / fh * src_h)
-        return (max(0, min(ix, src_w)), max(0, min(iy, src_h)))
+        offset = 0.5 if center else 0.0
+        return (left + (ix + offset) / src_w * fw,
+                top + (iy + offset) / src_h * fh)
+
+    def _display_to_image(self, dx: float, dy: float,
+                          snap: str = "pixel") -> tuple[int, int]:
+        """Map a canvas point to image coordinates. Two honest answers here:
+
+        `snap="pixel"` -- *which pixel is under the cursor*, what a brush or
+        eyedropper needs. That is `floor`, not `round`: a pixel spans
+        `[i, i+1)`, so rounding sends everything past its midpoint to the
+        neighbour, and clicking the visible centre of a pixel paints the one to
+        its right. Invisible at 1:1 and a whole pixel wrong at 30x zoom, which is
+        exactly where pixel art gets edited. Not clamped -- the paint ops clip
+        off-canvas points for free, and clamping would smear a stroke that runs
+        off the edge along the border instead of just letting it leave.
+
+        `snap="edge"` -- *the nearest pixel boundary*, what a crop box needs,
+        since its coordinates are edges and not pixels. Rounding is correct here,
+        and the result is clamped to `0..src` because a crop box has to be a
+        valid rectangle inside the canvas.
+        """
+        left, top, fw, fh = self._image_geom
+        src_w, src_h = self._source.size
+        fx = (dx - left) / fw * src_w
+        fy = (dy - top) / fh * src_h
+        if snap == "edge":
+            return (max(0, min(round(fx), src_w)), max(0, min(round(fy), src_h)))
+        return (math.floor(fx), math.floor(fy))
 
     def clear_overlay(self) -> None:
         for item in self._overlay_items:
@@ -303,7 +357,9 @@ class PreviewCanvas(tk.Canvas):
             return
         _, _, fw, _ = self._image_geom
         width = max(1, int(round(size * fw / self._source.size[0])))
-        disp = [self._image_to_display(x, y) for x, y in points]
+        # center=True: the preview must sit *on* the pixels the brush will paint,
+        # not on their top-left corners.
+        disp = [self._image_to_display(x, y, center=True) for x, y in points]
         if len(disp) == 1:
             x, y = disp[0]
             r = max(1, width // 2)

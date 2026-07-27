@@ -203,6 +203,21 @@ class TestToolSet:
         assert set(tools) == {"crop", "pencil", "eraser", "eyedropper"}
         assert all(tool.id == key for key, tool in tools.items())
 
+    def test_pixel_tools_want_pixels_and_crop_wants_edges(self):
+        """A brush addresses the pixel under the cursor; a crop box addresses the
+        boundaries *between* pixels. The canvas maps each differently (floor vs
+        round), so a tool declaring the wrong one paints a pixel off -- invisible
+        at 1:1 zoom, a whole pixel wrong on blown-up pixel art.
+        """
+        tools = default_tools()
+        assert tools["crop"].coords == "edge"
+        for tid in ("pencil", "eraser", "eyedropper"):
+            assert tools[tid].coords == "pixel", tid
+
+    def test_coords_is_always_a_known_mode(self):
+        for tool in default_tools().values():
+            assert tool.coords in ("pixel", "edge"), tool.id
+
     def test_every_tool_has_a_label_and_a_hint(self):
         """Both are user-visible (palette, status line), so an empty one is a bug
         that would only show up by eye."""

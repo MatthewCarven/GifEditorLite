@@ -134,6 +134,18 @@ job became one. Design in ARCHITECTURE §19.1.
 - [x] Crop joins the palette (Cursor / Crop / Pencil / Eraser / Eyedropper); sticky like the others, C still selects it
 - [x] `tests/test_tools.py` — 25 headless tests against a fake `ToolContext`; Xvfb smoke 110 checks (was 83). 299 headless total
 
+## Drawing offset — fixed ✅
+
+Matthew spotted the pencil drawing up-left of the cursor on `Claude.gif`. Two
+half-pixel errors compounding; invisible at 1:1, ~15 screen px at 30x zoom.
+Design in ARCHITECTURE §19.1.1.
+
+- [x] `_display_to_image` floors for pixel tools (a pixel spans `[i, i+1)`, so `round` sent pixel centres to the neighbour) and no longer clamps — the paint ops clip, and clamping smeared strokes along the edge
+- [x] `_display_to_image(snap="edge")` keeps round+clamp for crop, whose coordinates are boundaries between pixels, not pixels — `Tool.coords` declares which a tool wants
+- [x] `_image_to_display(center=True)` puts the stroke preview on the pixel instead of its top-left corner
+- [x] Pinned the canvas `scrollregion` + dispatch through `canvasx`/`canvasy`: a scrollregion-less `tk.Canvas` scrolls over its items' bbox, after which widget != canvas coords and every gesture is offset. Not the live bug, but one stray binding away from being one
+- [x] Closed the test hole that hid it: click points were derived via `_image_to_display` and asserted through `_display_to_image`, so both halves being wrong together passed. Now hand-computed coords, `_image_geom` checked against `canvas.bbox()`, pixel centres + 2%/50%/98% sweeps, and the overlay's drawn bbox compared to centre-vs-corner. All verified to fail on a reverted tree
+
 ## Save safety ✅
 
 Ctrl+S on a freshly-opened file re-encoded the user's original in place. Design

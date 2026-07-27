@@ -416,3 +416,63 @@ Xvfb smoke 110 checks (was 83: +27). Boundary rule still clean.
 - **Next (optional):** fill bucket + shape tools (now cheap — one op + one Tool),
   soft/AA brushes, zoom/pan, frame clipboard (cut/copy/paste + insert blank), or
   the `.gifproj` project format you want eventually.
+
+### Same session — the drawing tool was offset (Matthew spotted it)
+
+Matthew tried the pencil on `Claude.gif` and the tool drew up and to the left of
+the cursor. Screenshot made it obvious once measured: at ~29 display pixels per
+image pixel, the preview sat visibly off the crosshair. **Two independent
+half-pixel errors, compounding in the same direction.** Both predate this
+session; blowing pixel art up 30x is what made them visible.
+
+**1. `_display_to_image` rounded when it should floor.** A pixel spans
+`[i, i+1)`, so `round()` sends everything past its midpoint to the neighbour:
+clicking the *visible centre* of a pixel painted the one to its right. Probed it
+before touching anything — 3 of 5 pixel centres mapped to the wrong pixel (and
+which ones varied, because Python rounds half to even, so it looked flaky on top
+of being wrong).
+
+**2. `_image_to_display` returned the pixel's top-left corner**, so the stroke
+preview was drawn half a pixel up-left of where the brush would actually land.
+
+The fix isn't simply "use floor everywhere", because **crop wants the old
+behaviour**: a crop box is described by the boundaries *between* pixels, so
+rounding to the nearest edge is right for it, and clamping to `0..src` inclusive
+is right too. Brushes address pixels; crop addresses the lines between them.
+Different questions, so `Tool.coords` is `"pixel"` or `"edge"` and the tool
+declares which — see ARCHITECTURE §19.1.1. That also means "pixel" mode stopped
+clamping: the paint ops already clip off-canvas points, and clamping had been
+smearing a stroke that runs off the edge along the border.
+
+**The test hole this exposed is the real lesson.** The existing paint checks
+computed their click points with `_image_to_display` and then asserted through
+`_display_to_image` — a round trip through the same wrong assumption, which
+passes happily while both halves are wrong together. And the surviving paint
+check *still* passed with the bug reverted, because brush size 3 covered the
+neighbouring pixel. Tests now: derive widget coordinates by hand from the fit
+scale, assert `_image_geom` against `canvas.bbox()` of the real image item
+(ground truth), sweep pixel centres *and* points at 2%/50%/98% across each pixel,
+and check the preview overlay's drawn bbox is nearer the pixel's centre than its
+corner — comparative rather than a tolerance, because an absolute tolerance
+passes by luck at low zoom. All confirmed to fail on a reverted copy of the tree
+before being called done. A regression test that can't fail is decoration.
+
+**Found while investigating, fixed too:** a `tk.Canvas` with no `scrollregion`
+scrolls itself over the bounding box of its items, and then widget coordinates
+stop equalling canvas coordinates — offsetting every gesture by the scroll
+amount. Nothing in our code scrolls the preview today (the timeline's wheel
+bindings are on its own canvas instance, not the Canvas *class*), so this wasn't
+Matthew's bug, but it was one stray binding away from being a mystery. `_redraw`
+now pins the scrollregion to the visible area, and `_dispatch` goes through
+`canvasx`/`canvasy` anyway. Panning, when it arrives, will be an explicit
+transform rather than an accident.
+
+**Numbers:** 301 headless tests (+2 tool-coords guards), Xvfb smoke 121 checks
+(was 110, +11 mapping checks).
+
+**Handover**
+
+- Take the pencil back to `Claude.gif` at size 1 and check it lands exactly under
+  the crosshair now, at the corners of the canvas as well as the middle.
+- Crop should feel unchanged — if anything it's the one thing I deliberately
+  didn't alter.

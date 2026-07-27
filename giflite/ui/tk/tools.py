@@ -66,6 +66,12 @@ class Tool:
     # Shown in the status line while this tool is active. Lives on the tool so
     # the frontend has no per-tool if-chain.
     hint: str = "drag on the image"
+    # How the canvas should turn a cursor position into an image coordinate.
+    # "pixel" = the pixel under the cursor (brushes, eyedropper: they address
+    # pixels). "edge" = the nearest pixel boundary (crop: it addresses the lines
+    # *between* pixels). Getting this wrong is invisible at 1:1 zoom and a whole
+    # pixel off at 30x, so it's declared per tool rather than assumed.
+    coords: str = "pixel"
 
     @property
     def is_gesturing(self) -> bool:
@@ -160,6 +166,9 @@ class CropTool(Tool):
     label = "Crop"
     op_id = "canvas.crop"
     hint = "drag a rectangle on the image   |   Esc to cancel"
+    # A crop box is described by its *edges*, so snap to the nearest pixel
+    # boundary (and 0..src inclusive) rather than to the pixel under the cursor.
+    coords = "edge"
 
     def __init__(self) -> None:
         self._anchor: tuple[int, int] | None = None
