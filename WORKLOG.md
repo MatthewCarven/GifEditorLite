@@ -476,3 +476,141 @@ transform rather than an accident.
   the crosshair now, at the corners of the canvas as well as the middle.
 - Crop should feel unchanged — if anything it's the one thing I deliberately
   didn't alter.
+
+---
+
+## 2026-07-27 (later) — a transparency index that pointed past its own palette
+
+**Symptom, as reported:** `claude_blinky.gif` frames 2 and 3 (1-indexed — the
+two blink frames) show a transparent background in the editor, and Discord
+renders them otherwise. Two decoders, two answers, one file.
+
+**The file is malformed, and we wrote it.** Byte-level parse of the container:
+
+    frame 0: LCT= 8 entries, transparent index 7   ok
+    frame 1: LCT= 8 entries, transparent index 8   <- past the end
+    frame 2: LCT= 8 entries, transparent index 8   <- past the end
+    frame 3: LCT= 8 entries, transparent index 7   ok
+
+Frames 1 and 2 are the blink: they carry a ninth colour (the blue eye block,
+`(0,0,255)`), which pushes the reserved transparency slot to index 8 — but the
+local colour table was still written with 8 entries. Hand-decoding the LZW
+confirms index 8 *is* present in the pixel data, 6816 times, so the question
+"what colour is index 8" decides the whole background. The GIF spec doesn't
+answer it. Pillow honours the transparency declaration and shows transparent;
+Discord evidently resolves it some other way and shows fill. Neither is wrong,
+because the file never said.
+
+**Cause, in `gif_write._to_palette`.** We quantise to `colors=255` to leave a
+slot free, then paste `_TRANSPARENT_INDEX = 255`. But ADAPTIVE returns *only as
+many entries as the frame needs* — an 8-colour frame comes back with an 8-entry
+palette, so index 255 was already dangling before the encoder saw it. Pillow's
+optimise pass then compacts the used indices (`[0..7, 255]` -> `[0..8]`), remaps
+`transparency` to 8, and sizes the colour table from a palette that never grew
+to hold it. Fix is one line of intent: pad the quantised palette out to a full
+256 entries so the index we're about to use is real.
+
+**It fires on exact powers of two.** A sweep of opaque-colour counts 2..40 plus
+63/64/65/127/128/129 failed at precisely 4, 8, 16, 32, 64, 128 before the fix and
+nowhere after. `claude_blinky` landed on 8. Every other GIF in the repo written
+by the editor happened to miss the mark — which is why this survived 301 tests.
+
+**The test lesson, again.** Round-trip assertions cannot see this: our reader
+goes through Pillow, and Pillow composites and resolves the dangling index the
+same way both before and after the fix. The bug is only visible in the bytes. So
+`test_transparent_index_stays_inside_the_colour_table` parses the container
+itself — colour table size and GCE transparency index per frame — and asserts
+the index is inside the table, across eight colour counts. Confirmed to fail on
+a reverted copy of `_to_palette` before being called done.
+
+**`claude_blinky.gif` repaired in place, losslessly.** Padded the two undersized
+local colour tables from 8 to 16 entries so index 8 is a legal (black,
+transparent) slot; pixel data and LZW streams untouched. Verified: alpha shape
+and every visible colour identical to the original render, differences confined
+to the RGB of fully-transparent pixels. The pre-repair bytes are kept as
+`claude_blinky_broken.gif` — delete it once you're happy, or keep it as a
+decoder-disagreement fixture.
+
+**Also, while here:** `tools/countdown_gif.py`, a standalone MM:SS countdown
+generator (Pillow only, no giflite import). Its first version had a *different*
+palette bug worth recording, because it's the trap next door: per-frame ADAPTIVE
+palettes plus `optimize=True` produced partial delta frames each carrying its own
+local colour table, so a decoder that composites in index space reads the
+untouched pixels through the wrong table — white background, outlined digits.
+Now: one fixed bg->fg ramp as the global colour table, full frames,
+`optimize=False`.
+
+**Numbers:** 302 headless tests (+1 container-level transparency guard).
+
+**Handover**
+
+- Reopen `claude_blinky.gif` in the editor, then drop it in Discord — both
+  should now show the same transparent background.
+- Worth a look: `gif_write` still emits a local colour table per frame. That is
+  harmless while frames stay full-canvas (they do — `disposal=2`), but it is the
+  same ingredient as the countdown bug, so if we ever let the encoder crop to
+  deltas, a document-wide palette needs to land first.
+
+---
+
+## 2026-07-27 (later still) — the two "possible follow-ups", one of which was worse than reported
+
+Both had been parked at the bottom of Save safety as nice-to-haves. Design in
+ARCHITECTURE §19.2–19.3.
+
+**1. A clean Ctrl+S was a lossy no-op.** Saving re-encodes: rebuilt palette,
+merged holds. Doing that with nothing to save spends the original and buys
+nothing. `save_would_change_nothing` is true when there's a path and no unsaved
+edits, and `save()` *acts* on it rather than merely reporting it — the split we
+normally keep (controller reports, frontend decides) is right for policy, but
+this one is protection, and a second frontend shouldn't be able to lose
+someone's file by forgetting to ask. `save_as` is deliberately untouched: naming
+a destination is a different request, and "save a copy" with no edits must
+still write.
+
+Two subtleties worth the words. A skipped save returns `True` — the caller asked
+for disk to match the document, and it does; returning `False` would send the
+frontend into Save As. And it leaves `overwrites_source` alone: that flag says
+"an untouched original is still out there", so a save that wrote nothing must
+not spend the one warning we get.
+
+**2. The single-key shortcuts were doing more damage than the report said.**
+Matthew flagged B/E/I/C switching tools while the brush Size box has focus. The
+guard is the same for all bare keys, so I bound the lot through
+`_bind_bare_key` — and the revert check showed what was really happening in that
+spinbox: BackSpace and Delete deleted **two frames** (8 → 6), space toggled
+playback, Home/End threw the playhead across the strip. Tool-switching was the
+mildest symptom of the set. `bind_all` fires after the focused widget's class
+binding, so the keystroke did its text-editing job *and* ours.
+
+The handler returns `None` rather than `"break"` when it stands down: the field
+has already had the key by then, and other listeners still deserve their turn —
+a param dialog's own Escape, for instance. Ctrl-combinations stay bound raw;
+they don't collide with typing. Rule for anything added later, now in §19.3: no
+modifier, use `_bind_bare_key`.
+
+**A test that would have lied.** The obvious assertion for the save skip is
+"the file's bytes are unchanged" — and it passes against a *broken* build,
+because `make_gif`'s art is a handful of flat colours that our writer reproduces
+byte-for-byte. Re-encoding it is genuinely a no-op, so the test proves nothing
+about whether we wrote. Replaced with two: a monkeypatched `writer_for` spy that
+asserts the encoder is never reached (can't be fooled), plus a bytes check
+against a purpose-built many-colour gradient GIF that really does re-quantise
+differently. Both fail on a reverted controller; so does `test_it_says_so` and
+the new `overwrites_source` guard.
+
+One existing test legitimately changed behaviour:
+`test_overwriting_the_source_clears_it_too` used to call `save()` on a freshly
+opened document and expect a write. It now makes an edit first. That's the fix
+working, not a test bent to fit.
+
+**Numbers:** 312 headless tests (was 302), Xvfb smoke 132 checks (was 110).
+Every new smoke check confirmed to fail on a reverted tree.
+
+**Handover**
+
+- Try the brush Size box: type a number, backspace over it, confirm your frames
+  are still there. That's the one to sanity-check by hand.
+- Ctrl+S twice in a row on a freshly opened file: the first should warn, the
+  second should say "No changes to save" and not touch the disk.
+- Next slice is still open — zoom/pan, or fill + shape tools, whichever you fancy.

@@ -492,6 +492,63 @@ def main() -> int:
     window._select_tool("cursor")
     check("tools: put away (back to cursor)", not window.canvas.has_tool)
 
+    # --- bare-key shortcuts yield to a focused text field ----------------
+    # Every single-key shortcut is also a text-editing key. bind_all fires after
+    # the widget's own class binding, so before the guard, typing in the brush
+    # Size box switched tools and BackSpace deleted a *frame* as well as a digit.
+    frames_before = controller.frame_count
+    window._size_box.focus_set()
+    root.update()
+    check("keys: focus reported as a text field", window.focus_is_text_field())
+
+    for key in ("<b>", "<e>", "<i>", "<c>"):
+        window._size_box.event_generate(key, when="now")
+    root.update()
+    check("keys: typing letters in Size does not switch tools",
+          window._tool_var.get() == "cursor" and not window.canvas.has_tool,
+          window._tool_var.get())
+
+    for key in ("<BackSpace>", "<Delete>"):
+        window._size_box.event_generate(key, when="now")
+    root.update()
+    check("keys: BackSpace/Delete in Size does not delete a frame",
+          controller.frame_count == frames_before,
+          f"{frames_before} -> {controller.frame_count}")
+
+    playing_before = controller.playing
+    window._size_box.event_generate("<space>", when="now")
+    root.update()
+    check("keys: space in Size does not toggle playback",
+          controller.playing == playing_before)
+
+    # Park mid-strip so every one of these keys would visibly move the playhead
+    # if it got through -- at frame 0 or the last frame, some are no-ops anyway
+    # and the check would pass without proving anything.
+    controller.seek(3)
+    root.update()
+    index_before = controller.index
+    for key in ("<Right>", "<Left>", "<Home>", "<End>"):
+        window._size_box.event_generate(key, when="now")
+    root.update()
+    check("keys: arrows/Home/End in Size do not move the playhead",
+          controller.index == index_before,
+          f"{index_before} -> {controller.index}")
+
+    # ...and the same keys still work once focus is back on the preview.
+    window.canvas.focus_set()
+    root.update()
+    check("keys: canvas focus is not a text field", not window.focus_is_text_field())
+    window.canvas.event_generate("<b>", when="now")
+    root.update()
+    check("keys: B still selects the pencil away from a text field",
+          window._tool_var.get() == "pencil", window._tool_var.get())
+    window._select_tool("cursor")
+    window.canvas.event_generate("<Right>", when="now")
+    root.update()
+    check("keys: Right still steps the playhead away from a text field",
+          controller.index == index_before + 1,
+          f"{index_before} -> {controller.index}")
+
     # reset to a clean single edit for the save section
     while controller.can_undo:
         controller.undo()
@@ -521,6 +578,20 @@ def main() -> int:
     check("save: title marker gone", not window.root.title().startswith("*"))
     check("save-safety: no longer the source after writing",
           not controller.overwrites_source)
+
+    # A second Ctrl+S with nothing changed must not re-encode. Safe to route
+    # through window.save_file() here precisely because it takes the skip branch
+    # -- no modal, so no hang.
+    check("clean-save: nothing left to save", controller.save_would_change_nothing)
+    saved_bytes = save_path.read_bytes()
+    saved_mtime = save_path.stat().st_mtime_ns
+    window.save_file()
+    root.update()
+    check("clean-save: file untouched on disk",
+          save_path.read_bytes() == saved_bytes
+          and save_path.stat().st_mtime_ns == saved_mtime)
+    check("clean-save: status line says so",
+          window.status["text"] == "No changes to save", window.status["text"])
     check("save-safety: Save As now keeps our own name",
           controller.suggested_save_name == "smoke_out.gif",
           controller.suggested_save_name)

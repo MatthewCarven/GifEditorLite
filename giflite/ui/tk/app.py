@@ -32,6 +32,16 @@ EMPTY_TEXT = "No animation open\n\nCtrl+O to open a GIF"
 # The palette's no-tool selection: plain viewing, no gesture armed.
 CURSOR_TOOL = "cursor"
 
+# Widget classes that own their keystrokes. Every bare-key shortcut below is
+# also an editing key inside a text field -- Left/Right/Home/End move the caret,
+# BackSpace and Delete remove a character, space types one, and b/e/i/c are
+# letters someone is trying to type. `bind_all` fires after the widget's own
+# class binding, so without this guard typing "12" then BackSpace in the brush
+# Size box edits the number *and* deletes a frame.
+TEXT_ENTRY_CLASSES = frozenset(
+    {"Entry", "TEntry", "Spinbox", "TSpinbox", "Text", "TCombobox", "Combobox"}
+)
+
 # Op id prefix -> menu title. Order here is menu order in the bar.
 OP_MENUS = (("frames", "Frames"), ("timing", "Timing"), ("canvas", "Image"))
 
@@ -128,16 +138,19 @@ class MainWindow:
 
         self.root.config(menu=menubar)
 
-        # bind_all so shortcuts work regardless of which widget has focus
+        # bind_all so shortcuts work regardless of which widget has focus --
+        # except that a text field has a better claim on a bare key than we do,
+        # so those go through _unless_typing.
         self.root.bind_all("<Control-o>", lambda _e: self.open_file())
         self.root.bind_all("<Control-s>", lambda _e: self.save_file())
         self.root.bind_all("<Control-Shift-S>", lambda _e: self.save_file_as())
         self.root.bind_all("<Control-w>", lambda _e: self.controller.close())
-        self.root.bind_all("<space>", self._on_space)
-        self.root.bind_all("<Left>", lambda _e: self.controller.step(-1))
-        self.root.bind_all("<Right>", lambda _e: self.controller.step(1))
-        self.root.bind_all("<Home>", lambda _e: self.controller.seek(0))
-        self.root.bind_all("<End>", lambda _e: self.controller.seek(self.controller.frame_count - 1))
+        bind_key = self._bind_bare_key
+        bind_key("<space>", self._on_space)
+        bind_key("<Left>", lambda _e: self.controller.step(-1))
+        bind_key("<Right>", lambda _e: self.controller.step(1))
+        bind_key("<Home>", lambda _e: self.controller.seek(0))
+        bind_key("<End>", lambda _e: self.controller.seek(self.controller.frame_count - 1))
         # editing shortcuts -- the controller no-ops these when they can't apply
         self.root.bind_all("<Control-z>", lambda _e: self.controller.undo())
         self.root.bind_all("<Control-Shift-Z>", lambda _e: self.controller.redo())
@@ -146,16 +159,47 @@ class MainWindow:
         # Ctrl+D is the fast path: duplicate once, no dialog. The menu item
         # "Duplicate Frames..." opens the count dialog instead.
         self.root.bind_all("<Control-d>", lambda _e: self.controller.run_op("frames.duplicate"))
-        self.root.bind_all("<Delete>", lambda _e: self.controller.run_op("frames.delete"))
-        self.root.bind_all("<BackSpace>", lambda _e: self.controller.run_op("frames.delete"))
+        bind_key("<Delete>", lambda _e: self.controller.run_op("frames.delete"))
+        bind_key("<BackSpace>", lambda _e: self.controller.run_op("frames.delete"))
         # Tool shortcuts. Each selects a tool on the preview; the canvas owns Esc
         # while one is active, so the global Esc below still deselects the rest
         # of the time.
-        self.root.bind_all("<c>", lambda _e: self._select_tool("crop"))
-        self.root.bind_all("<b>", lambda _e: self._select_tool("pencil"))
-        self.root.bind_all("<e>", lambda _e: self._select_tool("eraser"))
-        self.root.bind_all("<i>", lambda _e: self._select_tool("eyedropper"))
-        self.root.bind_all("<Escape>", lambda _e: self._clear_selection())
+        bind_key("<c>", lambda _e: self._select_tool("crop"))
+        bind_key("<b>", lambda _e: self._select_tool("pencil"))
+        bind_key("<e>", lambda _e: self._select_tool("eraser"))
+        bind_key("<i>", lambda _e: self._select_tool("eyedropper"))
+        bind_key("<Escape>", lambda _e: self._clear_selection())
+
+    # ---- keyboard routing ------------------------------------------------
+
+    def focus_is_text_field(self) -> bool:
+        """Whether the keyboard currently belongs to something being typed in."""
+        try:
+            widget = self.root.focus_get()
+        except (KeyError, tk.TclError):
+            # focus_get raises for a window Tk doesn't own -- not ours, not typing.
+            return False
+        if widget is None:
+            return False
+        try:
+            return widget.winfo_class() in TEXT_ENTRY_CLASSES
+        except tk.TclError:  # widget destroyed mid-event
+            return False
+
+    def _bind_bare_key(self, sequence: str, action) -> None:
+        """Bind a shortcut that has no modifier, yielding to any text field.
+
+        Returns None rather than "break" when it yields: the field's own class
+        binding has already run by the time `bind_all` fires, and other listeners
+        (a dialog's Escape, say) still deserve their turn.
+        """
+
+        def handler(event):
+            if self.focus_is_text_field():
+                return None
+            return action(event)
+
+        self.root.bind_all(sequence, handler)
 
     def _build_body(self) -> None:
         # Tool palette across the top; the preview canvas takes the slack below.
@@ -232,7 +276,12 @@ class MainWindow:
         ttk.Label(bar, text="Size").pack(side="left", padx=(10, 4))
         self._size_var = tk.StringVar(value=str(self._brush_size))
         self._size_var.trace_add("write", lambda *_: self._on_size_change())
-        ttk.Spinbox(bar, from_=1, to=64, width=4, textvariable=self._size_var).pack(side="left")
+        # Kept as an attribute so the smoke test can put focus in it: it's the
+        # window's one text field, and therefore the thing bare-key shortcuts
+        # have to yield to.
+        self._size_box = ttk.Spinbox(bar, from_=1, to=64, width=4,
+                                     textvariable=self._size_var)
+        self._size_box.pack(side="left")
 
     def _subscribe(self) -> None:
         bus = self.controller.events
@@ -260,6 +309,12 @@ class MainWindow:
         # Save writes to the current path; with none yet, fall back to Save As.
         if not self.controller.has_path:
             self.save_file_as()
+            return
+        # Nothing to write: say so and stop. Checked before the overwrite warning,
+        # because warning about destroying an original we aren't going to touch
+        # trains people to click through the one dialog that matters.
+        if self.controller.save_would_change_nothing:
+            self.controller.save()  # emits the status line; writes nothing
             return
         if self.controller.overwrites_source and not self._confirm_overwrite_source():
             return

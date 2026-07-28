@@ -232,11 +232,32 @@ class AppController:
             stem += EDITED_SUFFIX
         return stem + self._path.suffix
 
+    @property
+    def save_would_change_nothing(self) -> bool:
+        """Whether a plain Save has nothing to write.
+
+        True when there is a path and no unsaved edits, so disk already holds
+        this state. Writing anyway is never an improvement and is sometimes a
+        loss: over an untouched source it re-encodes the original -- rebuilt
+        palette, merged holds -- in exchange for nothing (ARCHITECTURE.md 19.2).
+        Exposed as a fact so a frontend can word it; `save` also acts on it, so
+        a frontend that forgets cannot destroy an original by accident.
+        """
+        return self._doc is not None and self._path is not None and not self.dirty
+
     def save(self) -> bool:
         """Write to the current path. False if there's nowhere to write yet
-        (the frontend should open Save As in that case)."""
+        (the frontend should open Save As in that case).
+
+        A save with nothing to save is skipped, not performed -- see
+        `save_would_change_nothing`. It still reports success: the caller asked
+        for disk to match the document, and it does.
+        """
         if self._doc is None or self._path is None:
             return False
+        if self.save_would_change_nothing:
+            self.events.emit(ev.STATUS, message="No changes to save")
+            return True
         return self._write(self._path)
 
     def save_as(self, path: Path) -> bool:

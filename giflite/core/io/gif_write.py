@@ -64,6 +64,17 @@ def _to_palette(image: Image.Image) -> Image.Image:
     pal = rgb.convert(
         "P", palette=Image.ADAPTIVE, colors=255, dither=Image.FLOYDSTEINBERG
     )
+    # ADAPTIVE returns only as many entries as the frame actually needs -- an
+    # 8-colour frame comes back with an 8-entry palette. Pasting index 255 into
+    # that would reference a slot the palette does not have, and Pillow's
+    # optimise pass then sizes the colour table from the (short) palette while
+    # writing a transparency index past its end. Decoders disagree about what an
+    # out-of-range index means, so the frame renders opaque in some viewers and
+    # transparent in others. Padding to a full 256 entries makes index 255 real.
+    entries = list(pal.getpalette() or [])
+    entries.extend([0] * (768 - len(entries)))
+    pal.putpalette(entries)
+
     # Paste the transparent index everywhere alpha is low.
     transparent_mask = alpha.point(lambda a: 255 if a < _ALPHA_CUTOFF else 0).convert("1")
     pal.paste(_TRANSPARENT_INDEX, mask=transparent_mask)

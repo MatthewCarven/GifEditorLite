@@ -71,7 +71,72 @@ class TestRoundTrip:
         assert read_gif(out).loop == 0
 
 
+def colour_count_doc(n_colours: int, size=(64, 24)) -> Document:
+    """One frame with exactly `n_colours` opaque colours on a transparent field."""
+    im = Image.new("RGBA", size, (0, 0, 0, 0))
+    draw = ImageDraw.Draw(im)
+    for i in range(n_colours):
+        draw.rectangle([i, 6, i, 18], fill=(250 - i, 40 + i, 90, 255))
+    return Document((Frame.new(im, 100),), size)
+
+
+def frame_palette_report(path: Path) -> list[tuple[int, int | None]]:
+    """Parse the container: per frame, (colour table entries, transparent index).
+
+    Deliberately byte-level. Pillow's reader composites frames and papers over a
+    transparency index that points past the end of the colour table, so a
+    round-trip assertion cannot see this class of bug -- only the bytes can.
+    """
+    d = path.read_bytes()
+    flags = d[10]
+    gct = 2 ** ((flags & 7) + 1) if flags & 0x80 else 0
+    i = 13 + 3 * gct
+    out: list[tuple[int, int | None]] = []
+    transparent: int | None = None
+    while i < len(d) and d[i] != 0x3B:
+        if d[i] == 0x21:  # extension
+            label = d[i + 1]
+            i += 2
+            blocks = []
+            while d[i]:
+                blocks.append(d[i + 1 : i + 1 + d[i]])
+                i += d[i] + 1
+            i += 1
+            if label == 0xF9:  # graphic control
+                gce = blocks[0]
+                transparent = gce[3] if gce[0] & 1 else None
+        elif d[i] == 0x2C:  # image descriptor
+            local = d[i + 9]
+            lct = 2 ** ((local & 7) + 1) if local & 0x80 else 0
+            i += 10 + 3 * lct + 1  # descriptor + table + LZW min code size
+            while d[i]:
+                i += d[i] + 1
+            i += 1
+            out.append((lct or gct, transparent))
+        else:
+            break
+    return out
+
+
 class TestTransparency:
+    def test_transparent_index_stays_inside_the_colour_table(self, tmp_path: Path):
+        """Regression: an out-of-range transparency index renders differently
+        per decoder -- transparent in Pillow, opaque in Discord.
+
+        The quantiser returns only as many palette entries as a frame needs, so
+        a frame with a power-of-two colour count used to end up with the
+        transparency index sitting one past the end of its table.
+        """
+        for n_colours in (2, 4, 7, 8, 9, 16, 17, 32):
+            out = tmp_path / f"c{n_colours}.gif"
+            write_gif(colour_count_doc(n_colours), out)
+            for entries, transparent in frame_palette_report(out):
+                assert transparent is not None
+                assert transparent < entries, (
+                    f"{n_colours} colours: transparency index {transparent} "
+                    f"is outside a {entries}-entry colour table"
+                )
+
     def test_transparent_regions_round_trip_as_a_shape(self, tmp_path: Path):
         doc = transparent_doc(4)
         out = tmp_path / "t.gif"

@@ -503,3 +503,13 @@ Writing a GIF rebuilds the palette and merges identical consecutive frames into 
 The guard is split along the seam. The controller reports the fact — `overwrites_source` (the current path is still the file we read, nothing has written to it yet) and `suggested_save_name` (`<stem>_edited.gif`, applied idempotently so saving twice never yields `a_edited_edited.gif`) — and the frontend owns the policy: a warning dialog whose default button is the safe one, offering overwrite / save elsewhere / cancel. The flag clears on the first successful write to any path, so the warning appears once per opened file rather than on every save.
 
 Naming policy lives in the controller deliberately: a second frontend should inherit "don't clobber the original" rather than reinvent it.
+
+The cheapest guard is not writing at all. `save_would_change_nothing` is true when there is a path and no unsaved edits — disk already holds this state, so the encode buys nothing and over an untouched source costs the original. `save()` acts on it rather than only reporting it: this one is protection, not policy, and a frontend that forgets shouldn't be able to lose someone's file. `save_as` is untouched — naming a destination is a different request, and a "save a copy" with no edits must still write. A skipped save reports success (the caller asked for disk to match the document; it does) and leaves `overwrites_source` alone, since an original we didn't touch is still an original.
+
+### 19.3 Bare-key shortcuts yield to text fields
+
+Every single-key shortcut in the frontend is also a text-editing key: Left/Right/Home/End move a caret, BackSpace and Delete remove a character, space types one, and `b`/`e`/`i`/`c` are letters. `bind_all` fires *after* the focused widget's class binding, so both happened — typing "12" then BackSpace in the brush Size box edited the number and deleted two frames.
+
+`_bind_bare_key` wraps any unmodified shortcut so it stands down while `focus_is_text_field()` (the focused widget's `winfo_class()` is in `TEXT_ENTRY_CLASSES`). It returns `None` rather than `"break"`: the field has already had the keystroke by then, and other listeners — a dialog's own Escape, say — still deserve their turn. Modifier combinations (Ctrl+S and friends) are bound raw, since they don't collide with typing.
+
+The rule for anything added later: no modifier, use `_bind_bare_key`.

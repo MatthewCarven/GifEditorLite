@@ -156,8 +156,30 @@ in ARCHITECTURE §19.2.
 - [x] Warns once per opened file — the flag clears on the first write to any path
 - [x] Save As defaults to the non-destructive name
 - [x] Routing covered in the smoke test with a stubbed answer; the dialog's real option set (`-detail`, `-default no`) proved to construct under Xvfb separately, since a modal would hang a scripted run
-- [ ] Possible follow-up: a non-dirty Save over the source is pure loss (re-encodes for no gain) — could skip the write entirely with "No changes to save"
-- [ ] Possible follow-up: single-key tool shortcuts (B/E/I/C) are `bind_all`, so they fire while the Size spinbox has focus. Pre-existing, but more noticeable now crop is one of them
+- [x] A non-dirty Save re-encoded for no gain — now skipped ("No changes to save"), done 2026-07-27
+- [x] Single-key shortcuts fired while the Size spinbox had focus — now yield to text fields, done 2026-07-27
+
+## Keyboard & save polish ✅
+
+Both were listed as "possible follow-ups" under Save safety. The second turned
+out to be worse than advertised. Design in ARCHITECTURE §19.2–19.3.
+
+- [x] `save_would_change_nothing` on the controller; `save()` acts on it rather
+      than only reporting it — protection, not policy, so a second frontend
+      can't lose an original by forgetting. `save_as` still always writes
+- [x] A skipped save leaves `overwrites_source` set: an original we didn't touch
+      is still an original, so the warn-once flag must not be spent
+- [x] `_bind_bare_key` — every unmodified shortcut stands down while a text
+      field has focus; returns `None`, not `"break"`, so a dialog's own Escape
+      still fires. Ctrl-combinations stay raw
+- [x] **It wasn't just tool letters.** With the guard reverted, BackSpace and
+      Delete typed into the brush Size box deleted *two frames* (8 → 6), space
+      toggled playback, and Home/End moved the playhead. The reported symptom
+      was the mildest one
+- [x] Tests: 312 headless (was 302) incl. a monkeypatched writer spy, since
+      comparing bytes alone passes against a broken build on the shared fixture
+      — our writer reproduces `make_gif` art exactly. Xvfb smoke 132 checks
+      (was 110); all new checks verified to fail on a reverted tree
 
 **Later (additive):**
 
