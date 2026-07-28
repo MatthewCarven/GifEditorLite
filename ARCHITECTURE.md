@@ -513,3 +513,100 @@ Every single-key shortcut in the frontend is also a text-editing key: Left/Right
 `_bind_bare_key` wraps any unmodified shortcut so it stands down while `focus_is_text_field()` (the focused widget's `winfo_class()` is in `TEXT_ENTRY_CLASSES`). It returns `None` rather than `"break"`: the field has already had the keystroke by then, and other listeners — a dialog's own Escape, say — still deserve their turn. Modifier combinations (Ctrl+S and friends) are bound raw, since they don't collide with typing.
 
 The rule for anything added later: no modifier, use `_bind_bare_key`.
+
+---
+
+## 20. Zoom and pan
+
+Entirely the frontend's, exactly as §9 promised: `frame_image(index)` still hands
+over full-resolution pixels and the controller never learns there is a zoom. No
+core or `app/` file changed for this. The whole feature is `ui/tk/view.py` plus a
+rewritten render path in `ui/tk/canvas.py`.
+
+**`ViewTransform` imports no toolkit**, the same discipline `tools.py` follows,
+so the arithmetic — which is where a feature like this actually goes wrong — is
+covered headlessly in `tests/test_view.py`. The canvas owns drawing and owns no
+scale arithmetic of its own.
+
+### 20.1 The integration point is `_image_geom`
+
+`geometry()` returns exactly the `(left, top, width, height)` tuple the preview
+canvas already published, and `_display_to_image` / `_image_to_display` already
+read every mapping through it. So the transform slots in *underneath* the
+existing coordinate code and **`tools.py` needed no changes at all** — crop, the
+brushes and the eyedropper work at 32x without knowing zoom exists. That is the
+seam paying rent for the second time (the first was crop folding into tools).
+
+Two properties of the tuple are load-bearing and easy to break later:
+
+- It describes the **whole image**, not the visible slice. A stroke that runs
+  off the edge has to keep making sense, and the paint ops clip for free.
+- Its origin is **integers**. Scales on the ladder are exact, so quantising the
+  origin to whole display pixels costs at most 1/scale of an image pixel of pan
+  precision and buys pixel-exact block alignment when upscaling.
+
+### 20.2 Two representation choices
+
+**Scale is `None` for fit, not a number.** Fit has to *stay* fit across a window
+resize and across canvas ops that change the image's dimensions. Baking the
+current factor into a float silently unsticks it: the view holds 37.4% while the
+window grows around it, which reads as a bug and is tedious to trace.
+
+**Pan is the image point held at the viewport centre**, not a pixel offset. The
+centre is invariant under zoom, so zooming holds your place for free, and
+re-clamping after a crop is one clamp of a point into new bounds. A pixel offset
+must be re-derived on every scale change — precisely the arithmetic §19.1
+records going wrong twice.
+
+Clamping happens after every mutation rather than lazily at read time. A stored
+centre that is out of bounds but *renders* correctly is a trap: the next zoom-out
+resolves it into a jump nobody asked for.
+
+### 20.3 Rendering is crop-then-scale
+
+The old path resized the entire source to fit. At 32x on a 500×500 GIF that is a
+16000×16000 RGBA — about a gigabyte, and the checkerboard again behind it. So
+the renderer now intersects the image rectangle with the viewport, maps back to
+whole source pixels, and crops-then-scales only that. **Cost is bounded by the
+window, not by the zoom** (asserted in the smoke test against the real bitmap,
+not just in theory).
+
+Three details that are not obvious and are each a visible bug if reversed:
+
+- The crop lands on **whole source pixels**; the sub-pixel remainder is carried
+  by *where the composed bitmap is placed*. Folding it into the resample instead
+  is what makes upscaled pixel art shimmer as it moves.
+- The checkerboard carries a **phase offset** so the pattern stays locked to the
+  image rather than to whatever sub-rectangle is on screen. Without it the
+  backing slides under a transparent GIF on every pan, which reads as the
+  artwork moving rather than the view.
+- At fit the visible rectangle is the whole image, so the fit path — including
+  its cache keys — is what it was before zoom existed, and playback still runs
+  off cached bitmaps.
+
+### 20.4 A view change is the resize bug wearing a hat
+
+`<Configure>` has cancelled in-progress gestures since crop existed: a resize
+moves and rescales the image, so coordinates already collected now map somewhere
+else. **A zoom or a pan is the identical staleness**, and it is reachable —
+Ctrl+`-` fires happily mid-stroke. Every view change therefore routes through
+one funnel (`PreviewCanvas._apply_view`) that cancels a pending gesture before
+redrawing, rather than each entry point remembering to.
+
+### 20.5 Policy
+
+- **Ladder, not continuous**: 12.5% → 3200%, integers above 1:1. A whole-number
+  scale maps each source pixel onto an exact block of screen pixels; a
+  fractional one distributes rounding unevenly and shimmers.
+- **Fit re-centres, Actual Size does not.** Fitting is a request to see
+  everything, so holding a pan offset would defeat it; asking for 1:1 is a
+  request to inspect what is under the middle.
+- **An edit keeps your magnification**; only a genuinely new document resets to
+  fit. Crop is the case that matters — you cropped in order to look closely, and
+  being thrown back to fit at that moment is the wrong answer. Same open/close
+  distinction the timeline already makes with its own `reset_view`.
+- **Buttons and keyboard only, no mouse.** Matthew's call, and it buys something
+  real: the wheel and the middle button stay entirely the tools', so no view
+  gesture can ever land inside a stroke. A hand tool and drag-panning remain
+  cheap to add later — `PanTool` would be one class, and `nudge()` already takes
+  arbitrary deltas.

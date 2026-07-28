@@ -185,7 +185,7 @@ out to be worse than advertised. Design in ARCHITECTURE §19.2–19.3.
 
 - [ ] Fill bucket; line / rect / ellipse shape tools (cheap now — one op + one Tool)
 - [ ] Soft / anti-aliased brushes (a new mask generator; op + tool unchanged)
-- [ ] Zoom / pan (the fit calc in `canvas.py` is already factored for it) — precise pixel work
+- [x] Zoom / pan — done 2026-07-28, see below
 - [ ] **Memory-aware undo** — track the bytes `History` holds and warn + report when it climbs past ~128 MB, rather than silently trimming. The plain 64-snapshot cap is fine initially; this is the bespoke follow-up Matthew flagged (concrete form of risk 1's `FrameStore` note)
 
 ## Later
@@ -197,3 +197,40 @@ out to be worse than advertised. Design in ARCHITECTURE §19.2–19.3.
 - [x] Polish: warn before overwriting the *original* source on Ctrl+S (GIF re-save is lossy); default Save As to `<name>_edited.gif` — done 2026-07-27
 - [ ] Polish: `default_params` could seed Set-Delay from the current frame's delay
 - [ ] Polish: crop is apply-on-release; a draggable/adjustable marquee with an explicit confirm (and maybe a keep-aspect modifier) would be nicer
+
+## Zoom & pan ✅ (slice 1)
+
+Buttons-and-keyboard only, by choice — see ARCHITECTURE §20.5. Design in §20.
+
+- [x] `ui/tk/view.py` — `ViewTransform`, no toolkit import, so the arithmetic is
+      headless (`tests/test_view.py`, 41 checks). Scale is `None` for fit rather
+      than a baked float; pan is the image point held at the viewport centre
+- [x] `geometry()` returns exactly the `_image_geom` tuple the canvas already
+      published, so **`tools.py` needed no changes** — crop and the brushes work
+      at 32x without knowing zoom exists
+- [x] Rendering is crop-then-scale: the composed bitmap is viewport-bounded, not
+      image-bounded (32x on this GIF would otherwise be 5120px wide — asserted
+      in the smoke against the real bitmap)
+- [x] Sub-pixel remainder carried by *placement*, not by the resample; checker
+      board carries a phase offset so it stays locked to the image across a pan
+- [x] Every view change funnels through `_apply_view`, which cancels a pending
+      gesture — the same staleness `<Configure>` has guarded since crop, and
+      reachable because Ctrl+- fires mid-stroke
+- [x] View menu + Ctrl+= / Ctrl+- / Ctrl+0 / Ctrl+1; zoom in the status line
+- [x] An edit keeps your magnification; only open/close resets to fit
+- [x] 353 headless (was 312), Xvfb smoke 151 checks (was 132). Four mutations of
+      the production code confirmed to break the new checks
+
+**Slice 2 (the interaction, not yet built):**
+
+- [ ] Toolbar cluster: `−  [zoom]  +  Fit  1:1` and a pan pad, with per-axis
+      disabled states (`can_pan_x` / `can_pan_y` / `can_zoom_in` already exist
+      and are tested for exactly this)
+- [ ] Pan buttons wired to `canvas.pan(±0.25, 0)` — the canvas API is done, this
+      is purely widgets
+- [ ] Possible follow-up: `_boards` and `_composed` are keyed more finely now
+      (rect + out-size + phase). Bounded, but worth a look at real cache hit
+      rates during playback while zoomed
+- [ ] Possible follow-up: zoom-to-cursor and drag-panning if buttons-only turns
+      out to chafe. `PanTool` would be one class; `nudge()` already takes
+      arbitrary deltas

@@ -122,6 +122,22 @@ class MainWindow:
         self.edit_menu.add_command(label="Deselect", accelerator="Esc", command=self._clear_selection)
         menubar.add_cascade(label="Edit", menu=self.edit_menu)
 
+        # View is pure frontend: none of it reaches the controller, because zoom
+        # and pan are the frontend's entirely (ARCHITECTURE.md 9). It is also
+        # the only menu here with no enable/disable refresh -- zooming an empty
+        # window is harmless and the transform simply has nothing to scale.
+        view_menu = tk.Menu(menubar, tearoff=False)
+        view_menu.add_command(label="Zoom In", accelerator="Ctrl++",
+                              command=self.zoom_in)
+        view_menu.add_command(label="Zoom Out", accelerator="Ctrl+-",
+                              command=self.zoom_out)
+        view_menu.add_separator()
+        view_menu.add_command(label="Fit to Window", accelerator="Ctrl+0",
+                              command=self.zoom_fit)
+        view_menu.add_command(label="Actual Size", accelerator="Ctrl+1",
+                              command=self.zoom_actual)
+        menubar.add_cascade(label="View", menu=view_menu)
+
         # One menu per op group, built entirely from the registry. Adding an op
         # (even a whole new group) needs no change here beyond OP_MENUS.
         for group_key, title in OP_MENUS:
@@ -169,6 +185,15 @@ class MainWindow:
         bind_key("<e>", lambda _e: self._select_tool("eraser"))
         bind_key("<i>", lambda _e: self._select_tool("eyedropper"))
         bind_key("<Escape>", lambda _e: self._clear_selection())
+        # Zoom. Ctrl-combinations, so no _bind_bare_key guard is needed -- they
+        # don't collide with typing. Both <Control-plus> and <Control-equal> are
+        # bound because "+" is the shifted key on most layouts and nobody
+        # reaches for Shift to zoom in.
+        self.root.bind_all("<Control-plus>", lambda _e: self.zoom_in())
+        self.root.bind_all("<Control-equal>", lambda _e: self.zoom_in())
+        self.root.bind_all("<Control-minus>", lambda _e: self.zoom_out())
+        self.root.bind_all("<Control-Key-0>", lambda _e: self.zoom_fit())
+        self.root.bind_all("<Control-Key-1>", lambda _e: self.zoom_actual())
 
     # ---- keyboard routing ------------------------------------------------
 
@@ -411,6 +436,31 @@ class MainWindow:
 
     # ---- tools (the canvas tools call the ToolContext below) -------------
 
+    # ---- view ------------------------------------------------------------
+    #
+    # Thin on purpose: the canvas owns the transform and the gesture-cancelling
+    # that a view change implies, so these exist only to refresh the readout
+    # afterwards. Nothing here touches the controller.
+
+    def zoom_in(self) -> None:
+        self.canvas.zoom_in()
+        self._update_status()
+
+    def zoom_out(self) -> None:
+        self.canvas.zoom_out()
+        self._update_status()
+
+    def zoom_fit(self) -> None:
+        self.canvas.zoom_fit()
+        self._update_status()
+
+    def zoom_actual(self) -> None:
+        self.canvas.zoom_actual()
+        self._update_status()
+
+    def _update_status(self) -> None:
+        self.status.configure(text=self._summary())
+
     def _select_tool(self, tool_id: str) -> None:
         """Activate a tool -- crop, pencil, eraser, eyedropper -- or 'cursor' to
         put tools away. One entry point for the palette, the shortcuts and the
@@ -562,7 +612,11 @@ class MainWindow:
             self.thumbnails.clear()
             self._select_tool(CURSOR_TOOL)  # no document -> put tools away
         # Keep the timeline scrolled where it was during an edit; only jump back
-        # to the start for a genuinely new document.
+        # to the start for a genuinely new document. Zoom follows the same rule
+        # for the same reason: an edit -- crop especially -- should leave you
+        # looking at the same magnification, and only a new file earns a reset.
+        if reason in ("open", "close"):
+            self.canvas.reset_view()
         self.timeline.set_document(doc, reset_view=reason in ("open", "close"))
         if selection is not None:
             self.timeline.set_selection(selection)
@@ -632,7 +686,11 @@ class MainWindow:
         return (
             f"{doc.size[0]}x{doc.size[1]}   |   "
             f"{doc.total_duration_ms / 1000:.2f}s   |   "
-            f"{_format_bytes(doc.nbytes_estimate)}"
+            f"{_format_bytes(doc.nbytes_estimate)}   |   "
+            # Fit reports its percentage too: "Fit" alone leaves you unable to
+            # tell a 40% view from a 400% one, which matters most on exactly the
+            # small pixel-art GIFs that get blown up to fill the window.
+            f"{self.canvas.view.label}"
         )
 
     def _set_title(self, path: Path | None, dirty: bool) -> None:

@@ -13,8 +13,16 @@ exactly where the canvas is and which pixels are transparent -- the same reason
 every image editor does it.
 
 M0 did fit-to-window. M1 added a scaled-frame cache so playback and scrubbing
-don't re-run a resize of a big frame on every redraw. Manual zoom and pan are
-still deferred; the fit calculation is factored out so they slot in later.
+don't re-run a resize of a big frame on every redraw. Manual zoom and pan
+arrived later and live in `view.py`: this module asks a `ViewTransform` where
+the image goes and renders it, and owns no scale arithmetic of its own.
+
+**Rendering is crop-then-scale, not scale-then-crop.** Composing the whole image
+at 32x would be gigabytes of RGBA for a modest GIF; instead only the part inside
+the viewport is cropped from the source and resampled, so cost is bounded by the
+window rather than by the zoom. At fit the visible rectangle is the whole image,
+which makes the fit path exactly what it was before zoom existed -- including
+the cache keys, so playback still runs off cached bitmaps.
 """
 
 from __future__ import annotations
@@ -24,6 +32,8 @@ import tkinter as tk
 from collections import OrderedDict
 
 from PIL import Image, ImageDraw, ImageTk
+
+from .view import ViewTransform
 
 BACKGROUND = "#232326"      # the "pasteboard" outside the canvas
 PLACEHOLDER_FG = "#8b8b93"
@@ -52,6 +62,10 @@ class PreviewCanvas(tk.Canvas):
         self._source: Image.Image | None = None
         self._source_key: object = None
         self._placeholder = ""
+        # Scale and pan. Pure arithmetic, no toolkit, tested headlessly in
+        # tests/test_view.py -- this widget asks it where the image goes and
+        # does no scale arithmetic of its own.
+        self.view = ViewTransform()
         # Strong reference, and the reason this attribute exists at all: Tk
         # garbage-collects a PhotoImage the moment Python drops its last
         # reference, and the canvas then draws nothing. A blank window with no
@@ -87,6 +101,12 @@ class PreviewCanvas(tk.Canvas):
         frame's image_uid so the same frame at the same size isn't rebuilt."""
         self._source = image
         self._source_key = key if key is not None else id(image)
+        # Tell the transform how big the image is. It deliberately keeps the
+        # current zoom and only re-clamps the pan, so a crop or a canvas resize
+        # leaves you looking at the same magnification -- you cropped in order
+        # to look closely, and being thrown back to fit at that moment is the
+        # wrong answer.
+        self.view.set_source(*image.size)
         self._redraw()
 
     def show_placeholder(self, text: str) -> None:
@@ -100,6 +120,54 @@ class PreviewCanvas(tk.Canvas):
         self._composed.clear()
         self._boards.clear()
 
+    def reset_view(self) -> None:
+        """Back to fit, centred. For a genuinely new document only -- the same
+        distinction the timeline makes with `reset_view` on open/close."""
+        self.view.reset()
+        self._redraw()
+
+    # ---- zoom and pan ----------------------------------------------------
+    #
+    # Each of these is "change the transform, then redraw through the one path
+    # that knows a view change invalidates a gesture in progress". They return
+    # whether anything moved so a caller can keep a button's enabled state
+    # honest -- with buttons-only panning there is no drag to fall back on, so a
+    # control that looks live but does nothing is the only feedback there is.
+
+    def zoom_in(self) -> bool:
+        return self._apply_view(self.view.zoom_in())
+
+    def zoom_out(self) -> bool:
+        return self._apply_view(self.view.zoom_out())
+
+    def zoom_fit(self) -> bool:
+        self.view.fit()
+        return self._apply_view(True)
+
+    def zoom_actual(self) -> bool:
+        self.view.actual_size()
+        return self._apply_view(True)
+
+    def pan(self, dx: float, dy: float) -> bool:
+        return self._apply_view(self.view.nudge(dx, dy))
+
+    def _apply_view(self, changed: bool) -> bool:
+        """The single funnel for every view change.
+
+        A zoom or a pan moves and rescales the image, which is *exactly* the
+        staleness a window resize causes: coordinates a gesture has already
+        collected now map somewhere else. `<Configure>` has cancelled gestures
+        for that reason since crop existed; routing view changes through the
+        same guard closes the hole rather than rediscovering it. Reachable
+        today via the keyboard shortcuts, which fire happily mid-stroke.
+        """
+        if not changed:
+            return False
+        if self._tool is not None and self._tool.is_gesturing:
+            self._tool.on_cancel(self._tool_ctx)
+        self._redraw()
+        return True
+
     # ---- internals -------------------------------------------------------
 
     def _on_configure(self, event: tk.Event) -> None:
@@ -109,6 +177,7 @@ class PreviewCanvas(tk.Canvas):
         if size == self._last_size:
             return
         self._last_size = size
+        self.view.set_viewport(*size)
         # A resize moves and rescales the image, so coordinates a gesture has
         # already collected now map against stale geometry. Cancel rather than
         # commit something that lands in the wrong place. (Crop had this guard
@@ -117,22 +186,6 @@ class PreviewCanvas(tk.Canvas):
         if self._tool is not None and self._tool.is_gesturing:
             self._tool.on_cancel(self._tool_ctx)
         self._redraw()
-
-    def _fit(self, image: Image.Image, width: int, height: int) -> Image.Image:
-        pad = 16
-        avail_w = max(width - pad, 1)
-        avail_h = max(height - pad, 1)
-        src_w, src_h = image.size
-        scale = min(avail_w / src_w, avail_h / src_h)
-
-        if abs(scale - 1.0) < 0.01:
-            return image
-
-        target = (max(int(src_w * scale), 1), max(int(src_h * scale), 1))
-        # NEAREST when enlarging keeps pixel-art GIFs crisp instead of mushy;
-        # LANCZOS when shrinking avoids the aliasing NEAREST would give.
-        resample = Image.NEAREST if scale > 1 else Image.LANCZOS
-        return image.resize(target, resample)
 
     def _checkerboard(self, width: int, height: int) -> Image.Image:
         cached = self._boards.get((width, height))
@@ -152,25 +205,56 @@ class PreviewCanvas(tk.Canvas):
         self._boards[(width, height)] = board
         return board
 
-    def _compose(self, width: int, height: int) -> tuple[ImageTk.PhotoImage, tuple[int, int]]:
-        cache_key = (self._source_key, width, height)
+    def _backing(self, size: tuple[int, int], phase: tuple[int, int]) -> Image.Image:
+        """A checkerboard of `size` whose pattern is offset by `phase`.
+
+        The phase exists so the checker stays locked to the *image* rather than
+        to whatever sub-rectangle happens to be on screen. Without it the
+        pattern shifts underneath a transparent GIF every time you pan, which
+        reads as the artwork moving rather than the view -- and with 25%-of-a-
+        viewport button steps it is a jump, not a drift. One oversized board,
+        cached, cropped to phase; the crop replaces the copy the composite
+        needed anyway, so it costs nothing extra.
+        """
+        sq = CHECKER_SQUARE * 2
+        px, py = phase[0] % sq, phase[1] % sq
+        board = self._checkerboard(size[0] + sq, size[1] + sq)
+        return board.crop((px, py, px + size[0], py + size[1]))
+
+    def _compose(self, rect: tuple[int, int, int, int],
+                 out_size: tuple[int, int],
+                 phase: tuple[int, int]) -> ImageTk.PhotoImage:
+        """Crop `rect` out of the source, scale it to `out_size`, put it on a
+        checkerboard. `rect` is in source pixels and `out_size` in display
+        pixels; at fit they are the whole image and its fitted size, which is
+        precisely what this method used to be handed.
+        """
+        cache_key = (self._source_key, rect, out_size, phase)
         cached = self._composed.get(cache_key)
         if cached is not None:
             self._composed.move_to_end(cache_key)
             return cached
 
-        fitted = self._fit(self._source, width, height)
-        if fitted.mode != "RGBA":
-            fitted = fitted.convert("RGBA")
-        board = self._checkerboard(*fitted.size).copy()
-        board.alpha_composite(fitted)  # transparent frame pixels reveal the checker
+        region = self._source
+        if rect != (0, 0, *region.size):
+            region = region.crop(rect)
+        if region.size != out_size:
+            # NEAREST when enlarging keeps pixel-art GIFs crisp instead of
+            # mushy; LANCZOS when shrinking avoids the aliasing NEAREST would
+            # give. Frames are RGBA by model invariant, so this can't hit the
+            # palette-interpolation trap a P-mode LANCZOS resize would.
+            resample = Image.NEAREST if out_size[0] >= region.size[0] else Image.LANCZOS
+            region = region.resize(out_size, resample)
+        if region.mode != "RGBA":
+            region = region.convert("RGBA")
+        board = self._backing(out_size, phase)
+        board.alpha_composite(region)  # transparent frame pixels reveal the checker
         photo = ImageTk.PhotoImage(board)
 
-        result = (photo, fitted.size)
-        self._composed[cache_key] = result
+        self._composed[cache_key] = photo
         if len(self._composed) > _SCALED_CACHE_LIMIT:
             self._composed.popitem(last=False)
-        return result
+        return photo
 
     def _redraw(self) -> None:
         self.delete("all")
@@ -206,18 +290,36 @@ class PreviewCanvas(tk.Canvas):
             )
             return
 
-        self._photo, (fw, fh) = self._compose(width, height)
-        cx, cy = width // 2, height // 2
-        left, top = cx - fw // 2, cy - fh // 2
-        self.create_image(cx, cy, image=self._photo, anchor="center")
+        self.view.set_viewport(width, height)
+        left, top, fw, fh = self.view.geometry()
+        src_w, src_h = self._source.size
+        scale_x, scale_y = fw / src_w, fh / src_h
+
+        # Only the visible part gets composed. Zoomed in, that is a
+        # viewport-sized bitmap however deep the zoom; at fit it is the whole
+        # image, so nothing about the pre-zoom path changes.
+        x0, y0, x1, y1 = rect = self.view.visible_source_rect()
+        out_w = max(int(round((x1 - x0) * scale_x)), 1)
+        out_h = max(int(round((y1 - y0) * scale_y)), 1)
+        # The crop is on whole source pixels, so the fraction of a pixel between
+        # the image origin and the crop origin has to be carried by *placement*.
+        # Folding it into the resample instead is what makes upscaled pixel art
+        # shimmer as it moves.
+        px = int(round(left + x0 * scale_x))
+        py = int(round(top + y0 * scale_y))
+        self._photo = self._compose(rect, (out_w, out_h), (px - left, py - top))
+        self.create_image(px, py, image=self._photo, anchor="nw")
         # A crisp edge so the canvas bounds read even where the frame's own
-        # pixels reach the border.
+        # pixels reach the border. Drawn at the *whole* image's bounds, which
+        # when zoomed in are mostly off-screen; Tk clips it for free.
         self.create_rectangle(
             left, top, left + fw, top + fh,
             outline=CANVAS_BORDER, width=1,
         )
         # Remember exactly where the image landed; tool gestures map widget
-        # coordinates back to image pixels through this.
+        # coordinates back to image pixels through this. Note it describes the
+        # entire image, not the visible slice -- a stroke that runs off the edge
+        # has to keep making sense.
         self._image_geom = (left, top, fw, fh)
 
     # ---- mouse dispatch: one path, straight to the active tool ------------

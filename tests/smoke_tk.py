@@ -678,6 +678,120 @@ def main() -> int:
     root.geometry("900x680")
     root.update()
 
+    # --- zoom and pan ----------------------------------------------------
+    # The transform's arithmetic is covered headlessly in tests/test_view.py.
+    # What can only be checked here is that the *renderer* agrees with it: that
+    # the bitmap Tk was handed corresponds to the geometry the tools map
+    # against. Those two drifting apart is exactly the class of bug ARCHITECTURE
+    # 19.1 records twice.
+    view = window.canvas.view
+    check("zoom: opens at fit", view.is_fit, view.label)
+    fit_photo_w = window.canvas._photo.width()
+
+    window.zoom_actual()
+    root.update()
+    check("zoom: actual size is 1:1", abs(view.scale - 1.0) < 1e-9, view.label)
+    check("zoom: 1:1 geometry equals the source size",
+          window.canvas._image_geom[2:] == controller.doc.size,
+          f"{window.canvas._image_geom[2:]} vs {controller.doc.size}")
+
+    # An edit must not throw the view back to fit. Crop is the case that
+    # matters -- you cropped in order to look closely at what is left -- but the
+    # rule is "only a genuinely new document resets", the same distinction the
+    # timeline already makes with its own reset_view.
+    controller.run_op("frames.duplicate")
+    root.update()
+    check("zoom: an edit leaves the magnification alone",
+          not view.is_fit and abs(view.scale - 1.0) < 1e-9, view.label)
+    controller.undo()
+    root.update()
+
+    for _ in range(8):
+        window.zoom_in()
+    root.update()
+    check("zoom: the ladder tops out", not view.can_zoom_in, view.label)
+
+    # The claim the whole crop-then-scale rework rests on. At 32x this GIF would
+    # compose to tens of thousands of pixels a side if the old scale-the-whole-
+    # image path had survived; the composed bitmap must instead stay bounded by
+    # the window, whatever the zoom.
+    vw = window.canvas.winfo_width()
+    vh = window.canvas.winfo_height()
+    photo_w = window.canvas._photo.width()
+    photo_h = window.canvas._photo.height()
+    scaled_w = controller.doc.size[0] * view.scale
+    check("zoom: the composed bitmap is viewport-bounded, not image-bounded",
+          photo_w <= vw + 2 * view.scale and photo_h <= vh + 2 * view.scale,
+          f"photo {photo_w}x{photo_h}, viewport {vw}x{vh}, "
+          f"whole image would be {int(scaled_w)}px")
+    check("zoom: _image_geom still describes the whole image",
+          window.canvas._image_geom[2] > vw,
+          f"geom w {window.canvas._image_geom[2]} vs viewport {vw}")
+
+    # Ground truth again, this time zoomed: the drawn item is only the visible
+    # slice, so its bbox is the geometry origin plus the cropped-away part. If
+    # these disagree, every gesture at high zoom lands somewhere else.
+    img_item = [i for i in window.canvas.find_all()
+                if window.canvas.type(i) == "image"][0]
+    bbox = window.canvas.bbox(img_item)
+    left, top, fw, fh = window.canvas._image_geom
+    x0, y0, _, _ = view.visible_source_rect()
+    sx = fw / controller.doc.size[0]
+    sy = fh / controller.doc.size[1]
+    check("zoom: the drawn slice sits where the geometry says it should",
+          abs(bbox[0] - (left + x0 * sx)) <= 1 and abs(bbox[1] - (top + y0 * sy)) <= 1,
+          f"bbox {bbox[:2]} vs expected {(left + x0 * sx, top + y0 * sy)}")
+
+    # The 19.1 trap, at a zoom where it is 32 screen pixels wide rather than
+    # hypothetical. Hand-computed widget point, no help from _image_to_display.
+    src_w, src_h = controller.doc.size
+    for target in ((0, 0), (src_w // 2, src_h // 2)):
+        hand_x = left + round((target[0] + 0.5) * sx)
+        hand_y = top + round((target[1] + 0.5) * sy)
+        got = window.canvas._display_to_image(hand_x, hand_y)
+        check(f"zoom: pixel {target} still maps to itself at {view.percent}%",
+              got == target, f"got {got}")
+
+    # Pan, and the edge that a button has to be able to detect.
+    before_pan = window.canvas._image_geom[0]
+    moved = window.canvas.pan(0.25, 0)
+    root.update()
+    check("pan: the view moved right, so the image moved left",
+          moved and window.canvas._image_geom[0] < before_pan,
+          f"{before_pan} -> {window.canvas._image_geom[0]}")
+    guard = 0
+    while window.canvas.pan(0.25, 0) and guard < 500:
+        guard += 1
+    check("pan: stops reporting movement at the edge", not window.canvas.pan(0.25, 0))
+    left, _, fw, _ = window.canvas._image_geom
+    check("pan: no pasteboard shows on an axis with image to spare",
+          left <= 0 and left + fw >= window.canvas.winfo_width(),
+          f"left {left}, right {left + fw}, viewport {window.canvas.winfo_width()}")
+
+    # A view change is the same staleness a resize causes: coordinates already
+    # collected now map somewhere else. Crop had this guard, painting gained it
+    # when the dispatch was shared, and zoom has to join them.
+    window._select_tool("pencil")
+    left, top, fw, fh = window.canvas._image_geom
+    window.canvas._on_press(_XY(left + fw // 2, top + fh // 2))
+    check("zoom: a gesture is in progress", window.canvas.active_tool.is_gesturing)
+    edits_before = controller.can_undo
+    window.zoom_out()
+    root.update()
+    check("zoom: a view change mid-gesture abandons it",
+          not window.canvas.active_tool.is_gesturing)
+    check("zoom: and commits nothing", controller.can_undo == edits_before)
+    check("zoom: overlay cleared with it", len(window.canvas._overlay_items) == 0)
+    window._select_tool("cursor")
+
+    window.zoom_fit()
+    root.update()
+    check("zoom: fit restores the original bitmap width",
+          view.is_fit and window.canvas._photo.width() == fit_photo_w,
+          f"{window.canvas._photo.width()} vs {fit_photo_w}")
+    check("zoom: the status line reports the zoom", view.label in window.status["text"],
+          window.status["text"])
+
     if args.shot:
         try:
             from PIL import ImageGrab

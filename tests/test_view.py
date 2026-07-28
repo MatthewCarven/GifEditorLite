@@ -1,0 +1,391 @@
+"""The view transform, headless.
+
+`ui/tk/view.py` imports no toolkit, so zoom and pan -- the arithmetic, which is
+where this sort of feature actually goes wrong -- are testable without a
+display. If these tests ever need Tk, the seam has leaked.
+
+The mapping tests here matter more than their size suggests. ARCHITECTURE §19.1
+records two half-pixel bugs that were invisible at 1:1 and 15 screen pixels
+wrong at 30x. Until this slice, "30x" was hypothetical and those tests were
+synthetic. Now it is reachable from a menu.
+"""
+
+from __future__ import annotations
+
+import math
+
+import pytest
+
+from giflite.ui.tk.view import LADDER, ViewTransform
+
+
+def make_view(viewport=(400, 300), source=(100, 80)) -> ViewTransform:
+    view = ViewTransform()
+    view.set_viewport(*viewport)
+    view.set_source(*source)
+    return view
+
+
+# ---- fit -----------------------------------------------------------------
+
+
+def test_fit_scales_to_the_smaller_axis():
+    # 100x80 into 400x300 less 16px padding: 384/100 = 3.84, 284/80 = 3.55.
+    view = make_view()
+    assert view.fit_scale == pytest.approx(284 / 80)
+
+
+def test_fit_snaps_to_one_to_one_when_it_is_within_a_percent():
+    view = make_view(viewport=(116, 116), source=(100, 100))
+    assert view.fit_scale == 1.0
+
+
+def test_fit_stays_fit_across_a_resize():
+    """The reason scale is None rather than a number. A baked float would hold
+    the old percentage while the window grew around it."""
+    view = make_view()
+    first = view.scale
+    view.set_viewport(800, 600)
+    assert view.is_fit
+    assert view.scale != first
+    assert view.scale == pytest.approx(584 / 80)
+
+
+def test_fit_geometry_centres_the_image():
+    view = make_view()
+    left, top, fw, fh = view.geometry()
+    assert (left, top) == ((400 - fw) // 2, (300 - fh) // 2)
+    assert fw <= 400 and fh <= 300
+
+
+def test_fit_shows_the_whole_source():
+    """At fit the renderer's crop is the entire image, so the pre-zoom path is
+    unchanged and the playback bitmap cache still hits."""
+    view = make_view()
+    assert view.visible_source_rect() == (0, 0, 100, 80)
+
+
+# ---- the ladder ----------------------------------------------------------
+
+
+def test_zoom_in_from_fit_lands_on_the_next_rung_up():
+    view = make_view()               # fit is 3.55
+    assert view.zoom_in()
+    assert view.scale == 4.0
+    assert not view.is_fit
+
+
+def test_zoom_out_from_fit_lands_on_the_next_rung_down():
+    view = make_view()               # fit is 3.55
+    assert view.zoom_out()
+    assert view.scale == 2.0
+
+
+def test_the_ladder_has_ends():
+    view = make_view()
+    view.set_scale(LADDER[-1])
+    assert not view.can_zoom_in
+    assert view.zoom_in() is False
+    assert view.scale == LADDER[-1]
+
+    view.set_scale(LADDER[0])
+    assert not view.can_zoom_out
+    assert view.zoom_out() is False
+    assert view.scale == LADDER[0]
+
+
+def test_set_scale_is_capped_to_the_ladder():
+    view = make_view()
+    view.set_scale(9999)
+    assert view.scale == LADDER[-1]
+
+
+def test_actual_size_is_one_to_one():
+    view = make_view()
+    view.actual_size()
+    assert view.scale == 1.0
+    left, top, fw, fh = view.geometry()
+    assert (fw, fh) == (100, 80)
+
+
+def test_fit_recentres_but_actual_size_does_not():
+    """Fitting is a request to see everything, so a pan offset would defeat it.
+    Asking for 1:1 is a request to inspect what is under the middle."""
+    view = make_view(viewport=(200, 200), source=(1000, 1000))
+    view.set_scale(1.0)
+    view.pan_right()
+    view.pan_down()
+    panned = view.center
+    assert panned != (500, 500)
+
+    view.actual_size()
+    assert view.center == panned
+
+    view.fit()
+    assert view.center == (500, 500)
+
+
+# ---- pan -----------------------------------------------------------------
+
+
+def test_pan_is_ignored_when_the_image_fits():
+    """Nothing to look around at. The image stays centred rather than drifting
+    off to one side."""
+    view = make_view(viewport=(400, 300), source=(20, 20))
+    view.set_scale(1.0)
+    before = view.geometry()
+    assert view.pan_right() is False
+    assert view.geometry() == before
+    assert not view.can_pan_x
+    assert not view.can_pan_y
+
+
+def test_panning_moves_the_view_right_and_the_image_left():
+    view = make_view(viewport=(200, 200), source=(1000, 1000))
+    view.set_scale(1.0)
+    left_before, _, _, _ = view.geometry()
+    assert view.pan_right()
+    left_after, _, _, _ = view.geometry()
+    assert left_after < left_before
+
+
+def test_a_pan_step_is_a_quarter_of_the_viewport():
+    view = make_view(viewport=(200, 200), source=(1000, 1000))
+    view.set_scale(1.0)
+    cx, _ = view.center
+    view.pan_right()
+    assert view.center[0] == pytest.approx(cx + 50)
+
+
+def test_pan_never_reveals_pasteboard_on_an_axis_with_image_to_spare():
+    view = make_view(viewport=(200, 200), source=(1000, 1000))
+    view.set_scale(1.0)
+    for _ in range(50):
+        view.pan_right()
+        view.pan_down()
+    left, top, fw, fh = view.geometry()
+    assert left <= 0 and top <= 0
+    assert left + fw >= 200 and top + fh >= 200
+
+
+def test_pan_stops_reporting_movement_at_the_edge():
+    """With buttons and no drag, a control that looks live but does nothing is
+    the only feedback there is -- so the edge has to be detectable."""
+    view = make_view(viewport=(200, 200), source=(1000, 1000))
+    view.set_scale(1.0)
+    while view.pan_right():
+        pass
+    assert view.pan_right() is False
+
+
+@pytest.mark.parametrize("source,rung", [
+    (333, 0.5), (101, 0.5), (777, 0.25), (99, 2.0), (37, 8.0), (1000, 1.0),
+])
+def test_the_edge_holds_even_when_the_scaled_size_does_not_divide_evenly(source, rung):
+    """Two scales are in play and they are not quite the same number.
+
+    The centre is clamped against the *requested* scale, but the image is drawn
+    at `width // source`, which truncates. On a source whose scaled size lands
+    between pixels the two disagree by a fraction, and the pan limit derived
+    from one is off by a pixel against the other -- a one-pixel strip of
+    pasteboard down the right edge at full pan. Cheap to prevent, invisible
+    until someone screenshots it.
+    """
+    view = make_view(viewport=(100, 100), source=(source, source))
+    view.set_scale(rung)
+    for _ in range(200):
+        view.pan_right()
+        view.pan_down()
+    left, top, fw, fh = view.geometry()
+    if fw > 100:
+        assert left + fw >= 100 and left <= 0
+    if fh > 100:
+        assert top + fh >= 100 and top <= 0
+
+
+def test_axis_origin_is_the_guard_for_an_unclamped_centre():
+    """Tested directly, and deliberately.
+
+    Every route through this class clamps the centre before geometry sees it,
+    so the limit inside `_axis_origin` never fires in practice -- dropping it
+    breaks nothing that goes via `nudge`. It stays because the next pan input
+    (a drag) would set a centre from raw mouse deltas, and this is where that
+    lands. Asserting the contract here keeps it honest code rather than
+    untested code that happens to be right.
+    """
+    # viewport 100, image 500 wide at 1:1, asked to centre on a point far off
+    # the right-hand end. The image must still cover the viewport.
+    assert ViewTransform._axis_origin(100, 500, 9999, 1.0) == -400
+    assert ViewTransform._axis_origin(100, 500, -9999, 1.0) == 0
+    # and an axis with nothing to pan ignores the centre entirely
+    assert ViewTransform._axis_origin(100, 40, 9999, 1.0) == 30
+
+
+def test_can_pan_reports_per_axis():
+    view = make_view(viewport=(400, 100), source=(100, 100))
+    view.set_scale(2.0)     # 200x200: taller than the viewport, not wider
+    assert not view.can_pan_x
+    assert view.can_pan_y
+
+
+# ---- zoom holds your place -----------------------------------------------
+
+
+def test_zoom_holds_the_centre():
+    """The whole reason pan is stored as an image point rather than an offset."""
+    view = make_view(viewport=(200, 200), source=(1000, 1000))
+    view.set_scale(2.0)
+    view.pan_right()
+    view.pan_down()
+    held = view.center
+
+    view.zoom_in()
+    assert view.center == pytest.approx(held)
+    view.zoom_out()
+    assert view.center == pytest.approx(held)
+
+
+def test_zooming_out_far_enough_recentres_rather_than_holding_a_stale_offset():
+    view = make_view(viewport=(200, 200), source=(1000, 1000))
+    view.set_scale(4.0)
+    for _ in range(20):
+        view.pan_right()
+    view.set_scale(0.125)          # 125x125, smaller than the viewport
+    assert view.center == (500, 500)
+    left, top, fw, fh = view.geometry()
+    assert (left, top) == ((200 - fw) // 2, (200 - fh) // 2)
+
+
+# ---- the document changing size under the view ---------------------------
+
+
+def test_a_crop_keeps_the_zoom():
+    """You cropped in order to look at what is left; being thrown back to fit at
+    that moment is the wrong answer."""
+    view = make_view(viewport=(200, 200), source=(1000, 1000))
+    view.set_scale(4.0)
+    view.set_source(300, 300)
+    assert view.scale == 4.0
+
+
+def test_a_crop_pulls_a_now_impossible_centre_back_in_bounds():
+    view = make_view(viewport=(200, 200), source=(1000, 1000))
+    view.set_scale(1.0)
+    for _ in range(50):
+        view.pan_right()
+        view.pan_down()
+    assert view.center[0] > 300
+
+    view.set_source(200, 200)      # the pan target no longer exists
+    cx, cy = view.center
+    assert 0 <= cx <= 200 and 0 <= cy <= 200
+    left, top, fw, fh = view.geometry()
+    assert (left, top) == ((200 - fw) // 2, (200 - fh) // 2)
+
+
+def test_reset_goes_back_to_fit_and_centre():
+    view = make_view(viewport=(200, 200), source=(1000, 1000))
+    view.set_scale(8.0)
+    view.pan_right()
+    view.reset()
+    assert view.is_fit
+    assert view.center == (500, 500)
+
+
+# ---- the visible rectangle -----------------------------------------------
+
+
+def test_the_visible_rect_is_viewport_bounded_however_far_in_you_zoom():
+    """The renderer composes only this rectangle. Composing the whole image at
+    32x would be ~4 GB of RGBA for a 1000x1000 GIF; this stays viewport-sized."""
+    view = make_view(viewport=(200, 200), source=(1000, 1000))
+    for rung in (1.0, 4.0, 16.0, 32.0):
+        view.set_scale(rung)
+        x0, y0, x1, y1 = view.visible_source_rect()
+        assert (x1 - x0) * rung <= 200 + 2 * rung
+        assert (y1 - y0) * rung <= 200 + 2 * rung
+
+
+def test_the_visible_rect_rounds_outward():
+    """Inward rounding would leave an uncovered sliver at the viewport edge."""
+    view = make_view(viewport=(200, 200), source=(1000, 1000))
+    view.set_scale(3.0)            # deliberately off-ladder: a partial pixel
+    left, top, _, _ = view.geometry()
+    x0, y0, x1, y1 = view.visible_source_rect()
+    assert left + x0 * 3.0 <= 0
+    assert left + x1 * 3.0 >= 200
+
+
+def test_the_visible_rect_never_collapses():
+    """A viewport smaller than one displayed pixel still has to render one, or
+    Pillow is handed a zero-sized crop and raises."""
+    view = make_view(viewport=(4, 4), source=(1000, 1000))
+    view.set_scale(32.0)
+    x0, y0, x1, y1 = view.visible_source_rect()
+    assert x1 > x0 and y1 > y0
+
+
+def test_the_visible_rect_stays_inside_the_source():
+    view = make_view(viewport=(900, 900), source=(100, 80))
+    view.set_scale(2.0)
+    assert view.visible_source_rect() == (0, 0, 100, 80)
+
+
+# ---- the mapping tools depend on (ARCHITECTURE §19.1) --------------------
+#
+# These replicate `PreviewCanvas._display_to_image` / `_image_to_display`
+# against the geometry this module produces. The canvas owns the real ones, but
+# the arithmetic they rest on is here, and it is the arithmetic that was wrong
+# twice before.
+
+
+def display_to_image(geom, source, dx, dy):
+    left, top, fw, fh = geom
+    return (math.floor((dx - left) / fw * source[0]),
+            math.floor((dy - top) / fh * source[1]))
+
+
+def image_to_display(geom, source, ix, iy, center=False):
+    left, top, fw, fh = geom
+    offset = 0.5 if center else 0.0
+    return (left + (ix + offset) / source[0] * fw,
+            top + (iy + offset) / source[1] * fh)
+
+
+@pytest.mark.parametrize("rung", [1.0, 2.0, 8.0, 32.0])
+def test_clicking_a_pixels_centre_addresses_that_pixel_at_every_zoom(rung):
+    source = (100, 80)
+    view = make_view(viewport=(300, 300), source=source)
+    view.set_scale(rung)
+    geom = view.geometry()
+    for target in ((0, 0), (7, 3), (50, 40), (99, 79)):
+        cx, cy = image_to_display(geom, source, *target, center=True)
+        assert display_to_image(geom, source, cx, cy) == target
+
+
+@pytest.mark.parametrize("rung", [1.0, 4.0, 16.0])
+def test_the_mapping_holds_after_panning(rung):
+    source = (200, 200)
+    view = make_view(viewport=(150, 150), source=source)
+    view.set_scale(rung)
+    view.pan_right()
+    view.pan_down()
+    geom = view.geometry()
+    for target in ((10, 10), (100, 100), (199, 199)):
+        cx, cy = image_to_display(geom, source, *target, center=True)
+        assert display_to_image(geom, source, cx, cy) == target
+
+
+def test_a_whole_number_zoom_gives_every_pixel_the_same_block_size():
+    """Why the ladder is integers above 1:1: uneven blocks are what shimmering
+    pixel art looks like from the inside."""
+    source = (37, 37)              # deliberately not a round number
+    view = make_view(viewport=(900, 900), source=source)
+    view.set_scale(8.0)
+    geom = view.geometry()
+    widths = {
+        image_to_display(geom, source, i + 1, 0)[0]
+        - image_to_display(geom, source, i, 0)[0]
+        for i in range(source[0])
+    }
+    assert widths == {8.0}

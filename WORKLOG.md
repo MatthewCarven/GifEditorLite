@@ -614,3 +614,99 @@ Every new smoke check confirmed to fail on a reverted tree.
 - Ctrl+S twice in a row on a freshly opened file: the first should warn, the
   second should say "No changes to save" and not touch the disk.
 - Next slice is still open — zoom/pan, or fill + shape tools, whichever you fancy.
+
+---
+
+## 2026-07-28 — Zoom and pan, slice 1
+
+Matthew picked zoom/pan over fill+shapes, then picked **buttons only** for the
+input — no wheel, no drag. That turned out to be a better call than it looked:
+the mouse stays entirely the tools', so no view gesture can land inside a
+stroke, and the fiddliest part of the feature (zoom-to-cursor anchoring) simply
+doesn't exist yet. Design in ARCHITECTURE §20.
+
+Also, before any of that: the previous session's commit had gone in with only
+`tools/countdown_gif.py` in it. `git add tools/` staged that directory and
+nothing else, so the nine modified tracked files were left behind — and pushed
+that way. Same split as `a7a5e2c`/`8fa0775` the session before. Amended and
+force-pushed as `3d7b804`. Worth noticing as a pattern rather than an accident:
+the handover says "commit", the obvious `git add <the new thing>` is not the
+same as `git add -A`, and the commit succeeds either way.
+
+**The seam paid rent for the second time.** `PreviewCanvas._image_geom` was
+already the single tuple every coordinate mapping read through, so making the
+transform *produce* that tuple meant `tools.py` needed **no changes at all** —
+crop, pencil, eraser and eyedropper all work at 3200% without knowing zoom
+exists. The first time was crop folding into the tool layer; this is the same
+dividend from the same discipline.
+
+**Two representation choices did most of the work.** Scale is `None` for fit
+rather than a number, because fit has to *stay* fit across window resizes and
+canvas ops — a baked float holds 37.4% while the window grows around it. And pan
+is stored as the image point held at the viewport centre rather than a pixel
+offset: the centre is invariant under zoom, so zooming holds your place for
+free, and re-clamping after a crop is one clamp of a point into new bounds.
+
+**The real work was rendering.** The old path resized the whole source; at 32x
+that is roughly a gigabyte of RGBA for a modest GIF, plus the checkerboard
+behind it. Now the renderer intersects the image rect with the viewport, maps
+back to whole source pixels, and crops-then-scales only that. The smoke test
+asserts this against the real bitmap rather than in theory: at 3200% the
+composed photo is 960×512 against a 900px viewport, where the whole image would
+have been 5120px wide.
+
+Three details there are each a visible bug if reversed, and only one of them was
+obvious going in:
+
+- The crop lands on whole source pixels and the sub-pixel remainder is carried
+  by *placement*. Folding it into the resample is what makes upscaled pixel art
+  shimmer as it moves.
+- The checkerboard needed a **phase offset**. Without it the backing is
+  generated from the crop's origin, so the pattern slides underneath a
+  transparent GIF every time you pan — and with 25%-of-a-viewport button steps
+  that is a jump, not a drift. It reads as the artwork moving rather than the
+  view. Cost nothing: the phase crop replaced the `.copy()` the composite needed
+  anyway.
+- At fit the visible rectangle is the whole image, so the fit path and its cache
+  keys are what they were before zoom existed. Playback still runs off cached
+  bitmaps.
+
+**A view change is the resize bug wearing a hat.** `<Configure>` has cancelled
+in-progress gestures since crop existed, because a resize moves and rescales the
+image and coordinates already collected now map elsewhere. A zoom or a pan is
+the identical staleness — and reachable, since Ctrl+- fires happily mid-stroke.
+Every view change now funnels through one `_apply_view` that cancels first,
+rather than each entry point remembering to. Recognised from the pattern rather
+than found by a bug report, which is the cheap way to get these.
+
+**A test that was right for the wrong reason.** `_axis_origin` clamps the origin
+so no pasteboard shows on an axis with image to spare — and deleting that clamp
+broke *nothing*, because `_clamp` runs after every mutation and a centre already
+in range yields an origin already in range. I'd assumed the two scales in play
+(the requested one, and `width // source` after truncation) would disagree
+enough to make it bite; instrumenting it showed the rounding cancels exactly.
+So the clamp was untested code that happened to be right. It stays — the next
+pan input would be a drag setting a centre from raw mouse deltas, and that is
+where it lands — but it is now held to that contract by a direct test, and the
+docstring says which. Untested-but-correct is a worse state than either
+alternative.
+
+**Numbers:** 353 headless tests (was 312), Xvfb smoke 151 checks (was 132). Four
+separate mutations of the production code were confirmed to break the new
+checks: composing the whole image instead of the visible rect, dropping the
+gesture cancel, placing the slice without its crop offset, and resetting the
+view on every doc change rather than only on open. Screenshotted at 3200% and at
+3200%-plus-pan to confirm it looks right and not merely arithmetically
+consistent.
+
+**Handover**
+
+- Slice 1 is menu- and keyboard-driven: **Ctrl+= / Ctrl+- / Ctrl+0 / Ctrl+1**,
+  and a View menu. The toolbar cluster and the pan buttons are slice 2, so
+  panning currently has no UI at all — `canvas.pan()` exists and is tested, but
+  nothing calls it outside the smoke.
+- Worth a hand check: zoom to 800% on a pixel-art GIF and paint. The mapping is
+  covered at 3200% in the smoke, but you have the eyes for whether the brush
+  sits under the cursor.
+- Also: Ctrl+- in the middle of a stroke should abandon it, not commit a
+  half-stroke somewhere unexpected.
