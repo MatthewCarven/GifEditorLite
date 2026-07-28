@@ -221,16 +221,42 @@ Buttons-and-keyboard only, by choice — see ARCHITECTURE §20.5. Design in §20
 - [x] 353 headless (was 312), Xvfb smoke 151 checks (was 132). Four mutations of
       the production code confirmed to break the new checks
 
-**Slice 2 (the interaction, not yet built):**
+## View panel & navigator ✅ (slice 2)
 
-- [ ] Toolbar cluster: `−  [zoom]  +  Fit  1:1` and a pan pad, with per-axis
-      disabled states (`can_pan_x` / `can_pan_y` / `can_zoom_in` already exist
-      and are tested for exactly this)
-- [ ] Pan buttons wired to `canvas.pan(±0.25, 0)` — the canvas API is done, this
-      is purely widgets
+Started as the planned toolbar cluster; it didn't fit, and Matthew's counter-
+proposal of a minimap turned out to be the better control anyway. Design in
+ARCHITECTURE §21.
+
+- [x] **The toolbar cluster failed silently** — that row needs 1087px and gets
+      900, so `pack` dropped three widgets with no error. Only a screenshot
+      caught it. Anything added to that toolbar needs the same check
+- [x] `ui/tk/minimap.py` — fitted thumbnail, dimmed outside the visible region,
+      viewport rectangle; press or drag to centre the preview there. Absolute,
+      not relative: the position you press is the position you get
+- [x] It keeps the preview's mouse entirely the tools' — a drag in the map is
+      not a gesture on the canvas, so no view input can land inside a stroke
+- [x] `image_to_display` / `display_to_image` **moved onto `ViewTransform`**;
+      the canvas delegates and the map reuses them. Also fixed a weak test:
+      `test_view.py` had been testing its own *copies* of those functions
+- [x] `center_on(ix, iy)` (clamped) and a configurable `fit_pad`
+- [x] **The `_axis_origin` clamp stopped being hypothetical.** §20 kept it for
+      "the next pan input that sets a centre from raw deltas"; the navigator is
+      that input. Dropping `center_on`'s clamp now leaves rendering correct
+      while the stored centre is wrong — the invisible-trap case. Both are
+      checked, at both levels
+- [x] Panel shown only when zoomed in, packed `before=canvas`, re-entrancy
+      guarded; the status line refreshes with it (pointing `on_view_change` at
+      the controls-only refresh left a stale percentage — a real bug)
+- [x] 360 headless (was 353), Xvfb smoke 170 checks (was 132 before zoom). Four
+      mutations confirmed to break the new checks
+
+**Later (additive):**
+
+- [ ] `can_pan_x` / `can_pan_y` have no production caller now the pan buttons
+      are gone — kept as the question any other pan input must ask. Delete if
+      nothing claims them
 - [ ] Possible follow-up: `_boards` and `_composed` are keyed more finely now
       (rect + out-size + phase). Bounded, but worth a look at real cache hit
       rates during playback while zoomed
-- [ ] Possible follow-up: zoom-to-cursor and drag-panning if buttons-only turns
-      out to chafe. `PanTool` would be one class; `nudge()` already takes
-      arbitrary deltas
+- [ ] Possible follow-up: zoom-to-cursor, keyboard panning (`nudge` and the
+      direction helpers are already there), or a resizable panel

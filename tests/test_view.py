@@ -12,8 +12,6 @@ synthetic. Now it is reachable from a menu.
 
 from __future__ import annotations
 
-import math
-
 import pytest
 
 from giflite.ui.tk.view import LADDER, ViewTransform
@@ -333,47 +331,53 @@ def test_the_visible_rect_stays_inside_the_source():
 
 # ---- the mapping tools depend on (ARCHITECTURE §19.1) --------------------
 #
-# These replicate `PreviewCanvas._display_to_image` / `_image_to_display`
-# against the geometry this module produces. The canvas owns the real ones, but
-# the arithmetic they rest on is here, and it is the arithmetic that was wrong
-# twice before.
-
-
-def display_to_image(geom, source, dx, dy):
-    left, top, fw, fh = geom
-    return (math.floor((dx - left) / fw * source[0]),
-            math.floor((dy - top) / fh * source[1]))
-
-
-def image_to_display(geom, source, ix, iy, center=False):
-    left, top, fw, fh = geom
-    offset = 0.5 if center else 0.0
-    return (left + (ix + offset) / source[0] * fw,
-            top + (iy + offset) / source[1] * fh)
+# These exercise ViewTransform's own `image_to_display` / `display_to_image`.
+# They previously tested local copies of the canvas's versions, which was worth
+# roughly nothing: a copy agreeing with itself proves the arithmetic is
+# self-consistent, not that it matches what the canvas actually does. The real
+# functions moved here when the navigator needed them too.
 
 
 @pytest.mark.parametrize("rung", [1.0, 2.0, 8.0, 32.0])
 def test_clicking_a_pixels_centre_addresses_that_pixel_at_every_zoom(rung):
-    source = (100, 80)
-    view = make_view(viewport=(300, 300), source=source)
+    view = make_view(viewport=(300, 300), source=(100, 80))
     view.set_scale(rung)
-    geom = view.geometry()
     for target in ((0, 0), (7, 3), (50, 40), (99, 79)):
-        cx, cy = image_to_display(geom, source, *target, center=True)
-        assert display_to_image(geom, source, cx, cy) == target
+        cx, cy = view.image_to_display(*target, center=True)
+        assert view.display_to_image(cx, cy) == target
 
 
 @pytest.mark.parametrize("rung", [1.0, 4.0, 16.0])
 def test_the_mapping_holds_after_panning(rung):
-    source = (200, 200)
-    view = make_view(viewport=(150, 150), source=source)
+    view = make_view(viewport=(150, 150), source=(200, 200))
     view.set_scale(rung)
     view.pan_right()
     view.pan_down()
-    geom = view.geometry()
     for target in ((10, 10), (100, 100), (199, 199)):
-        cx, cy = image_to_display(geom, source, *target, center=True)
-        assert display_to_image(geom, source, cx, cy) == target
+        cx, cy = view.image_to_display(*target, center=True)
+        assert view.display_to_image(cx, cy) == target
+
+
+def test_edge_snapping_addresses_boundaries_not_pixels():
+    """A crop box is described by the lines *between* pixels, so it rounds to
+    the nearest boundary and clamps to 0..src inclusive."""
+    view = make_view(viewport=(300, 300), source=(100, 80))
+    view.set_scale(2.0)
+    corner = view.image_to_display(10, 10)          # boundary, not pixel centre
+    assert view.display_to_image(*corner, snap="edge") == (10, 10)
+    left, top, fw, fh = view.geometry()
+    assert view.display_to_image(left - 500, top - 500, snap="edge") == (0, 0)
+    assert view.display_to_image(left + fw + 500, top + fh + 500,
+                                 snap="edge") == (100, 80)
+
+
+def test_pixel_snapping_does_not_clamp():
+    """The paint ops clip off-canvas points for free; clamping here would smear
+    a stroke that runs off the edge along the border instead of letting it go."""
+    view = make_view(viewport=(300, 300), source=(100, 80))
+    view.set_scale(2.0)
+    left, top, _, _ = view.geometry()
+    assert view.display_to_image(left - 40, top - 40) == (-20, -20)
 
 
 def test_a_whole_number_zoom_gives_every_pixel_the_same_block_size():
@@ -382,10 +386,64 @@ def test_a_whole_number_zoom_gives_every_pixel_the_same_block_size():
     source = (37, 37)              # deliberately not a round number
     view = make_view(viewport=(900, 900), source=source)
     view.set_scale(8.0)
-    geom = view.geometry()
     widths = {
-        image_to_display(geom, source, i + 1, 0)[0]
-        - image_to_display(geom, source, i, 0)[0]
+        view.image_to_display(i + 1, 0)[0] - view.image_to_display(i, 0)[0]
         for i in range(source[0])
     }
     assert widths == {8.0}
+
+
+# ---- center_on: what the navigator drags against -------------------------
+
+
+def test_center_on_puts_the_point_in_the_middle():
+    view = make_view(viewport=(200, 200), source=(1000, 1000))
+    view.set_scale(1.0)
+    view.center_on(400, 700)
+    assert view.center == (400, 700)
+    # and the geometry agrees: that image point lands mid-viewport
+    x, y = view.image_to_display(400, 700)
+    assert abs(x - 100) <= 1 and abs(y - 100) <= 1
+
+
+def test_center_on_clamps_rather_than_refusing():
+    """Dragging past the edge of the map should slide the view to the edge and
+    stop, not decline to move."""
+    view = make_view(viewport=(200, 200), source=(1000, 1000))
+    view.set_scale(1.0)
+    assert view.center_on(99999, 99999)
+    cx, cy = view.center
+    assert cx == 900 and cy == 900          # 1000 - viewport/2
+    left, top, fw, fh = view.geometry()
+    assert left + fw == 200 and top + fh == 200
+
+
+def test_center_on_reports_whether_anything_moved():
+    view = make_view(viewport=(200, 200), source=(1000, 1000))
+    view.set_scale(1.0)
+    view.center_on(400, 400)
+    assert view.center_on(400, 400) is False
+
+
+def test_center_on_is_ignored_on_an_axis_with_nothing_to_pan():
+    view = make_view(viewport=(400, 400), source=(50, 50))
+    view.set_scale(1.0)
+    view.center_on(0, 0)
+    assert view.center == (25, 25)
+
+
+# ---- the navigator's own transform ---------------------------------------
+
+
+def test_a_second_transform_can_use_a_smaller_pad():
+    """The navigator thumbnail is this same class, fit-locked, in a ~160px
+    panel -- where the preview's 16px of breathing room is a tenth of the
+    width."""
+    wide = ViewTransform()
+    tight = ViewTransform(fit_pad=4)
+    for view in (wide, tight):
+        view.set_viewport(160, 160)
+        view.set_source(100, 100)
+    assert tight.fit_scale > wide.fit_scale
+    assert tight.fit_scale == pytest.approx(156 / 100)
+    assert wide.fit_scale == pytest.approx(144 / 100)

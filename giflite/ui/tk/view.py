@@ -45,9 +45,9 @@ LADDER = (0.125, 0.25, 0.5, 1.0, 2.0, 4.0, 8.0, 16.0, 32.0)
 FIT_PAD = 16
 
 # How far one pan step moves, as a fraction of the viewport. A quarter is enough
-# to feel like progress and small enough to keep your bearings -- with
-# buttons-only panning there is no drag to fall back on, so overshooting is more
-# annoying here than it would be elsewhere.
+# to feel like progress and small enough to keep your bearings. The navigator
+# pans absolutely rather than in steps, so this now serves `nudge` and whatever
+# uses it next (keyboard panning being the obvious one).
 PAN_STEP = 0.25
 
 # Float comparisons against the ladder. Scales here are powers of two and exact
@@ -65,11 +65,15 @@ class ViewTransform:
     not impurity -- there is still no I/O, no toolkit and no clock in here.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, fit_pad: int = FIT_PAD) -> None:
         self._scale: float | None = None        # None == fit to window
         self._center: tuple[float, float] | None = None   # None == image centre
         self._viewport: tuple[int, int] = (0, 0)
         self._source: tuple[int, int] = (0, 0)
+        # Configurable because the navigator thumbnail is a second, fit-locked
+        # instance of this class in a ~160px panel, where the preview's 16px of
+        # breathing room is a tenth of the width.
+        self._fit_pad = max(int(fit_pad), 0)
 
     # ---- context ---------------------------------------------------------
 
@@ -112,7 +116,7 @@ class ViewTransform:
         sw, sh = self._source
         if sw <= 0 or sh <= 0 or vw <= 0 or vh <= 0:
             return 1.0
-        scale = min(max(vw - FIT_PAD, 1) / sw, max(vh - FIT_PAD, 1) / sh)
+        scale = min(max(vw - self._fit_pad, 1) / sw, max(vh - self._fit_pad, 1) / sh)
         # Within a percent of 1:1, call it 1:1. This is inherited behaviour and
         # worth keeping: it spares a full-image resample for a difference nobody
         # can see, and it means a GIF that nearly fits is displayed exactly.
@@ -220,14 +224,34 @@ class ViewTransform:
     def pan_down(self) -> bool:
         return self.nudge(0, PAN_STEP)
 
+    def center_on(self, ix: float, iy: float) -> bool:
+        """Put image point `(ix, iy)` in the middle of the viewport.
+
+        What the navigator drags against: a point picked off a thumbnail is
+        already an image coordinate, so there is nothing to convert and nothing
+        to accumulate. Clamped like every other centre change, which is what
+        makes dragging *past* the edge of the map behave -- the view slides to
+        the edge and stops rather than refusing to move.
+        """
+        before = self.center
+        self._center = (float(ix), float(iy))
+        self._clamp()
+        return self.center != before
+
     def center_view(self) -> None:
         self._center = None
 
     @property
     def can_pan_x(self) -> bool:
-        """Whether the image is wider than the viewport. Drives the enabled
-        state of the pan buttons: with no drag available, a button that looks
-        live but does nothing is the only feedback there is."""
+        """Whether the image is wider than the viewport.
+
+        No production caller since the navigator replaced the pan buttons these
+        were written for -- the map answers "is there more over there?"
+        visually, by drawing a rectangle smaller than the image. Kept because it
+        is the question any *other* pan input has to ask (keyboard, a drag) and
+        it is three lines that are already covered; deleting and re-adding it
+        would be churn, not economy.
+        """
         left, _, fw, _ = self.geometry()
         return fw > self._viewport[0]
 
@@ -292,6 +316,62 @@ class ViewTransform:
             return (viewport - extent) // 2
         origin = int(round(viewport / 2 - center * scale))
         return max(viewport - extent, min(origin, 0))
+
+    # ---- mapping ---------------------------------------------------------
+    #
+    # These lived in the canvas until the navigator needed the same arithmetic
+    # against a *different* geometry (a thumbnail rather than the preview).
+    # Duplicating them would have been the exact setup for the two half-pixel
+    # bugs in 19.1 to reappear on one side only. They are pure functions of
+    # `geometry()` and the source size, so they belong here, where they are
+    # tested directly rather than through a display.
+
+    def image_to_display(self, ix: float, iy: float,
+                         center: bool = False) -> tuple[float, float]:
+        """An image coordinate -> a point in display space.
+
+        `center=False` gives the pixel's top-left *corner*, which is what a crop
+        marquee wants (its coordinates are boundaries). `center=True` gives the
+        middle of the pixel, which is what a brush preview wants: a stroke drawn
+        through corners sits visibly half a pixel up and to the left of the
+        cursor, and at 30x zoom half a pixel is 15 screen pixels of "the tool is
+        off".
+        """
+        left, top, fw, fh = self.geometry()
+        sw, sh = self._source
+        if sw <= 0 or sh <= 0:
+            return (float(left), float(top))
+        offset = 0.5 if center else 0.0
+        return (left + (ix + offset) / sw * fw,
+                top + (iy + offset) / sh * fh)
+
+    def display_to_image(self, dx: float, dy: float,
+                         snap: str = "pixel") -> tuple[int, int]:
+        """A display point -> image coordinates. Two honest answers here:
+
+        `snap="pixel"` -- *which pixel is under the cursor*, what a brush or
+        eyedropper needs. That is `floor`, not `round`: a pixel spans
+        `[i, i+1)`, so rounding sends everything past its midpoint to the
+        neighbour, and clicking the visible centre of a pixel paints the one to
+        its right. Invisible at 1:1 and a whole pixel wrong at 30x zoom, which is
+        exactly where pixel art gets edited. Not clamped -- the paint ops clip
+        off-canvas points for free, and clamping would smear a stroke that runs
+        off the edge along the border instead of just letting it leave.
+
+        `snap="edge"` -- *the nearest pixel boundary*, what a crop box needs,
+        since its coordinates are edges and not pixels. Rounding is correct here,
+        and the result is clamped to `0..src` because a crop box has to be a
+        valid rectangle inside the canvas.
+        """
+        left, top, fw, fh = self.geometry()
+        sw, sh = self._source
+        if sw <= 0 or sh <= 0 or fw <= 0 or fh <= 0:
+            return (0, 0)
+        fx = (dx - left) / fw * sw
+        fy = (dy - top) / fh * sh
+        if snap == "edge":
+            return (max(0, min(round(fx), sw)), max(0, min(round(fy), sh)))
+        return (math.floor(fx), math.floor(fy))
 
     def visible_source_rect(self) -> tuple[int, int, int, int]:
         """The part of the source that is actually on screen, as whole pixels.

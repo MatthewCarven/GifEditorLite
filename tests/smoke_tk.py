@@ -792,6 +792,99 @@ def main() -> int:
     check("zoom: the status line reports the zoom", view.label in window.status["text"],
           window.status["text"])
 
+    # --- the view panel and the navigator ---------------------------------
+    # The panel replaced a toolbar cluster that did not fit (1087px wanted,
+    # 900 available -- Tk silently dropped three widgets off the end). It
+    # carries the zoom controls and the map, and it is the only way to pan.
+    def state_of(button):
+        return str(button["state"])
+
+    window.zoom_fit()
+    root.update()
+    check("panel: hidden at fit, where the map would say nothing",
+          not window.view_panel.winfo_ismapped())
+    check("panel: Fit is disabled when already fitted",
+          state_of(window._fit_button) == "disabled")
+
+    window.zoom_in()
+    root.update()
+    check("panel: appears once there is something to navigate",
+          window.view_panel.winfo_ismapped())
+    check("panel: readout agrees with the transform",
+          window._zoom_label["text"] == view.label, window._zoom_label["text"])
+    check("panel: Fit is live again", state_of(window._fit_button) == "normal")
+
+    canvas_w_with_panel = window.canvas.winfo_width()
+    check("panel: it takes its width off the preview, not the window",
+          canvas_w_with_panel < root.winfo_width(),
+          f"canvas {canvas_w_with_panel} vs window {root.winfo_width()}")
+
+    while view.can_zoom_in:
+        window._zoom_in_button.invoke()
+    root.update()
+    check("panel: + disables at the top of the ladder",
+          state_of(window._zoom_in_button) == "disabled", view.label)
+    check("panel: - stays live there", state_of(window._zoom_out_button) == "normal")
+
+    # The map itself. It draws a thumbnail plus a viewport rectangle; at fit the
+    # rectangle would cover everything, so it is deliberately not drawn.
+    mm = window.minimap
+    check("map: it drew a thumbnail", mm._photo is not None)
+    check("map: it is fit-locked", mm.view.is_fit, mm.view.label)
+    check("map: zoomed in, the viewport rectangle is drawn",
+          any(mm.type(i) == "rectangle" for i in mm.find_all()),
+          f"{[mm.type(i) for i in mm.find_all()]}")
+
+    # Dragging the map pans the preview -- absolutely, not relatively: the point
+    # you press is the point you get.
+    mleft, mtop, mfw, mfh = mm.view.geometry()
+    target = (controller.doc.size[0] // 4, controller.doc.size[1] // 4)
+    mx, my = mm.view.image_to_display(*target)
+    mm._on_point(_XY(int(mx), int(my)))
+    root.update()
+    got = window.canvas.view.center
+    check("map: pointing at the map centres the preview there",
+          abs(got[0] - target[0]) <= 2 and abs(got[1] - target[1]) <= 2,
+          f"asked {target}, got {(round(got[0], 1), round(got[1], 1))}")
+
+    # Off the edge of the map: slide to the edge and stop, don't fling.
+    mm._on_point(_XY(mleft + mfw + 400, mtop + mfh + 400))
+    root.update()
+    left, top, fw, fh = window.canvas._image_geom
+    check("map: dragging off the edge clamps instead of flinging",
+          left + fw >= window.canvas.winfo_width() and top + fh >= window.canvas.winfo_height(),
+          f"geom {(left, top, fw, fh)} in "
+          f"{window.canvas.winfo_width()}x{window.canvas.winfo_height()}")
+
+    check("map: the rectangle followed the pan",
+          mm._visible == window.canvas.view.visible_source_rect(),
+          f"{mm._visible} vs {window.canvas.view.visible_source_rect()}")
+
+    # The case a command-driven refresh would miss: the fit scale changes on a
+    # resize with no button behind it.
+    window.zoom_fit()
+    root.update()
+    label_before = window._zoom_label["text"]
+    root.geometry("620x520")
+    root.update()
+    check("panel: a resize refreshes the readout with no command behind it",
+          window._zoom_label["text"] != label_before,
+          f"{label_before} -> {window._zoom_label['text']}")
+    root.geometry("900x680")
+    root.update()
+
+    window._actual_button.invoke()
+    root.update()
+    check("panel: the 1:1 button is 1:1", abs(view.scale - 1.0) < 1e-9, view.label)
+    window._fit_button.invoke()
+    root.update()
+    check("panel: the Fit button returns to fit", view.is_fit, view.label)
+    check("panel: and hides itself again", not window.view_panel.winfo_ismapped())
+    check("panel: the preview got its width back",
+          window.canvas.winfo_width() > canvas_w_with_panel,
+          f"{canvas_w_with_panel} -> {window.canvas.winfo_width()}")
+    window._select_tool("cursor")
+
     if args.shot:
         try:
             from PIL import ImageGrab

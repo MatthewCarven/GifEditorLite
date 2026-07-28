@@ -605,8 +605,83 @@ redrawing, rather than each entry point remembering to.
   fit. Crop is the case that matters — you cropped in order to look closely, and
   being thrown back to fit at that moment is the wrong answer. Same open/close
   distinction the timeline already makes with its own `reset_view`.
-- **Buttons and keyboard only, no mouse.** Matthew's call, and it buys something
+- **No view gesture on the preview.** Matthew's call, and it buys something
   real: the wheel and the middle button stay entirely the tools', so no view
-  gesture can ever land inside a stroke. A hand tool and drag-panning remain
-  cheap to add later — `PanTool` would be one class, and `nudge()` already takes
-  arbitrary deltas.
+  gesture can ever land inside a stroke. Panning happens in the navigator
+  instead (§21), which keeps that property while still giving you a drag.
+
+---
+
+## 21. The view panel and the navigator
+
+### 21.1 Why the toolbar cluster failed
+
+Zoom and pan controls were first built as a right-aligned cluster on the
+toolbar. It doesn't fit: that row needs **1087px and gets 900**, so Tk silently
+dropped the last three widgets off the end — no error, they simply weren't
+there. Deleting the readout still leaves it ~57px short, and the window's 480px
+minimum makes the idea hopeless rather than merely tight.
+
+Worth recording because the failure is invisible: `pack` does not complain when
+it runs out of room, and a screenshot is the only thing that catches it.
+Anything added to that toolbar from here needs the same check.
+
+### 21.2 The navigator is a better pan control than buttons were
+
+- **It gives position, not just motion.** Buttons move the view but say nothing
+  about where it is. At 3200% on an 82px GIF you can see about 28 pixels, with
+  nothing to say *which* 28.
+- **The control and the readout are the same object.** The rectangle shows the
+  visible region and dragging it is the pan.
+- **It keeps the preview's mouse entirely the tools'.** Dragging in the map is
+  not a gesture on the preview canvas, so there is still no wheel binding and no
+  middle-drag that could land inside a stroke. That was the whole appeal of
+  buttons-only, and the map keeps it *and* gives you a drag.
+
+Pointing is **absolute, not relative**: the position you press is the position
+you get. A relative drag needs a grab offset and makes a plain click do nothing.
+
+### 21.3 It reuses the transform rather than reimplementing it
+
+`MiniMap` owns a second `ViewTransform`, locked to fit, and asks it the same two
+questions the preview asks its own: where the image lands (`geometry`) and which
+coordinate is under the cursor (`display_to_image`). It never converts anything
+itself.
+
+That drove a refactor worth having anyway: `image_to_display` /
+`display_to_image` **moved out of the canvas and onto `ViewTransform`**. They
+are pure functions of `geometry()` and the source size, they are the arithmetic
+§19.1 records going wrong twice, and having two copies against two different
+geometries is exactly how that returns on one side only. As a bonus it fixed a
+weak test — `tests/test_view.py` had been testing *its own copies* of these
+functions, which proves self-consistency and nothing else.
+
+`ViewTransform` also gained `center_on(ix, iy)` (clamped, so dragging past the
+edge of the map slides to the edge rather than flinging) and a configurable
+`fit_pad`, since the preview's 16px of breathing room is a tenth of a 168px
+panel.
+
+**A guard stopped being hypothetical.** §20 kept the clamp in `_axis_origin`
+despite it being unreachable, on the grounds that "the next pan input would set
+a centre from raw deltas, and that is where it lands". The navigator is that
+input. Removing `center_on`'s own clamp now leaves the *rendering* correct
+because `_axis_origin` catches it — the stored centre is wrong but invisible,
+which is precisely the trap §20.2 warns about. Both clamps are checked, at both
+levels: headlessly for the stored centre, in the smoke for the geometry.
+
+### 21.4 Panel policy
+
+- **Shown only when zoomed in.** At fit the map's rectangle covers the whole
+  image, which is to say it tells you nothing, so the strip would be pure cost.
+- **Packed `before=canvas`**, so it takes its width off the preview rather than
+  appearing below it.
+- **Re-entrancy is real here.** Packing changes the canvas width, which fires
+  `<Configure>` → redraw → back into the refresh. Visibility depends only on
+  `is_fit`, which does not depend on the width, so the state settles after one
+  bounce; the early return on "already in that state" is what stops it fighting
+  the geometry manager.
+- **The status line refreshes with the panel.** Pointing `on_view_change` at the
+  narrower controls-only refresh was a real bug: showing or hiding the panel
+  re-fits the canvas, and the status line kept a percentage the readout had
+  already moved past. Both are derived from the same state, so both refresh
+  together.

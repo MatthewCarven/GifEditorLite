@@ -27,7 +27,6 @@ the cache keys, so playback still runs off cached bitmaps.
 
 from __future__ import annotations
 
-import math
 import tkinter as tk
 from collections import OrderedDict
 
@@ -88,6 +87,13 @@ class PreviewCanvas(tk.Canvas):
         self._tool = None
         self._tool_ctx = None
         self._overlay_items: list[int] = []
+        # Called after every redraw so a frontend can keep zoom controls in step.
+        # A plain attribute rather than an event: this is one widget telling its
+        # own window something, not application state, and the controller's bus
+        # is for things a *second frontend* would also need to hear (§9). A
+        # resize re-fits without anyone pressing anything, which is exactly the
+        # case a command-driven refresh would miss.
+        self.on_view_change = None
         self.bind("<Configure>", self._on_configure)
         self.bind("<ButtonPress-1>", self._on_press)
         self.bind("<B1-Motion>", self._on_drag)
@@ -130,9 +136,8 @@ class PreviewCanvas(tk.Canvas):
     #
     # Each of these is "change the transform, then redraw through the one path
     # that knows a view change invalidates a gesture in progress". They return
-    # whether anything moved so a caller can keep a button's enabled state
-    # honest -- with buttons-only panning there is no drag to fall back on, so a
-    # control that looks live but does nothing is the only feedback there is.
+    # whether anything moved, which is how a frontend keeps a control's enabled
+    # state honest without tracking the view itself.
 
     def zoom_in(self) -> bool:
         return self._apply_view(self.view.zoom_in())
@@ -150,6 +155,10 @@ class PreviewCanvas(tk.Canvas):
 
     def pan(self, dx: float, dy: float) -> bool:
         return self._apply_view(self.view.nudge(dx, dy))
+
+    def center_view_on(self, ix: float, iy: float) -> bool:
+        """Centre on an image coordinate. What the navigator drags against."""
+        return self._apply_view(self.view.center_on(ix, iy))
 
     def _apply_view(self, changed: bool) -> bool:
         """The single funnel for every view change.
@@ -257,6 +266,11 @@ class PreviewCanvas(tk.Canvas):
         return photo
 
     def _redraw(self) -> None:
+        self._draw()
+        if self.on_view_change is not None:
+            self.on_view_change()
+
+    def _draw(self) -> None:
         self.delete("all")
         width = self.winfo_width()
         height = self.winfo_height()
@@ -403,48 +417,20 @@ class PreviewCanvas(tk.Canvas):
     # gesture rule, ARCHITECTURE.md 11.3 / 19). Overlays are plain canvas items,
     # so no provisional state ever reaches the core.
 
+    # The mapping itself lives on the transform (view.py): it is pure arithmetic
+    # over `geometry()` and the source size, the navigator needs the identical
+    # logic against a thumbnail's geometry, and duplicating it is precisely how
+    # the two half-pixel bugs in ARCHITECTURE 19.1 would come back on one side
+    # only. These remain as the canvas's names for it -- the tool dispatch and
+    # the overlay code read better for them.
+
     def _image_to_display(self, ix: float, iy: float,
                           center: bool = False) -> tuple[float, float]:
-        """An image coordinate -> a canvas point.
-
-        `center=False` gives the pixel's top-left *corner*, which is what a crop
-        marquee wants (its coordinates are boundaries). `center=True` gives the
-        middle of the pixel, which is what a brush preview wants: a stroke drawn
-        through corners sits visibly half a pixel up and to the left of the
-        cursor, and at 30x zoom half a pixel is 15 screen pixels of "the tool is
-        off".
-        """
-        left, top, fw, fh = self._image_geom
-        src_w, src_h = self._source.size
-        offset = 0.5 if center else 0.0
-        return (left + (ix + offset) / src_w * fw,
-                top + (iy + offset) / src_h * fh)
+        return self.view.image_to_display(ix, iy, center=center)
 
     def _display_to_image(self, dx: float, dy: float,
                           snap: str = "pixel") -> tuple[int, int]:
-        """Map a canvas point to image coordinates. Two honest answers here:
-
-        `snap="pixel"` -- *which pixel is under the cursor*, what a brush or
-        eyedropper needs. That is `floor`, not `round`: a pixel spans
-        `[i, i+1)`, so rounding sends everything past its midpoint to the
-        neighbour, and clicking the visible centre of a pixel paints the one to
-        its right. Invisible at 1:1 and a whole pixel wrong at 30x zoom, which is
-        exactly where pixel art gets edited. Not clamped -- the paint ops clip
-        off-canvas points for free, and clamping would smear a stroke that runs
-        off the edge along the border instead of just letting it leave.
-
-        `snap="edge"` -- *the nearest pixel boundary*, what a crop box needs,
-        since its coordinates are edges and not pixels. Rounding is correct here,
-        and the result is clamped to `0..src` because a crop box has to be a
-        valid rectangle inside the canvas.
-        """
-        left, top, fw, fh = self._image_geom
-        src_w, src_h = self._source.size
-        fx = (dx - left) / fw * src_w
-        fy = (dy - top) / fh * src_h
-        if snap == "edge":
-            return (max(0, min(round(fx), src_w)), max(0, min(round(fy), src_h)))
-        return (math.floor(fx), math.floor(fy))
+        return self.view.display_to_image(dx, dy, snap=snap)
 
     def clear_overlay(self) -> None:
         for item in self._overlay_items:

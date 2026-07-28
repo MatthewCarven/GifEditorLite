@@ -23,11 +23,18 @@ from giflite.core.ops import get_op, menu_groups, op_params
 from giflite.ui.base import Frontend
 from giflite.ui.tk.canvas import PreviewCanvas
 from giflite.ui.tk.dialogs import ask_params
+from giflite.ui.tk.minimap import MiniMap
 from giflite.ui.tk.timeline import Timeline
 from giflite.ui.tk.tools import default_tools
+from giflite.ui.tk.view import PAN_STEP
 
 APP_NAME = "GIF Editor Lite"
 EMPTY_TEXT = "No animation open\n\nCtrl+O to open a GIF"
+
+# The view panel: wide enough for a readable map and a "Fit (3200%)" readout,
+# narrow enough that losing it off the preview at a 480px window is bearable.
+PANEL_WIDTH = 168
+MINIMAP_HEIGHT = 120
 
 # The palette's no-tool selection: plain viewing, no gesture armed.
 CURSOR_TOOL = "cursor"
@@ -88,6 +95,13 @@ class MainWindow:
         self._build_menu()
         self._build_body()
         self._subscribe()
+        # A resize changes the fit scale with no command behind it, so the panel
+        # has to follow the canvas rather than only the menu. The *status line*
+        # too, and pointing this at the narrower `_refresh_view_controls` was a
+        # real bug: showing or hiding the panel resizes the canvas, which re-fits
+        # it, so the status line kept a percentage the readout had already moved
+        # past. Both are derived from the same state, so both refresh together.
+        self.canvas.on_view_change = self._update_status
 
         self._render()
         self._set_title(controller.path, controller.dirty)
@@ -246,6 +260,12 @@ class MainWindow:
 
         self._build_transport()
 
+        # The panel is packed before the canvas so the canvas takes what's left;
+        # it stays unpacked until there is something to navigate (see
+        # `_refresh_view_controls`).
+        self._build_view_panel()
+        self._panel_shown = False
+
         self.canvas = PreviewCanvas(self.root)
         self.canvas.pack(side="top", fill="both", expand=True)
 
@@ -307,6 +327,43 @@ class MainWindow:
         self._size_box = ttk.Spinbox(bar, from_=1, to=64, width=4,
                                      textvariable=self._size_var)
         self._size_box.pack(side="left")
+
+    def _build_view_panel(self) -> None:
+        """The navigator and the zoom controls, in a strip beside the preview.
+
+        This started as a cluster on the right of the toolbar and did not fit:
+        that row needs 1087px and gets 900, so Tk silently dropped the last
+        three widgets off the end -- and the window's 480px minimum made the
+        idea hopeless rather than merely tight. Everything view-related moved
+        here instead, which leaves the toolbar exactly as it was and gives the
+        map somewhere to live (ARCHITECTURE.md §21).
+        """
+        self.view_panel = ttk.Frame(self.root, padding=(6, 6))
+
+        self.minimap = MiniMap(self.view_panel, on_center=self._center_view_on,
+                               height=MINIMAP_HEIGHT, width=PANEL_WIDTH - 12)
+        self.minimap.pack(side="top", fill="x")
+
+        zoom_row = ttk.Frame(self.view_panel)
+        zoom_row.pack(side="top", fill="x", pady=(6, 0))
+        self._zoom_out_button = ttk.Button(zoom_row, text="−", width=2,
+                                           command=self.zoom_out)
+        self._zoom_out_button.pack(side="left")
+        # Fixed width, centred: the text runs from "50%" to "Fit (3200%)", and a
+        # label that resizes with its content shoves the buttons around it.
+        self._zoom_label = ttk.Label(zoom_row, width=11, anchor="center")
+        self._zoom_label.pack(side="left", fill="x", expand=True)
+        self._zoom_in_button = ttk.Button(zoom_row, text="+", width=2,
+                                          command=self.zoom_in)
+        self._zoom_in_button.pack(side="left")
+
+        button_row = ttk.Frame(self.view_panel)
+        button_row.pack(side="top", fill="x", pady=(4, 0))
+        self._fit_button = ttk.Button(button_row, text="Fit", command=self.zoom_fit)
+        self._fit_button.pack(side="left", fill="x", expand=True)
+        self._actual_button = ttk.Button(button_row, text="1:1",
+                                         command=self.zoom_actual)
+        self._actual_button.pack(side="left", fill="x", expand=True)
 
     def _subscribe(self) -> None:
         bus = self.controller.events
@@ -458,8 +515,74 @@ class MainWindow:
         self.canvas.zoom_actual()
         self._update_status()
 
+    def pan(self, dx: float, dy: float) -> None:
+        """One pan step, in units of `PAN_STEP` viewport-fractions. No UI drives
+        this now that the navigator does the panning -- it stays because the
+        canvas API is the seam a second frontend would use, and it is what the
+        minimap's drag reduces to."""
+        self.canvas.pan(dx * PAN_STEP, dy * PAN_STEP)
+        self._update_status()
+
+    def _center_view_on(self, ix: int, iy: int) -> None:
+        """The navigator pointed at an image coordinate."""
+        if self.canvas.center_view_on(ix, iy):
+            self._update_status()
+
     def _update_status(self) -> None:
         self.status.configure(text=self._summary())
+        self._refresh_view_controls()
+
+    def _refresh_view_controls(self) -> None:
+        """Point the panel at what the transform can currently do.
+
+        Driven from the canvas's own redraw as well as from the commands,
+        because the fit scale changes on a window resize without anyone pressing
+        anything -- and a `+` button that stays lit at 3200% is a lie about the
+        ladder having more rungs.
+        """
+        view = self.canvas.view
+        has_doc = self.controller.doc is not None
+        self._zoom_label.configure(text=view.label)
+        for button, enabled in (
+            (self._zoom_in_button, view.can_zoom_in),
+            (self._zoom_out_button, view.can_zoom_out),
+            (self._fit_button, not view.is_fit),
+            (self._actual_button, abs(view.scale - 1.0) > 1e-9),
+        ):
+            button.configure(state="normal" if (has_doc and enabled) else "disabled")
+        self._show_view_panel(has_doc and not view.is_fit)
+        if self._panel_shown:
+            self._update_minimap()
+
+    def _show_view_panel(self, wanted: bool) -> None:
+        """The panel earns its width only when there is something to navigate.
+
+        At fit the map's rectangle covers the whole image, which is to say it
+        tells you nothing, so the strip is pure cost. Guarded against
+        re-entrancy: packing changes the canvas's width, which fires
+        `<Configure>` -> redraw -> back into `_refresh_view_controls`, and
+        re-packing an already-packed frame there would fight the geometry
+        manager. Visibility depends only on `is_fit`, which does not depend on
+        the width, so the state settles after one bounce.
+        """
+        if wanted == self._panel_shown:
+            return
+        self._panel_shown = wanted
+        if wanted:
+            # before=canvas so the panel takes its width off the right-hand side
+            # rather than appearing below.
+            self.view_panel.pack(side="right", fill="y", before=self.canvas)
+        else:
+            self.view_panel.pack_forget()
+
+    def _update_minimap(self) -> None:
+        image = self.controller.frame_image()
+        doc = self.controller.doc
+        if image is None or doc is None:
+            self.minimap.clear()
+            return
+        self.minimap.show(image, doc[self.controller.index].image_uid,
+                          self.canvas.view.visible_source_rect())
 
     def _select_tool(self, tool_id: str) -> None:
         """Activate a tool -- crop, pencil, eraser, eyedropper -- or 'cursor' to
@@ -655,11 +778,12 @@ class MainWindow:
         if image is None:
             self.canvas.show_placeholder(EMPTY_TEXT)
             self.status.configure(text="Ready")
+            self._refresh_view_controls()
             return
         doc = self.controller.doc
         key = doc[self.controller.index].image_uid if doc is not None else None
         self.canvas.show(image, key=key)
-        self.status.configure(text=self._summary())
+        self._update_status()
 
     def _update_transport(self) -> None:
         doc = self.controller.doc

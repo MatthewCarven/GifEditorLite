@@ -710,3 +710,80 @@ consistent.
   sits under the cursor.
 - Also: Ctrl+- in the middle of a stroke should abandon it, not commit a
   half-stroke somewhere unexpected.
+
+---
+
+## 2026-07-28 (later) — The toolbar didn't fit, so the minimap happened
+
+Slice 2 was meant to be a zoom/pan cluster on the right of the toolbar. It
+doesn't fit: that row wants **1087px and gets 900**, and `pack` dropped the
+last three widgets — the `−`, the readout and the `+` — with no error at all.
+The smoke test passed the whole time, because `invoke()` works fine on a widget
+that was never mapped. A screenshot caught it. That's the lesson worth keeping:
+**Tk's geometry managers fail silently, so a layout change needs an eye on it,
+not just a green run.** Design in ARCHITECTURE §21.
+
+Told Matthew the numbers and offered four relocations; he proposed a minimap
+instead, and it's a better control than the buttons I was defending:
+
+- Buttons give **motion without position**. At 3200% on an 82px GIF you can see
+  about 28 pixels and nothing tells you which 28.
+- The map makes the control and the readout **the same object**.
+- It keeps the property that made buttons-only attractive in the first place —
+  the preview's mouse stays entirely the tools'. A drag in the map is not a
+  gesture on the canvas, so there is still nothing that can land inside a
+  stroke. Buttons-only was a trade; this isn't.
+
+So the toolbar goes back to exactly what it was, and everything view-related
+moved into a right-hand panel: map on top, then `−  [zoom]  +`, then Fit / 1:1.
+Shown only when zoomed in, since at fit the rectangle covers the whole image
+and is therefore saying nothing.
+
+**The refactor it forced was worth having anyway.** `MiniMap` needed the same
+screen↔image arithmetic as the preview but against a *different* geometry, and
+duplicating it is precisely how the two half-pixel bugs in §19.1 come back on
+one side only. So `image_to_display` / `display_to_image` moved out of the
+canvas onto `ViewTransform`, which delegates now. That also exposed a weak test
+I'd written this morning: `tests/test_view.py` had local *copies* of those two
+functions and tested those. A copy agreeing with itself proves the arithmetic is
+self-consistent, not that it matches what the canvas does. They now exercise the
+real methods.
+
+**A guard I called unreachable stopped being hypothetical.** This morning I kept
+the clamp in `_axis_origin` with the note that "the next pan input would set a
+centre from raw mouse deltas, and that is where it lands". The navigator is
+exactly that input, eight hours later. And the interesting part: deleting
+`center_on`'s own clamp leaves the *rendering* correct, because `_axis_origin`
+catches it — the stored centre is out of range but nothing looks wrong, which is
+the invisible-trap case §20.2 warns about (the next zoom-out resolves it into a
+jump). Both clamps are now checked, at both levels: headlessly for the stored
+centre, in the smoke for the geometry. Neither is decoration.
+
+**A real bug the panel surfaced.** `canvas.on_view_change` pointed at the
+controls-only refresh, so showing or hiding the panel — which resizes the canvas
+and re-fits it — left the status line holding a percentage the panel readout had
+already moved past. Caught by an *existing* check rather than a new one, which
+is the nicest way for it to happen. Both derive from the same state, so both
+refresh together now.
+
+**Dead API, noted rather than deleted.** `can_pan_x` / `can_pan_y` existed for
+the pan buttons' enabled state and now have no production caller — the map
+answers "is there more over there?" by drawing a rectangle smaller than the
+image. Kept, with the docstring saying plainly that nothing calls them and why:
+they're the question any other pan input has to ask, they're three lines, and
+they're covered. Flagged in TODO so it's a decision rather than an oversight.
+
+**Numbers:** 360 headless (was 353), Xvfb smoke 170 checks (was 151). Four
+mutations confirmed to break the new checks: never hiding the panel, not
+refreshing the map after a view change, reintroducing the status staleness, and
+removing both clamps. Screenshotted with the panel open at 1600%.
+
+**Handover**
+
+- The map is drag-to-pan: press or drag anywhere on it. Worth checking it feels
+  right — absolute pointing was a deliberate choice over a relative grab, and
+  that's a matter of taste as much as correctness.
+- The panel appears and disappears as you cross fit. If that turns out to be
+  jumpy in real use, `_show_view_panel` is the one place to change it.
+- Panel width is 168px, minimap height 120px, both constants at the top of
+  `app.py` if they feel wrong.
