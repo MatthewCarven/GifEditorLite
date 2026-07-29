@@ -293,3 +293,80 @@ class TestShapes:
         r = run("paint.shape", d, index=2, kind="rect", x0=1, y0=1, x1=4, y1=4,
                 size=1, color=(255, 0, 0, 255))
         assert r.selection.ordered == (2,)
+
+
+class TestFillingEmptyAreas:
+    """"Empty" is not one colour, and that was a real bug.
+
+    A GIF's transparent pixels carry the RGB of the transparent palette index,
+    and `paint.erase` pulls alpha down while deliberately leaving RGB alone. So
+    a frame can hold two runs of pixels that are identical on screen -- both
+    checkerboard -- and numerically different. A four-channel colour match
+    stopped dead at the join, with nothing on screen to explain why.
+    """
+
+    @staticmethod
+    def _half_and_half():
+        """Left half transparent-with-one-RGB, right half transparent-with-
+        another. Exactly what erasing next to existing transparency produces."""
+        im = Image.new("RGBA", (8, 4), (216, 118, 86, 0))
+        for x in range(4, 8):
+            for y in range(4):
+                im.putpixel((x, y), (69, 73, 77, 0))
+        return Document((Frame.new(im, 100),), (8, 4))
+
+    def test_a_fill_crosses_between_two_kinds_of_empty(self):
+        d = self._half_and_half()
+        r = run("paint.fill", d, index=0, x=0, y=0, color=(255, 0, 255, 255))
+        img = r.doc.frames[0].image
+        assert img.getpixel((0, 0)) == (255, 0, 255, 255)
+        assert img.getpixel((7, 3)) == (255, 0, 255, 255), \
+            "the fill stopped at the boundary between two invisible colours"
+
+    def test_it_needs_no_tolerance_to_do_so(self):
+        """The old behaviour was crossable, but only by guessing a tolerance
+        derived from colours the user cannot see -- 147 in the real case that
+        found this. Emptiness is not a near-colour match; it is one thing."""
+        d = self._half_and_half()
+        r = run("paint.fill", d, index=0, x=0, y=0, color=(1, 2, 3, 255), tolerance=0)
+        assert r.doc.frames[0].image.getpixel((7, 3)) == (1, 2, 3, 255)
+
+    def test_it_does_not_bleed_into_anything_visible(self):
+        """The other half of the rule. Matching all empties must not become
+        matching everything -- an opaque pixel is never empty, whatever its
+        colour."""
+        im = Image.new("RGBA", (8, 4), (216, 118, 86, 0))
+        for y in range(4):
+            im.putpixel((4, y), (216, 118, 86, 255))   # same RGB, fully opaque
+        d = Document((Frame.new(im, 100),), (8, 4))
+        r = run("paint.fill", d, index=0, x=0, y=0, color=(255, 0, 255, 255))
+        img = r.doc.frames[0].image
+        assert img.getpixel((0, 0)) == (255, 0, 255, 255)
+        assert img.getpixel((4, 0)) == (216, 118, 86, 255)   # the wall stands
+
+    def test_an_opaque_seed_still_matches_on_colour(self):
+        """Seeding on something visible must behave exactly as before -- the
+        transparency rule is a branch, not a replacement."""
+        im = Image.new("RGBA", (6, 1), (10, 20, 30, 255))
+        im.putpixel((3, 0), (200, 200, 200, 255))
+        d = Document((Frame.new(im, 100),), (6, 1))
+        r = run("paint.fill", d, index=0, x=0, y=0, color=(0, 0, 0, 255))
+        img = r.doc.frames[0].image
+        assert img.getpixel((0, 0)) == (0, 0, 0, 255)
+        assert img.getpixel((3, 0)) == (200, 200, 200, 255)   # different colour, untouched
+
+    def test_erase_then_fill_round_trip(self):
+        """The user-facing sequence that found this: erase part of a sprite,
+        then fill the empty space around it."""
+        im = Image.new("RGBA", (10, 3), (216, 118, 86, 0))
+        for x in range(3, 7):
+            for y in range(3):
+                im.putpixel((x, y), (69, 73, 77, 255))       # a little sprite
+        d = Document((Frame.new(im, 100),), (10, 3))
+        erased = run("paint.erase", d, index=0, points=((4, 1), (5, 1)), size=3)
+        filled = run("paint.fill", erased.doc, index=0, x=0, y=0,
+                     color=(0, 255, 0, 255))
+        img = filled.doc.frames[0].image
+        assert img.getpixel((0, 0)) == (0, 255, 0, 255)
+        assert img.getpixel((4, 1)) == (0, 255, 0, 255), \
+            "the hole just erased was treated as a different kind of empty"

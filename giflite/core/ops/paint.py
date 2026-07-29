@@ -76,8 +76,33 @@ def _brush_mask(canvas_size: tuple[int, int], points, size: int) -> Image.Image:
     return mask
 
 
+def _clear_mask(image: Image.Image) -> Image.Image:
+    """255 wherever `image` is fully transparent, whatever colour is under it.
+
+    Exists because "empty" is not one colour. A GIF's transparent pixels carry
+    the RGB of the transparent palette index, and an *erased* pixel keeps
+    whatever artwork used to be there -- `paint.erase` pulls the alpha down and
+    deliberately leaves the RGB alone. So a frame can hold two runs of pixels
+    that are pixel-identical on screen (both checkerboard) and numerically
+    different, and a colour match that reads all four channels stops dead at the
+    join.
+
+    That is not hypothetical: erase part of a sprite, then bucket-fill the empty
+    space around it, and the fill refuses to cross into the bit you just erased.
+    Nothing on screen explains why, because on screen there is nothing there.
+
+    Alpha zero means the other three channels describe a pixel you cannot see.
+    Treating them as significant is the bug; ignoring them is the fix.
+    """
+    return image.getchannel("A").point([255 if v == 0 else 0 for v in range(256)])
+
+
 def _match_mask(image: Image.Image, seed: Color, tolerance: int) -> Image.Image:
     """255 wherever `image` is within `tolerance` of `seed`, per channel.
+
+    Seeded on a fully transparent pixel, this matches *emptiness* rather than a
+    colour: every invisible pixel, whatever RGB happens to sit under it. See
+    `_clear_mask`.
 
     Chebyshev distance (the largest single-channel difference), not Euclidean.
     Predictable is worth more than principled here: "tolerance 8" should mean
@@ -91,6 +116,8 @@ def _match_mask(image: Image.Image, seed: Color, tolerance: int) -> Image.Image:
     it with a Python colour comparison would make a fill on a large frame
     visibly slow.
     """
+    if seed[3] == 0:
+        return _clear_mask(image)
     lut = [255 if v <= tolerance else 0 for v in range(256)]
     within = None
     for channel, value in zip(image.split(), seed):

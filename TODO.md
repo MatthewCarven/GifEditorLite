@@ -7,6 +7,7 @@
 - [ ] Sweep `tmp_obj_*` cruft from `.git\objects` after a reboot frees the handles (harmless if left)
 - [x] Crop and both painting slices are committed (HEAD `01feb8a`) — that old "commit the crop feature" item was stale
 - [x] Batch files pinned to CRLF in the working tree (`2b1d115`)
+- [x] Image-sequence IO committed and pushed (`9c7792f`)
 - [x] Pixel grid committed (`328ccd7`) — a stale `.git/index.lock` had to be deleted first, as usual
 - [x] Fill + shapes + the palette move committed and pushed (`c0f18a4`)
 - [ ] Eyeball the new side panel on Windows — the preview no longer widens when
@@ -417,3 +418,34 @@ ARCHITECTURE §25.
       easy if a real folder layout ever wants it
 - [ ] Export always writes PNG. A format choice (or reusing the writable formats
       list) would be the natural extension
+
+## Fill: "empty" was not one colour ✅
+
+Found while checking whether "fill empty" already worked. It did, until you
+erased anything.
+
+- [x] Transparent pixels carry the RGB that was under them, and `paint.erase`
+      leaves RGB alone — so originally-transparent and just-erased pixels look
+      identical and compare as different colours, and the fill stopped at the
+      join with nothing on screen to explain why
+- [x] `_clear_mask`: seeded on a fully transparent pixel, match alpha only.
+      An opaque seed is unchanged — a branch, not a replacement
+- [x] Tolerance could technically have crossed it (147 in the real case) but the
+      value depends on invisible data, so it was unguessable rather than a
+      setting anyone could have got right
+- [x] 502 headless (was 497); two mutations confirmed
+
+## Select / copy / paste — planned, not started
+
+Matthew's calls: floating draggable paste, paste into every selected frame, no
+clipping of the paint tools.
+
+- [ ] **Slice 1:** rect select tool, copy, cut, paste-in-place. Region selection
+      lives in the controller beside the frame `Selection` — it is the first UI
+      state here that *persists* rather than being a gesture, and the canvas
+      gains its first non-provisional overlay (marching ants redrawn every
+      `_draw`, where overlays are currently cleared as gesture state)
+- [ ] **Slice 2:** make the paste floating — drag to place, commit or cancel.
+      A genuine interaction mode with its own rules, hence the split
+- [ ] Paste is one more mask generator (§23): the mask is the pasted image's own
+      alpha. Cut is `_shape_mask` in erase mode, which already exists

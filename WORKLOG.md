@@ -1103,3 +1103,47 @@ and the menu indices.
   put it rather than writing over your PNGs.
 - A folder we exported re-imports with its exact timing; a folder from anywhere
   else uses the delay you type.
+
+## 2026-07-29 (night) — "Empty" was not one colour
+
+Matthew, using the editor in anger, asked for select/copy/paste and added "oh
+and fill empty". I went to confirm that filling transparent areas already
+worked — there was a passing test for it — and found it works right up until you
+erase anything.
+
+**The bug.** A GIF's transparent pixels carry the RGB of the transparent palette
+index. `paint.erase` pulls alpha down and deliberately leaves RGB alone. So
+after erasing, a frame holds two runs of pixels that are *identical on screen* —
+both checkerboard — and numerically different: on `Claude_Glasses.gif`,
+`(216,118,86,0)` where the file was transparent and `(69,73,77,0)` where I had
+just erased. The four-channel colour match stopped dead at the join, and nothing
+on screen could explain why, because on screen there is nothing there.
+
+**"So I just didn't have the tolerance high enough?"** Technically yes — 147
+would have crossed it in that case. But that is the wrong framing and worth
+recording as such: the number needed is derived from the colour that *used to
+be* under pixels the user has already erased. It is invisible, unguessable, and
+different every time. Asking someone to tune a threshold against data they
+cannot see is not a setting, it is a puzzle.
+
+**The fix is one branch.** Seeded on a fully transparent pixel, the match reads
+alpha only: every invisible pixel matches, whatever RGB sits under it. Alpha
+zero means the other three channels describe a pixel you cannot see, so treating
+them as significant was the bug and ignoring them is the fix. An opaque seed
+behaves exactly as before — it is a branch, not a replacement.
+
+Measured on the real file: one click now fills all 8871 empty pixels including
+the erased hole, and bleeds into 0 visible pixels.
+
+**Numbers:** 502 headless (was 497). Two mutations confirmed: reverting the
+branch (3 failures) and making `_clear_mask` match everything rather than only
+alpha zero (1 failure — the check that the fill still respects a wall of opaque
+pixels with the *same* RGB as the transparent ones).
+
+**Next session:** select / copy / paste, sliced. Matthew chose a floating
+draggable paste, paste-into-every-selected-frame, and no clipping of the paint
+tools. Slice 1 is select + copy + cut + paste-in-place; slice 2 makes the paste
+floating. The wrinkle to design carefully: a region selection is the first piece
+of UI state here that *persists* rather than being a gesture, so it belongs in
+the controller beside the frame `Selection`, and the canvas gains its first
+non-provisional overlay.
