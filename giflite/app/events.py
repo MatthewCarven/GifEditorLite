@@ -27,6 +27,11 @@ SELECTION_CHANGED = "selection_changed"  # (selection)  -- selection-only edits
 # region you draw. Folding them together would mean each one redrawing for the
 # other's changes.
 REGION_CHANGED = "region_changed"
+# (floating) -- a move or paste is in flight: pixels shown but not committed.
+# The third state, alongside "committed" and "a gesture in progress". Its own
+# event because what a frontend does about it -- redraw the preview from the
+# uncommitted result -- is not what it does about any other change.
+FLOAT_CHANGED = "float_changed"
 PLAYHEAD_MOVED = "playhead_moved"  # (index)  -- playback tick or scrub
 PLAYBACK_STATE = "playback_state"  # (playing)  -- play/pause, incl. auto-stop
 TITLE_CHANGED = "title_changed"  # (path, dirty)  -- frontend formats the string

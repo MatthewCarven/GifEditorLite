@@ -49,8 +49,16 @@ where they came from. Paste lands on every *selected* frame when the playhead is
 standing inside the selection, and on just the current frame otherwise — which is
 how you stamp one sprite across a whole animation in a single edit. The clipboard
 survives opening another file, so you can copy out of one GIF and into another.
-Esc clears the region before it clears the frame selection. Dragging the paste
-somewhere new is on the roadmap.
+Esc clears the region before it clears the frame selection.
+
+**To move a selection**, press **M** or pick Move and drag it. Nothing has
+happened to the file yet — you're looking at a preview — so drag again to adjust,
+nudge with the arrow keys, then **Enter** to drop it or **Esc** to put it back.
+Ctrl+V works the same way: it floats the clipboard for you to place, and Enter
+straight away pastes it exactly where it was copied from. A move shifts each
+frame's own pixels, so with several frames selected you can nudge a sprite
+across the whole animation in one go. Whatever you do next — another edit,
+another frame, saving — drops the float first rather than losing it.
 
 **Saving:** Ctrl+S to save, Ctrl+Shift+S for Save As. One quirk to know about —
 GIF merges identical *consecutive* frames and sums their durations, so a frame

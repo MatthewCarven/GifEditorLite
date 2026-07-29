@@ -469,19 +469,40 @@ playhead frame, and paste reuses the delay box's scope rule.
       "a soft brush is just a feathered mask" promise for whoever implemented it
 - [x] 579 headless (was 502), 269 smoke (was 232), 8 mutations confirmed
 
-### Slice 2 — floating paste, next
+### Slice 2 — the floating edit — done 2026-07-30 (ARCHITECTURE §28)
 
-- [ ] Drag to place, commit or cancel. A genuine interaction mode with its own
-      rules, which is why it was split off
-- [ ] The pieces exist: `paint.paste` already takes an arbitrary `(x, y)`, the
-      canvas already draws a persistent overlay from state, and
-      `Tool.is_gesturing` / `on_cancel` give the mode somewhere to hang
-- [ ] The genuinely new thing: a floating paste is a state the *document* is not
-      yet in — pixels shown but not committed. Everything on this canvas so far
-      is either committed or a gesture, and this is neither
-- [ ] Decide what commits it. Enter, a click outside, switching tools, and
-      starting another paste are all candidates; so is "any other edit"
-- [ ] Undo semantics: the float itself must not be undoable, only its commit
+Asked for as "can I move a selection?", which is the same feature from the other
+side. One floating layer, two producers: a move lifts pixels off the frame, a
+paste brings them from the clipboard.
+
+- [x] `FloatingEdit` in the controller — the third state, neither committed nor
+      a gesture. Survives a resize, alone among in-flight state, because its
+      offset is in image pixels
+- [x] `paint.move` as **one** op, so one Ctrl+Z undoes a move rather than
+      handing back the hole while you still hold the sprite. Each frame shifts
+      its *own* pixels, unlike paste
+- [x] The commit loop became `_apply_frames`, taking any `image -> image` — a
+      move is an erase *and* a composite, which no single mask can express
+- [x] `float_preview` is the op run and thrown away: two lines, because ops are
+      pure, and the preview is the *same call* as the commit rather than a
+      second implementation of it
+- [x] Move tool (**M**), Enter commits, Esc cancels, arrows nudge; anything else
+      you do commits the float rather than discarding it
+- [x] Ctrl+V floats and selects Move; Ctrl+V then Enter is the old paste-in-place
+- [x] 659 headless (was 607), 307 smoke (was 281), 14 mutations confirmed
+
+Follow-ups, none load-bearing:
+
+- [ ] A float is bounded to the frame you started it on — scrubbing commits it.
+      Carrying one across frames would mean placing pixels you cannot see, but
+      "float it here, then step and drop it there" is a plausible want
+- [ ] No handles on the marquee, so no scale or rotate of a selection. That is a
+      transform mode rather than a placement one and would want its own slice
+- [ ] `test_controller_region.py`'s `painted()` helper swaps `_doc` without
+      re-baselining history, so undo in those tests walks back to the *opened*
+      GIF. It passes because the pixels happen to agree — which is precisely the
+      trap `test_controller_float`'s fixture hit and fixed with a
+      `_history.reset`. Worth doing there too before it costs someone an hour
 
 ### Known, deliberately deferred
 

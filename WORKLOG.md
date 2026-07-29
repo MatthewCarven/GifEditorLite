@@ -1298,3 +1298,73 @@ canvas can draw a persistent overlay from state, and `Tool.is_gesturing` /
 floating paste is a state the *document* is not yet in — pixels shown but not
 committed — which is the first thing here that isn't either committed or a
 gesture.
+
+## 2026-07-30 — The floating edit (slice 2)
+
+Matthew: *"if i select something can i move it? ... I now want a move tool that
+allows you to drag the selection into a new position enter to confirm?"* — which
+is slice 2 arrived at from the opposite direction. I had it filed as "make the
+paste draggable"; he wanted "make the selection movable". Same machinery, and
+saying so out loud was most of the design: **one floating layer, two producers.**
+
+Design in ARCHITECTURE §28. His three calls, asked before any code: a separate
+Move tool rather than dragging inside the marquee, moves apply to every selected
+frame, and anything else you do commits the float rather than discarding it.
+
+**What was actually hard.** Not the pixels — the rules. A float is the first
+thing here that is neither committed nor a gesture, and that binary was
+load-bearing: it is why Esc has a clean ladder and why §20.4 can cancel anything
+outstanding on a view change. Every one of those rules needed an answer for a
+third case. The nicest consequence is that a float *survives a resize*, alone
+among in-flight state, because its offset is in image pixels — so
+`MoveTool.on_cancel` clears the drag anchor and nothing else, where every other
+tool must abandon everything.
+
+**The preview is the op, run and thrown away.** Two lines, because the ops are
+pure. Worth recording as a payoff rather than a trick: the preview is not merely
+consistent with the commit, it is the *same call*, so there is no second
+implementation of "what a move looks like" to drift, and a move that lands wrong
+looks wrong first. Compositing the float as canvas items would have been that
+second implementation, and the obvious place for a half-pixel disagreement
+(§19.1) to come back.
+
+**One op, because one Ctrl+Z.** `paint.move` is exactly a cut then a paste, and
+must not be two ops: undo would hand back the hole while you were still holding
+the sprite. That forced a good refactor — an erase *and* a composite on one
+frame is not expressible as a single mask, so the commit loop split into
+`_apply_frames`, taking any `image -> image`. That was the right shape all
+along; everything it states is a fact about frames and none of it needed masks.
+
+**Three misses in the mutation run, and one was my own test being polite.**
+
+`paint.move` ignoring the paste float's offset was a real hole — dragging a
+pasted sprite and having it land back at the origin would have been the headline
+bug of the feature, and nothing tested it.
+
+A zero-offset guard in `_move_pixels` turned out to be equivalent to no guard:
+erase-then-recomposite is the identity, including for partial alpha and for the
+RGB erase leaves under transparent pixels, so `_apply_frames` declines anyway.
+**Second guard in two sessions standing in front of something that already
+decides** (§27.4 was the first). Deleted — and the identity it relied on is now
+pinned by its own test, which is what makes the docstring's claim checkable.
+
+And `test_moving_and_moving_back_restores_the_pixels` failed, correctly: the
+round trip is *visually* identical but not byte-identical, because `paint.erase`
+leaves RGB under the alpha it clears. Exactly the subject of `_clear_mask` from
+two sessions ago, met from a new angle. Rewritten to composite both over an
+opaque backdrop — asserting on bytes there was asserting on the colour of pixels
+you cannot see.
+
+**A fixture trap worth remembering.** `test_controller_float`'s fixture swaps
+`_doc` after `open()`, which leaves history baselined on the *opened GIF*. Undo
+then walks back to those frames, and any "undo put it back" check whose pixel
+happens to agree passes while asserting nothing. Caught because a real assertion
+failed; fixed with a `_history.reset`. `test_controller_region`'s `painted()`
+has the same shape and gets away with it — noted in TODO.
+
+**Numbers:** 659 headless (was 607), 307 smoke (was 281). Fourteen mutations
+confirmed after the two misses were closed.
+
+**Where this leaves it:** select, copy, cut, paste, move, erase-anything. That
+is a usable little editor. Remaining wants are in TODO and none of them are
+load-bearing.

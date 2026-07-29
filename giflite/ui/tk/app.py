@@ -52,10 +52,11 @@ CURSOR_TOOL = "cursor"
 # (line, rect, ellipse), and the one that doesn't paint at all.
 TOOL_BUTTONS = (
     ("cursor", "Cursor"), ("select", "Select"),
-    ("crop", "Crop"), ("pencil", "Pencil"),
-    ("eraser", "Eraser"), ("fill", "Fill"),
-    ("line", "Line"), ("rect", "Rect"),
-    ("ellipse", "Ellipse"), ("eyedropper", "Picker"),
+    ("move", "Move"), ("crop", "Crop"),
+    ("pencil", "Pencil"), ("eraser", "Eraser"),
+    ("fill", "Fill"), ("line", "Line"),
+    ("rect", "Rect"), ("ellipse", "Ellipse"),
+    ("eyedropper", "Picker"),
 )
 
 # Bare-key shortcuts for the palette. B/E/I/C are the inherited ones (b for
@@ -65,7 +66,7 @@ TOOL_BUTTONS = (
 # focused text field via `_bind_guarded_key`, or typing "4" then "e" in the Size
 # box would quietly swap your tool.
 TOOL_KEYS = (
-    ("s", "select"), ("c", "crop"), ("b", "pencil"), ("e", "eraser"),
+    ("s", "select"), ("m", "move"), ("c", "crop"), ("b", "pencil"), ("e", "eraser"),
     ("f", "fill"), ("l", "line"), ("r", "rect"), ("o", "ellipse"),
     ("i", "eyedropper"),
 )
@@ -266,8 +267,13 @@ class MainWindow:
         self.root.bind_all("<Control-w>", lambda _e: self.controller.close())
         bind_key = self._bind_guarded_key
         bind_key("<space>", self._on_space)
-        bind_key("<Left>", lambda _e: self.controller.step(-1))
-        bind_key("<Right>", lambda _e: self.controller.step(1))
+        # While something is floating the arrows place it, because stepping a
+        # frame would settle the float first and the keys would then be doing
+        # two very different things one keypress apart.
+        bind_key("<Left>", lambda _e: self._arrow(-1, 0))
+        bind_key("<Right>", lambda _e: self._arrow(1, 0))
+        bind_key("<Up>", lambda _e: self._arrow(0, -1))
+        bind_key("<Down>", lambda _e: self._arrow(0, 1))
         bind_key("<Home>", lambda _e: self.controller.seek(0))
         bind_key("<End>", lambda _e: self.controller.seek(self.controller.frame_count - 1))
         # Cut / copy / paste. **Guarded, despite carrying a modifier.** The rule
@@ -295,6 +301,8 @@ class MainWindow:
         # of the time.
         for key, tool_id in TOOL_KEYS:
             bind_key(f"<{key}>", lambda _e, t=tool_id: self._select_tool(t))
+        bind_key("<Return>", lambda _e: self._commit_float())
+        bind_key("<KP_Enter>", lambda _e: self._commit_float())
         bind_key("<Escape>", lambda _e: self._clear_selection())
         # Zoom. Ctrl-combinations, so no _bind_bare_key guard is needed -- they
         # don't collide with typing. Both <Control-plus> and <Control-equal> are
@@ -569,6 +577,7 @@ class MainWindow:
         bus.on(ev.DOC_CHANGED, self._on_doc_changed)
         bus.on(ev.SELECTION_CHANGED, self._on_selection_changed)
         bus.on(ev.REGION_CHANGED, self._on_region_changed)
+        bus.on(ev.FLOAT_CHANGED, self._on_float_changed)
         bus.on(ev.PLAYHEAD_MOVED, self._on_playhead_moved)
         bus.on(ev.PLAYBACK_STATE, self._on_playback_state)
         bus.on(ev.TITLE_CHANGED, self._on_title_changed)
@@ -726,17 +735,24 @@ class MainWindow:
     def _clear_selection(self) -> None:
         """Esc, and the Deselect menu item: drop the region first, then frames.
 
-        Esc is now a four-stage ladder, and the order is by how recent and how
-        transient each thing is: abandon the gesture, put the tool away (both
-        the canvas's, since it owns Esc while a tool is active), clear the
-        region, clear the frame selection. Each press undoes the most recent
-        commitment, which is the only ordering nobody has to memorise.
+        Esc is a five-stage ladder now, ordered by how recent and how transient
+        each thing is: abandon the gesture, put back a floating move or paste,
+        put the tool away (those three are the canvas's, since it owns Esc while
+        a tool is active), clear the region, clear the frame selection. Each
+        press undoes the most recent commitment, which is the only ordering
+        nobody has to memorise.
+
+        The float stage is repeated here because a paste can float with no tool
+        active at all -- Ctrl+V selects Move, but the user can put it away
+        again -- and then Esc never reaches the canvas.
 
         The region goes before the frames deliberately. It is the thing you can
         see on the canvas you are looking at, so it is what Esc appears to be
         aimed at; a frame selection that quietly vanished first would look like
         Esc had done nothing.
         """
+        if self.controller.cancel_float():
+            return
         if self.controller.region is not None:
             self.controller.set_region(None)
             return
@@ -762,20 +778,70 @@ class MainWindow:
         self.controller.copy_region()
 
     def paste_region(self) -> None:
+        """Ctrl+V floats the clipboard rather than landing it.
+
+        One keystroke more for a paste in place -- Ctrl+V, Enter -- and it buys
+        the thing paste-in-place could not do at all. The Move tool comes with
+        it, so the very next drag places it; arriving in a state you cannot
+        manipulate without first hunting for the right tool would be a worse
+        trade than the extra keystroke.
+        """
         if not self.controller.can_paste:
             self.status.configure(text="Nothing copied yet")
             return
-        count = len(self.controller.frame_targets)
-        self.controller.paste()
-        if count > 1:
-            # Worth saying out loud: paste is the one edit here that can touch
-            # frames you are not looking at, and the number is the whole
-            # difference between "stamped it everywhere" and "stamped it once".
-            self.status.configure(text=f"Pasted into {count} frames")
+        if self.controller.begin_paste():
+            self._select_tool("move")
 
     def set_region(self, region) -> None:
         """ToolContext hook: SelectTool finished a drag (or a click)."""
         self.controller.set_region(None if region is None else Region(*region))
+
+    # ---- the floating edit -----------------------------------------------
+
+    @property
+    def floating(self) -> bool:
+        return self.controller.floating is not None
+
+    @property
+    def float_offset(self) -> tuple[int, int]:
+        return self.controller.float_offset
+
+    def begin_move(self) -> bool:
+        if self.controller.begin_move():
+            return True
+        self.status.configure(text="Select an area first (S, then drag)")
+        return False
+
+    def move_float(self, dx: int, dy: int) -> None:
+        self.controller.move_float(dx, dy)
+
+    def _commit_float(self) -> None:
+        """Enter: land it. Silent when there is nothing floating, because Enter
+        is also just a key people press."""
+        self.controller.commit_float()
+
+    def _arrow(self, dx: int, dy: int) -> None:
+        """Arrows nudge a float, or step frames when nothing is floating.
+
+        One binding doing two things, which is usually a smell -- but stepping a
+        frame settles the float first (`_settle_float`), so without this the
+        same key would place pixels and then, one press later, commit them and
+        jump to another frame. Nudging is the only reading that stays put.
+        """
+        if self.floating:
+            self.controller.nudge_float(dx, dy)
+        elif dx:
+            self.controller.step(dx)
+
+    def _on_float_changed(self, floating=None, **_) -> None:
+        """Redraw the preview from the uncommitted result.
+
+        `_render` refreshes the status line through `_summary`, which is where
+        the float's own message lives -- a float looks exactly like a committed
+        edit, and "nothing has actually happened yet" is invisible unless
+        something says so.
+        """
+        self._render()
 
     def _invoke_op(self, op_id: str) -> None:
         """Run an op from a menu: collect its params via a generated dialog
@@ -944,6 +1010,11 @@ class MainWindow:
         Image > Crop menu item alike."""
         if tool_id != CURSOR_TOOL and self.controller.doc is None:
             return  # nothing to work on; leave the palette on Cursor
+        # Reaching for another tool settles a float first -- except Move, which
+        # is the tool for manipulating one. Committing rather than discarding
+        # for the usual reason: an unwanted commit is one Ctrl+Z away.
+        if tool_id != "move":
+            self.controller.commit_float()
         self._tool_var.set(tool_id)
         tool = self._tools.get(tool_id)
         self._active_tool = tool
@@ -970,7 +1041,15 @@ class MainWindow:
         return f"{tool.label}{' (erasing)' if erasing else ''}: {tool.hint}"
 
     def end_tool(self) -> None:
-        """ToolContext hook: put tools away (the canvas calls this on Esc)."""
+        """ToolContext hook: the canvas's Esc, once no gesture is outstanding.
+
+        Really "escape from whatever is current", which is why it checks the
+        float first: putting the tool away while a move sat uncommitted would
+        commit it (see `_select_tool`), and Esc must never be the key that
+        applies something.
+        """
+        if self.controller.cancel_float():
+            return
         self._select_tool(CURSOR_TOOL)
 
     def _choose_color(self) -> None:
@@ -1253,18 +1332,26 @@ class MainWindow:
         self._refresh_delay_box()
 
     def _on_region_changed(self, region=None, **_) -> None:
-        self._show_region(region)
+        self._show_region(region, self.controller.floating)
 
-    def _show_region(self, region) -> None:
+    def _show_region(self, region, floating=None) -> None:
         """Point the canvas at the controller's region.
 
         One place, called from the event and from `_render`, because the canvas
         forgets nothing but a *new document* replaces what it is showing and the
         two have to agree at that moment as well.
+
+        While something is floating the marquee tracks it rather than staying
+        where the pixels came from: a move shows a hole at the source, and a
+        marquee still drawn round that hole would be pointing at the one place
+        the pixels are not.
         """
+        if region is None:
+            self.canvas.set_region(None)
+            return
+        dx, dy = (floating.dx, floating.dy) if floating is not None else (0, 0)
         self.canvas.set_region(
-            None if region is None
-            else (region.x, region.y, region.width, region.height))
+            (region.x + dx, region.y + dy, region.width, region.height))
 
     def _on_playhead_moved(self, index: int = 0, **_) -> None:
         self.timeline.set_index(index)
@@ -1299,8 +1386,16 @@ class MainWindow:
             return
         doc = self.controller.doc
         key = doc[self.controller.index].image_uid if doc is not None else None
+        floating = self.controller.floating
+        if floating is not None:
+            # The uncommitted result: the op run and thrown away. Keyed by the
+            # offset so the bitmap cache still works during a drag, and distinct
+            # from the frame's own uid so a committed frame is never served
+            # these pixels (ARCHITECTURE.md 5, the stale-cache rule).
+            image = self.controller.float_preview()
+            key = ("float", key, floating.dx, floating.dy)
         self.canvas.show(image, key=key)
-        self._show_region(self.controller.region)
+        self._show_region(self.controller.region, floating)
         self._update_status()
 
     def _update_transport(self) -> None:
@@ -1326,6 +1421,19 @@ class MainWindow:
         doc = self.controller.doc
         if doc is None:
             return "Ready"
+        # A float takes the whole line. It has to live *here* rather than being
+        # written once when the float changes: every view change refreshes the
+        # status from this method, so a message set anywhere else survives until
+        # the first zoom and then silently vanishes -- and "nothing has actually
+        # happened yet" is the one thing on screen that nothing else says.
+        floating = self.controller.floating
+        if floating is not None:
+            dx, dy = floating.dx, floating.dy
+            placed = f"{dx:+d}, {dy:+d}" if (dx or dy) else "not moved yet"
+            count = len(self.controller.frame_targets)
+            frames = f" on {count} frames" if count > 1 else ""
+            return (f"{floating.kind.title()} in progress ({placed}){frames}"
+                    f"   |   Enter to drop it, Esc to put it back")
         # The frame's own delay *and* the total. Only the total was here
         # before, which reads as the frame's on a one-frame GIF and is silently
         # a different number on any other.

@@ -26,6 +26,10 @@ unchanged. The context provides:
     commit(op_id, **params)         run a core op (undoable)
     pick_color(x, y)                read a pixel and adopt it as the fg colour
     set_region(region)              select a rectangle of canvas, or None
+    floating     -> bool            whether a move/paste is being placed
+    float_offset -> (dx, dy)        where it currently sits
+    begin_move()                    lift the region off the frame
+    move_float(dx, dy)              place it at an absolute offset
     preview_stroke(points, erase)   show/refresh the provisional stroke overlay
     preview_rect(box)               show/refresh a marquee, box in image pixels
     clear_preview()                 drop any overlay
@@ -62,6 +66,12 @@ class ToolContext(Protocol):
     def commit(self, op_id: str, **params) -> None: ...
     def pick_color(self, x: int, y: int) -> None: ...
     def set_region(self, region: tuple[int, int, int, int] | None) -> None: ...
+    @property
+    def floating(self) -> bool: ...
+    @property
+    def float_offset(self) -> tuple[int, int]: ...
+    def begin_move(self) -> bool: ...
+    def move_float(self, dx: int, dy: int) -> None: ...
     def preview_stroke(self, points, erase: bool = False) -> None: ...
     def preview_rect(self, box: tuple[int, int, int, int]) -> None: ...
     def clear_preview(self) -> None: ...
@@ -298,6 +308,65 @@ class SelectTool(Tool):
         ctx.clear_preview()
 
 
+class MoveTool(Tool):
+    """Drag the floating edit around. Commits nothing -- Enter does that.
+
+    The odd one here, and the reason is the third state (ARCHITECTURE.md 28):
+    every other tool either commits on release or changes a setting, while this
+    one manipulates something that is neither committed nor a gesture. A drag
+    places the float; letting go changes nothing; the float stays until Enter
+    lands it or Esc drops it.
+
+    **A resize or a zoom must not disturb it**, which is why `on_cancel` clears
+    only the drag anchor. Every other tool has to abandon everything there,
+    because their collected coordinates are screen-derived and now stale
+    (§20.4). A float's offset is in *image* pixels, so nothing about the view
+    can invalidate it -- the one piece of in-flight state in this program that
+    genuinely survives the window moving underneath it.
+
+    Offsets are tracked from the offset *at press time* rather than from zero,
+    so a second drag nudges the float further instead of teleporting it back.
+    """
+
+    id = "move"
+    label = "Move"
+    cursor = "fleur"
+    hint = ("drag to place it   |   arrows nudge   |   "
+            "Enter to drop it, Esc to put it back")
+    # Edge coordinates, like the region it moves: the offset is a difference
+    # between two of them, so mixing conventions would be a half-pixel drift
+    # that only shows at high zoom (§19.1.1).
+    coords = "edge"
+
+    def __init__(self) -> None:
+        self._anchor: tuple[int, int] | None = None
+        self._start = (0, 0)
+
+    @property
+    def is_gesturing(self) -> bool:
+        return self._anchor is not None
+
+    def on_press(self, ctx: ToolContext, x: int, y: int) -> None:
+        if not ctx.floating and not ctx.begin_move():
+            return  # nothing selected to move, and nothing floating to place
+        self._anchor = (x, y)
+        self._start = ctx.float_offset
+
+    def on_drag(self, ctx: ToolContext, x: int, y: int) -> None:
+        if self._anchor is None:
+            return
+        ctx.move_float(self._start[0] + x - self._anchor[0],
+                       self._start[1] + y - self._anchor[1])
+
+    def on_release(self, ctx: ToolContext, x: int, y: int) -> None:
+        self.on_drag(ctx, x, y)
+        self._anchor = None
+
+    def on_cancel(self, ctx: ToolContext) -> None:
+        # The drag, not the float. See the class docstring.
+        self._anchor = None
+
+
 class FillTool(Tool):
     """Flood-fill the region under the click. Commits on *press*.
 
@@ -433,7 +502,7 @@ def default_tools() -> dict[str, Tool]:
     """The tool set, keyed by id. One instance each (they hold only transient
     per-gesture state, reset on press). Order here is palette order."""
     return {t.id: t for t in (
-        SelectTool(), CropTool(),
+        SelectTool(), MoveTool(), CropTool(),
         PencilTool(), EraserTool(), FillTool(),
         LineTool(), RectTool(), EllipseTool(),
         EyedropperTool(),

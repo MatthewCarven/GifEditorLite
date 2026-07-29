@@ -51,6 +51,11 @@ CASES = [
     ("paint.shape", {"index": 2, "kind": "line", "x0": 0, "y0": 0, "x1": 6, "y1": 6,
                      "size": 3, "color": (0, 0, 255, 255)}),
     ("paint.cut", {"index": 1, "x": 2, "y": 2, "width": 4, "height": 4}),
+    # Move reads the frame it is about to rewrite -- it lifts pixels out of it
+    # first -- so "did the source survive" is as sharp a question here as for
+    # the fill, and sharper across several frames at once.
+    ("paint.move", {"index": 1, "frames": (1, 2), "x": 1, "y": 1,
+                    "width": 4, "height": 4, "dx": 2, "dy": 1}),
     # Paste is the first op to write pixels into *several* frames from one call,
     # so "did every source frame survive" is a question with more than one
     # answer here -- and the clipboard image is a source too. Both frames in the

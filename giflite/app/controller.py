@@ -19,6 +19,7 @@ are stubbed here so the frontend wiring doesn't change shape later.
 
 from __future__ import annotations
 
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 from PIL import Image
@@ -45,6 +46,54 @@ EDITED_SUFFIX = "_edited"
 
 def _format_size(nbytes: int) -> str:
     return f"{nbytes / (1024 * 1024):.0f} MB"
+
+
+@dataclass(frozen=True)
+class FloatingEdit:
+    """Pixels shown but not committed -- a move or a paste being placed.
+
+    **The third state.** Everything in this editor has been either committed to
+    the document or a gesture in flight, and that binary is load-bearing: it is
+    why Esc has a clean ladder, and why a window resize can safely cancel
+    anything outstanding (ARCHITECTURE.md 20.4). A float is neither. It outlives
+    the drag that made it, survives a resize -- its offset is in image pixels,
+    so nothing about the view can invalidate it -- and yet the document does not
+    know it exists.
+
+    It lives here rather than in the frontend for the usual reason (§9): a
+    second frontend would otherwise reinvent placement, commit and cancel
+    semantics, which is most of the interaction.
+
+    `image` is the clipboard for a paste and None for a move, and that None is
+    the whole difference between them: a paste stamps *one* image onto every
+    target frame, while a move shifts whatever each frame has in that rectangle.
+    """
+
+    kind: str            # "move" | "paste"
+    region: Region       # where it sits at zero offset
+    image: Image.Image | None = None
+    dx: int = 0
+    dy: int = 0
+
+    @property
+    def op_id(self) -> str:
+        return "paint.move" if self.kind == "move" else "paint.paste"
+
+    @property
+    def placed(self) -> bool:
+        """Whether it has actually been moved anywhere yet."""
+        return bool(self.dx or self.dy)
+
+    def op_params(self, index: int, frames: tuple[int, ...]) -> dict:
+        """The arguments its commit op wants. One place, so the preview and the
+        commit cannot drift -- they are literally the same call."""
+        if self.kind == "move":
+            return dict(index=index, frames=frames,
+                        x=self.region.x, y=self.region.y,
+                        width=self.region.width, height=self.region.height,
+                        dx=self.dx, dy=self.dy)
+        return dict(index=index, frames=frames, image=self.image,
+                    x=self.region.x + self.dx, y=self.region.y + self.dy)
 
 
 class AppController:
@@ -77,6 +126,11 @@ class AppController:
         # whenever the document changed would be one nobody could plan around.
         self._clipboard: Image.Image | None = None
         self._clipboard_origin: tuple[int, int] = (0, 0)
+        # The move or paste currently being placed, or None. See FloatingEdit.
+        self._float: FloatingEdit | None = None
+        # Guards `_settle_float`, which commits the float from inside the very
+        # methods committing it goes on to call.
+        self._settling = False
 
     # ---- readable state --------------------------------------------------
 
@@ -167,6 +221,7 @@ class AppController:
         file is a normal thing for a user to pick, not an exceptional one, and
         every frontend would otherwise wrap this call identically.
         """
+        self._settle_float()
         path = Path(path)
         read = reader_for(path)
         if read is None:
@@ -229,6 +284,7 @@ class AppController:
         "Untitled" after importing a named folder throws away the one piece of
         context the user has.
         """
+        self._settle_float()
         folder = Path(folder)
         fmt = format_for(folder, readable=True)
         if fmt is None or fmt.read is None:
@@ -294,6 +350,7 @@ class AppController:
         return True
 
     def close(self) -> None:
+        self._settle_float()
         self._stop_playback()
         self._doc = None
         self._path = None
@@ -373,6 +430,7 @@ class AppController:
         return self._write(Path(path))
 
     def _write(self, path: Path) -> bool:
+        self._settle_float()  # save what is on screen, not what is underneath
         if self._doc is None:
             return False
         writer = writer_for(path)
@@ -416,6 +474,7 @@ class AppController:
         """
         if self._doc is None:
             return
+        self._settle_float()  # never edit around an uncommitted move
         op = get_op(op_id)
         if op is None:
             self.events.emit(ev.ERROR, exception=ValueError(f"Unknown operation {op_id!r}"), context="")
@@ -463,11 +522,13 @@ class AppController:
         self.events.emit(ev.TITLE_CHANGED, path=self._path, dirty=self.dirty)
 
     def undo(self) -> None:
+        self._settle_float()
         snap = self._history.undo()
         if snap is not None:
             self._restore(snap, "undo")
 
     def redo(self) -> None:
+        self._settle_float()
         snap = self._history.redo()
         if snap is not None:
             self._restore(snap, "redo")
@@ -571,6 +632,131 @@ class AppController:
                     image=self._clipboard, x=x, y=y)
         return True
 
+    # ---- the floating edit ------------------------------------------------
+    #
+    # See FloatingEdit for why this is a third state rather than a gesture. The
+    # rules it needs, all of which fall out of that:
+    #
+    #   * the preview is the op *run and not committed*, which is free because
+    #     ops are pure -- and means the preview cannot disagree with the result;
+    #   * committing is one op, so one Ctrl+Z undoes the whole move rather than
+    #     handing back the hole while you are still holding the sprite;
+    #   * cancelling is free, because the document was never touched;
+    #   * anything else you do commits it first (`_settle_float`), because a
+    #     commit you did not want is one undo away and a discard is not.
+
+    @property
+    def floating(self) -> FloatingEdit | None:
+        return self._float
+
+    @property
+    def float_offset(self) -> tuple[int, int]:
+        return (0, 0) if self._float is None else (self._float.dx, self._float.dy)
+
+    def begin_move(self) -> bool:
+        """Lift the current region off the frame, ready to be placed."""
+        if self._doc is None or self._region is None:
+            return False
+        self._settle_float()
+        self._set_float(FloatingEdit("move", self._region))
+        return True
+
+    def begin_paste(self) -> bool:
+        """Float the clipboard where it was copied from, ready to be placed.
+
+        Ctrl+V starts here rather than landing straight away. It costs one
+        keystroke -- Enter -- and buys the ability to put it somewhere else,
+        which is the thing paste-in-place could not do at all. Pressing Enter
+        immediately is exactly the old behaviour.
+        """
+        if not self.can_paste:
+            return False
+        self._settle_float()
+        x, y = self._clipboard_origin
+        width, height = self._clipboard.size
+        self._set_float(FloatingEdit("paste", Region(x, y, width, height),
+                                     image=self._clipboard))
+        return True
+
+    def move_float(self, dx: int, dy: int) -> bool:
+        """Place the float at an absolute offset from where it started."""
+        if self._float is None:
+            return False
+        dx, dy = int(dx), int(dy)
+        if (dx, dy) == (self._float.dx, self._float.dy):
+            return False
+        self._set_float(replace(self._float, dx=dx, dy=dy))
+        return True
+
+    def nudge_float(self, dx: int, dy: int) -> bool:
+        """Move it by a step, for the arrow keys."""
+        if self._float is None:
+            return False
+        return self.move_float(self._float.dx + int(dx), self._float.dy + int(dy))
+
+    def float_preview(self, index: int | None = None) -> Image.Image | None:
+        """What frame `index` looks like with the float in place, uncommitted.
+
+        The op, run and thrown away. Purity is what makes this a two-line method
+        instead of a second implementation of what a move looks like -- and it
+        is why the preview is not merely *consistent* with the commit but is the
+        same call. A move that lands wrong will look wrong first.
+        """
+        if self._doc is None:
+            return None
+        index = self._clamp(self._index if index is None else index)
+        if self._float is None:
+            return self._doc[index].image
+        op = get_op(self._float.op_id)
+        result = op.apply(self._doc, self._selection,
+                          **self._float.op_params(index, (index,)))
+        return result.doc[index].image
+
+    def commit_float(self) -> bool:
+        """Land the float as one undoable edit. False if there was nothing to do."""
+        if self._doc is None or self._float is None:
+            return False
+        floating, self._float = self._float, None
+        if floating.kind == "move" and not floating.placed:
+            # Picked it up and put it back. Not an edit, and not worth a
+            # "nothing to do" either -- nothing happened.
+            self.events.emit(ev.FLOAT_CHANGED, floating=None)
+            return False
+        self.run_op(floating.op_id,
+                    **floating.op_params(self._index, self.frame_targets))
+        self.events.emit(ev.FLOAT_CHANGED, floating=None)
+        return True
+
+    def cancel_float(self) -> bool:
+        """Drop it. Free, because the document was never touched."""
+        if self._float is None:
+            return False
+        self._set_float(None)
+        return True
+
+    def _set_float(self, floating: FloatingEdit | None) -> None:
+        self._float = floating
+        self.events.emit(ev.FLOAT_CHANGED, floating=floating)
+
+    def _settle_float(self) -> None:
+        """Commit any float before doing something else.
+
+        Called from every entry point that would otherwise strand one: editing,
+        scrubbing, undo, opening, closing and saving. Committing rather than
+        discarding because a commit you did not want is one Ctrl+Z away, while
+        work discarded on your behalf is simply gone.
+
+        Re-entrant by construction -- `commit_float` calls `run_op`, which calls
+        this -- so the flag is not optional.
+        """
+        if self._float is None or self._settling:
+            return
+        self._settling = True
+        try:
+            self.commit_float()
+        finally:
+            self._settling = False
+
     # ---- playback --------------------------------------------------------
 
     def play(self) -> None:
@@ -625,6 +811,9 @@ class AppController:
     # ---- session ---------------------------------------------------------
 
     def seek(self, index: int) -> None:
+        # A float belongs to the frame you started it on; carrying it to
+        # another one would be placing pixels you cannot see.
+        self._settle_float()
         clamped = self._clamp(index)
         self._clock.seek(clamped)  # keep the clock's position in step with scrubs
         if clamped == self._index:

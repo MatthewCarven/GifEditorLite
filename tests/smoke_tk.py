@@ -1194,10 +1194,24 @@ def main() -> int:
     check("cut: the marquee stays put after the edit", len(region_items()) == 2,
           f"{len(region_items())} rectangles")
 
+    # Ctrl+V now *floats* the clipboard rather than landing it. Enter with no
+    # drag in between is the old paste-in-place, exactly.
     window.paste_region()
     root.update()
+    check("paste: it floats rather than landing", controller.floating is not None,
+          str(controller.floating))
+    check("paste: the document is untouched while it floats",
+          controller.doc[controller.index].image.getpixel((5, 5))[3] == 0,
+          str(controller.doc[controller.index].image.getpixel((5, 5))))
+    check("paste: the preview shows it anyway",
+          window.canvas._source.getpixel((5, 5)) == (0, 200, 255, 255),
+          str(window.canvas._source.getpixel((5, 5))))
+    check("paste: it brought the Move tool with it",
+          window._tool_var.get() == "move", window._tool_var.get())
+    window._commit_float()
+    root.update()
     frame = controller.frame_image()
-    check("paste: in place, so it undoes the cut by hand",
+    check("paste: Enter with no drag is a paste in place",
           frame.getpixel((5, 5)) == (0, 200, 255, 255), str(frame.getpixel((5, 5))))
     check("paste: recorded as its own edit", controller.undo_label == "Paste",
           str(controller.undo_label))
@@ -1208,6 +1222,7 @@ def main() -> int:
     controller.seek(2)
     root.update()
     window.paste_region()
+    window._commit_float()
     root.update()
     check("paste: it stamped every selected frame",
           all(controller.doc[i].image.getpixel((5, 5))[3] == 255 for i in (0, 1, 2)),
@@ -1216,8 +1231,116 @@ def main() -> int:
           f"index={controller.index}")
     check("paste: the selection stayed as the user made it",
           controller.selection.ordered == (0, 1, 2), str(controller.selection.ordered))
-    check("paste: the status line says how many frames it touched",
-          "3 frames" in window.status["text"], window.status["text"])
+
+    # --- the floating move -------------------------------------------------
+    # The third state, through the real canvas: drag places it, the document is
+    # untouched until Enter, and Esc puts it back with nothing on the undo stack.
+    window._select_tool("select")
+    controller.set_selection(Selection.single(0))
+    controller.seek(0)
+    root.update()
+    drag("select", (4, 4, 12, 10))
+    before_pixels = controller.frame_image().tobytes()
+    edits_before = controller.undo_label
+
+    window._select_tool("move")
+    sx, sy = window.canvas._image_to_display(6, 6)
+    ex, ey = window.canvas._image_to_display(11, 9)
+    window.canvas._on_press(_XY(int(sx), int(sy)))
+    window.canvas._on_drag(_XY(int(ex), int(ey)))
+    root.update()
+    check("move: a drag started a float", controller.floating is not None)
+    check("move: it is offset by the distance dragged",
+          controller.float_offset == (5, 3), str(controller.float_offset))
+    check("move: the document has not been touched",
+          controller.frame_image().tobytes() == before_pixels)
+    check("move: but the preview shows the hole it will leave",
+          window.canvas._source.getpixel((5, 5))[3] == 0,
+          str(window.canvas._source.getpixel((5, 5))))
+    check("move: and shows the pixels in their new place",
+          window.canvas._source.getpixel((10, 8)) == (0, 200, 255, 255),
+          str(window.canvas._source.getpixel((10, 8))))
+    check("move: the status line says nothing has happened yet",
+          "Enter to drop it" in window.status["text"], window.status["text"])
+    window.zoom_in()
+    window.zoom_fit()
+    root.update()
+    check("move: and survives a view change, because it is derived from state",
+          "Enter to drop it" in window.status["text"], window.status["text"])
+    check("move: the marquee followed it rather than staying on the hole",
+          len(region_items()) == 2 and
+          abs(window.canvas.coords(region_items()[0])[0]
+              - window.canvas._image_to_display(9, 7)[0]) < 1.5,
+          str(window.canvas.coords(region_items()[0]) if region_items() else None))
+
+    window.canvas._on_release(_XY(int(ex), int(ey)))
+    root.update()
+    check("move: releasing did not commit it", controller.floating is not None)
+    check("move: nor did it touch the document",
+          controller.undo_label == edits_before, str(controller.undo_label))
+
+    # A view change disturbs the drag, not the float -- the offset is in image
+    # pixels, so nothing about the view can invalidate it.
+    window.zoom_in()
+    root.update()
+    check("move: a zoom leaves the float exactly where it was",
+          controller.floating is not None and controller.float_offset == (5, 3),
+          str(controller.float_offset))
+    window.zoom_fit()
+    root.update()
+
+    # Arrows nudge instead of stepping frames.
+    index_before = controller.index
+    window._arrow(1, 0)
+    window._arrow(0, 1)
+    root.update()
+    check("move: arrows nudge the float", controller.float_offset == (6, 4),
+          str(controller.float_offset))
+    check("move: and do not step the playhead", controller.index == index_before,
+          f"index={controller.index}")
+
+    # Esc puts it back, and leaves nothing behind.
+    window.canvas._on_escape()
+    root.update()
+    check("move: Esc cancelled the float", controller.floating is None)
+    check("move: and the document was never touched",
+          controller.frame_image().tobytes() == before_pixels)
+    check("move: with nothing on the undo stack",
+          controller.undo_label == edits_before, str(controller.undo_label))
+    check("move: the tool is still selected for another go",
+          window._tool_var.get() == "move", window._tool_var.get())
+
+    # Now do it for real.
+    window.canvas._on_press(_XY(int(sx), int(sy)))
+    window.canvas._on_drag(_XY(int(ex), int(ey)))
+    window.canvas._on_release(_XY(int(ex), int(ey)))
+    window._commit_float()
+    root.update()
+    frame = controller.frame_image()
+    check("move: Enter landed it", frame.getpixel((10, 8)) == (0, 200, 255, 255),
+          str(frame.getpixel((10, 8))))
+    check("move: and cleared the source", frame.getpixel((5, 5))[3] == 0,
+          str(frame.getpixel((5, 5))))
+    check("move: as one undoable edit", controller.undo_label == "Move",
+          str(controller.undo_label))
+    controller.undo()
+    root.update()
+    check("move: one undo puts everything back",
+          controller.frame_image().tobytes() == before_pixels)
+
+    # Anything else you do settles a float rather than stranding it.
+    window.canvas._on_press(_XY(int(sx), int(sy)))
+    window.canvas._on_drag(_XY(int(ex), int(ey)))
+    window.canvas._on_release(_XY(int(ex), int(ey)))
+    root.update()
+    window._select_tool("pencil")
+    root.update()
+    check("move: reaching for another tool committed it rather than losing it",
+          controller.floating is None and controller.undo_label == "Move",
+          str(controller.undo_label))
+    controller.undo()
+    window._select_tool("cursor")
+    root.update()
 
     # Ctrl+C in a text field belongs to the text field. bind_all fires *after*
     # the widget's class binding, so an unguarded binding would copy the number

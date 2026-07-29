@@ -21,6 +21,7 @@ from giflite.ui.tk.tools import (
     FillTool,
     LineTool,
     PencilTool,
+    MoveTool,
     RectTool,
     SelectTool,
     ShapeTool,
@@ -33,7 +34,8 @@ class FakeContext:
 
     def __init__(self, frame_index: int = 2, brush_size: int = 3,
                  fg_color=(255, 0, 0, 255), fill_shapes: bool = False,
-                 tolerance: int = 0, erase_mode: bool = False) -> None:
+                 tolerance: int = 0, erase_mode: bool = False,
+                 floating: bool = False, can_move: bool = True) -> None:
         self._frame_index = frame_index
         self._brush_size = brush_size
         self._fg_color = fg_color
@@ -47,6 +49,13 @@ class FakeContext:
         self.regions: list = []
         self.clears = 0
         self.ended = 0
+        # The floating edit, faked as a flag plus an offset. `can_move` is what
+        # `begin_move` returns -- False stands for "nothing is selected".
+        self._floating = floating
+        self._can_move = can_move
+        self._offset = (0, 0)
+        self.offsets: list[tuple[int, int]] = []
+        self.begins = 0
 
     @property
     def frame_index(self) -> int:
@@ -92,6 +101,23 @@ class FakeContext:
 
     def end_tool(self) -> None:
         self.ended += 1
+
+    @property
+    def floating(self) -> bool:
+        return self._floating
+
+    @property
+    def float_offset(self) -> tuple[int, int]:
+        return self._offset
+
+    def begin_move(self) -> bool:
+        self.begins += 1
+        self._floating = self._can_move
+        return self._can_move
+
+    def move_float(self, dx: int, dy: int) -> None:
+        self._offset = (dx, dy)
+        self.offsets.append((dx, dy))
 
 
 @pytest.fixture
@@ -386,11 +412,82 @@ class TestSelectTool:
         assert not tool.is_gesturing
 
 
+class TestMoveTool:
+    """The tool for the third state, and the only one that commits nothing.
+
+    Everything here is about the float outliving the gesture: a release does
+    not land it, a second drag continues from where the first stopped, and a
+    view change disturbs the drag without disturbing the float.
+    """
+
+    def test_a_press_lifts_the_region(self, ctx):
+        MoveTool().on_press(ctx, 5, 5)
+        assert ctx.begins == 1
+        assert ctx.floating
+
+    def test_it_does_not_lift_again_when_something_is_already_floating(self):
+        ctx = FakeContext(floating=True)
+        MoveTool().on_press(ctx, 5, 5)
+        assert ctx.begins == 0, "a second press would have re-lifted the region"
+
+    def test_a_drag_places_it_by_the_distance_dragged(self, ctx):
+        tool = MoveTool()
+        tool.on_press(ctx, 10, 10)
+        tool.on_drag(ctx, 14, 7)
+        assert ctx.offsets == [(4, -3)]
+
+    def test_a_second_drag_continues_from_where_the_first_stopped(self, ctx):
+        """Offsets are tracked from the offset at press time. From zero instead,
+        a second drag would teleport the float back to the original position
+        before moving it."""
+        tool = MoveTool()
+        tool.on_press(ctx, 10, 10)
+        tool.on_release(ctx, 14, 10)
+        tool.on_press(ctx, 30, 30)
+        tool.on_drag(ctx, 33, 30)
+        assert ctx.offsets[-1] == (7, 0)
+
+    def test_releasing_commits_nothing(self, ctx):
+        """Enter lands it. A release that committed would make every drag an
+        undo entry, and there would be no way to adjust before deciding."""
+        tool = MoveTool()
+        tool.on_press(ctx, 1, 1)
+        tool.on_release(ctx, 9, 9)
+        assert ctx.commits == []
+        assert ctx.floating, "the float has to outlive the gesture"
+
+    def test_a_view_change_drops_the_drag_but_keeps_the_float(self, ctx):
+        """The one piece of in-flight state that survives a resize. Every other
+        tool must abandon everything, because its coordinates are screen-derived
+        and now stale; a float's offset is in image pixels, so nothing about the
+        view can invalidate it."""
+        tool = MoveTool()
+        tool.on_press(ctx, 10, 10)
+        tool.on_drag(ctx, 15, 10)
+        tool.on_cancel(ctx)
+        assert not tool.is_gesturing
+        assert ctx.floating
+        assert ctx.float_offset == (5, 0)
+
+    def test_a_press_with_nothing_selected_starts_no_gesture(self):
+        """Otherwise the next drag would place a float that does not exist."""
+        ctx = FakeContext(can_move=False)
+        tool = MoveTool()
+        tool.on_press(ctx, 5, 5)
+        assert not tool.is_gesturing
+        tool.on_drag(ctx, 9, 9)
+        assert ctx.offsets == []
+
+    def test_a_drag_with_no_press_behind_it_does_nothing(self, ctx):
+        MoveTool().on_drag(ctx, 4, 4)
+        assert ctx.offsets == []
+
+
 class TestToolSet:
     def test_default_tools_are_keyed_by_id(self):
         tools = default_tools()
-        assert set(tools) == {"select", "crop", "pencil", "eraser", "fill",
-                              "line", "rect", "ellipse", "eyedropper"}
+        assert set(tools) == {"select", "move", "crop", "pencil", "eraser",
+                              "fill", "line", "rect", "ellipse", "eyedropper"}
         assert all(tool.id == key for key, tool in tools.items())
 
     def test_pixel_tools_want_pixels_and_rect_tools_want_edges(self):
@@ -405,7 +502,7 @@ class TestToolSet:
         This one did: adding fill and the three shape tools left it passing while
         checking none of them.
         """
-        edge_tools = {"crop", "select"}
+        edge_tools = {"crop", "select", "move"}
         tools = default_tools()
         for tid in edge_tools:
             assert tools[tid].coords == "edge", tid

@@ -1362,3 +1362,119 @@ because the explicit `bg` wins over the disabled style. Greying the "Colour"
 label beside it is the half you can actually see. Checked in the smoke test in
 both directions, because "we disabled it" and "it looks disabled" are, once
 again, two claims.
+
+---
+
+## 28. The floating edit
+
+Slice 2. Asked for as "can I move a selection?", which is the same feature as
+"make the paste draggable" approached from the other side — and that is the
+design: **one floating layer, two ways to produce it.** A move lifts pixels off
+the current frame, a paste brings them from the clipboard, and from there they
+are placed and committed identically.
+
+### 28.1 A third state, and why that is the expensive part
+
+Everything in this editor has been either *committed to the document* or *a
+gesture in flight*, and that binary is load-bearing. It is why Esc has a clean
+ladder, and why §20.4 can safely cancel anything outstanding whenever the view
+changes.
+
+A float is neither. It outlives the drag that made it, the document does not
+know it exists, and — unlike every gesture here — **it survives a resize**,
+because its offset is in image pixels and nothing about the view can invalidate
+it. `MoveTool.on_cancel` therefore clears only the drag anchor, where every
+other tool must abandon everything.
+
+So the pixel-pushing was easy and the rules were the work: what commits it, what
+cancels it, what a keystroke means while it exists, and what happens to it when
+you do something else entirely.
+
+### 28.2 The preview is the op, run and thrown away
+
+`float_preview` applies the commit op to the document and returns the frame,
+discarding the result. Two lines, because ops are pure.
+
+This is worth stating as a *design consequence* rather than a trick. The preview
+is not merely consistent with the commit — it is the same call, so a move that
+lands wrong looks wrong first, and there is no second implementation of "what a
+move looks like" to drift. The alternative, compositing the float as canvas
+items over the real frame, would have been exactly that second implementation,
+and it is the one place a half-pixel disagreement (§19.1) would have reappeared.
+
+The cache key becomes `("float", uid, dx, dy)` — distinct from the frame's own
+uid, so a committed frame can never be served preview pixels (§5).
+
+### 28.3 One op, because one Ctrl+Z
+
+`paint.move` erases the source and lands the pixels in a single op, despite
+being exactly a cut followed by a paste. As two ops it would put two entries on
+the undo stack, and Ctrl+Z after moving a sprite would hand back the hole while
+you were still holding the sprite.
+
+It also made the commit path honest. `_apply_mask_frames` could not express a
+move — an erase *and* a composite on the same frame is not one coverage mask —
+so the loop split out into `_apply_frames`, which takes any `image -> image`
+transform. That was the right shape all along: everything it states (fresh uids,
+unchanged frames stay shared, no change anywhere means decline, the playhead is
+named) is a fact about *frames*, and none of it depended on masks.
+
+**A move shifts each frame's own pixels**, where a paste stamps one image
+everywhere. That difference is the whole reason `FloatingEdit.image` is None for
+a move: nudging a sprite three pixels left through an animation is the case, and
+stamping frame 7's version of it over the other twenty is not an answer to it.
+
+### 28.4 The rules, and the reason they all point the same way
+
+- **Enter commits, Esc cancels.** Cancelling is free because the document was
+  never touched.
+- **Anything else you do commits it first** (`_settle_float`, called from
+  editing, scrubbing, undo, open, close and save). Committing rather than
+  discarding, because an unwanted commit is one Ctrl+Z away and work discarded
+  on your behalf is simply gone. The same reasoning made Save warn rather than
+  refuse (§19.2), and it is the only principle here that is not a matter of
+  taste.
+- **Reaching for another tool commits it — except Move**, which is the tool for
+  manipulating one.
+- **Esc gains a stage**: gesture, float, tool, region, frames. Ordered by how
+  recent each commitment is, so each press undoes the most recent one. The float
+  stage appears in two places because a paste can float with no tool active,
+  and then Esc never reaches the canvas.
+- **Arrows nudge instead of stepping frames.** One binding doing two things,
+  which is usually a smell — but stepping settles the float, so without this the
+  same key would place pixels and then, one press later, commit them and jump to
+  another frame.
+- **The status line lives in `_summary`**, not in the float's own event. Every
+  view change refreshes the status from there, so a message written anywhere
+  else survives until the first zoom and then silently vanishes — and "nothing
+  has actually happened yet" is the one thing on screen that nothing else says.
+
+`_settle_float` is re-entrant by construction: it calls `commit_float`, which
+calls `run_op`, which calls it. The flag is not optional, and the mutation that
+removes it is caught.
+
+### 28.5 Ctrl+V floats now
+
+It costs one keystroke — Ctrl+V, Enter is the old paste-in-place, exactly — and
+buys the thing paste-in-place could not do at all. It selects the Move tool on
+the way, because arriving in a state you cannot manipulate without first hunting
+for the right tool would be a worse trade than the extra keystroke.
+
+### 28.6 A guard standing in front of a wall, again
+
+`_move_pixels` had a zero-offset early-out. A mutation run showed removing it
+changed nothing: erasing a region and compositing the same pixels straight back
+into it is the identity — including for partial alpha, and for the RGB that
+erase leaves *under* transparent pixels — so `_apply_frames` sees no change and
+declines on its own.
+
+That is the second such guard in two sessions (§27.4 was the first), and the
+pattern is worth naming: **a check placed in front of something that already
+decides is not defence, it is duplication that tests cannot distinguish from
+correctness.** Deleted, and the identity it relied on is now pinned by a test
+of its own — which is what makes the claim in the docstring checkable rather
+than merely plausible.
+
+`commit_float` keeps its own unplaced-move check, for a different reason: to
+keep "nothing to do" off the status line when you pick a selection up and put
+it straight back down. That one is caught by a mutation, so it earns its place.

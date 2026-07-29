@@ -303,24 +303,29 @@ def _composite(base: Image.Image, mask: Image.Image, color: Color, mode: str,
     return out
 
 
-def _apply_mask_frames(doc: Document, sel: Selection, frames, index: int | None,
-                       mask: Image.Image | None, color: Color, mode: str,
-                       layer: Image.Image | None = None) -> OpResult:
-    """Composite `mask` into every frame in `frames`; the single commit path.
+def _apply_frames(doc: Document, sel: Selection, frames, index: int | None,
+                  transform) -> OpResult:
+    """Run `transform(image) -> image` over every frame in `frames`.
 
-    A stroke, a flood fill, a shape, a cut and a paste differ only in how their
-    coverage mask is built and how many frames they land on; from here on they
-    are indistinguishable, which is why immutability, fresh uids and the decline
-    convention are stated once rather than five times.
+    **The single commit path**, and it is about *frames*, not about masks. That
+    distinction was forced by `paint.move`, which is an erase and a composite on
+    the same frame and so cannot be expressed as one mask at all -- but it was
+    the right shape from the start: everything stated here is a fact about
+    frames, and nothing about it depends on how the new pixels were arrived at.
 
-    Frames that the mask changes nothing in are left *shared by reference*, not
-    rewritten -- so stamping a sprite onto twenty frames where three already
-    have it allocates seventeen images, and undo stays cheap. If no frame
-    changed at all the same document comes back and `run_op` reports "nothing to
-    do" instead of pushing an identity snapshot.
+    What is stated once here rather than once per op:
+
+    - **Fresh uids for changed pixels** (stale-cache guard, ARCHITECTURE.md 5).
+    - **Frames the transform does not change stay shared by reference**, not
+      rewritten -- so stamping a sprite onto twenty frames where three already
+      have it allocates seventeen images, and undo stays cheap.
+    - **No change anywhere means the same document comes back**, so `run_op`
+      reports "nothing to do" instead of pushing an identity snapshot onto undo.
+    - **The playhead is named, not inferred** (see `OpResult.index`).
+
+    `transform` returning None counts as no change, which lets a transform
+    decline a frame without the caller checking first.
     """
-    if mask is None:
-        return OpResult(doc, sel)
     targets = sorted({int(i) for i in frames if 0 <= int(i) < len(doc.frames)})
     if not targets:
         return OpResult(doc, sel)  # no such frame -> decline
@@ -328,14 +333,29 @@ def _apply_mask_frames(doc: Document, sel: Selection, frames, index: int | None,
     changed = False
     for i in targets:
         frame = out_frames[i]
-        out = _composite(frame.image, mask, color, mode, layer)
-        if out.tobytes() == frame.image.tobytes():
+        out = transform(frame.image)
+        if out is None or out.tobytes() == frame.image.tobytes():
             continue  # missed / painted what was already there
         out_frames[i] = Frame.new(out, frame.duration_ms)  # fresh uid, same timing
         changed = True
     if not changed:
         return OpResult(doc, sel)
     return OpResult(replace(doc, frames=tuple(out_frames)), sel, index)
+
+
+def _apply_mask_frames(doc: Document, sel: Selection, frames, index: int | None,
+                       mask: Image.Image | None, color: Color, mode: str,
+                       layer: Image.Image | None = None) -> OpResult:
+    """Composite one mask into every frame in `frames`.
+
+    A stroke, a flood fill, a shape, a cut and a paste differ only in how their
+    coverage mask is built and how many frames they land on; from here on they
+    are indistinguishable.
+    """
+    if mask is None:
+        return OpResult(doc, sel)
+    return _apply_frames(doc, sel, frames, index,
+                         lambda image: _composite(image, mask, color, mode, layer))
 
 
 def _apply_mask(doc: Document, sel: Selection, index: int,
@@ -461,6 +481,80 @@ class DrawShape:
               filled: bool = False, mode: str = "paint", **_) -> OpResult:
         mask = _shape_mask(doc.size, kind, (x0, y0, x1, y1), size, bool(filled))
         return _apply_mask(doc, sel, index, mask, _rgba(color), mode)
+
+
+def _move_pixels(image: Image.Image, x: int, y: int, width: int, height: int,
+                 dx: int, dy: int) -> Image.Image | None:
+    """Lift the region out of `image`, clear it, and land it `(dx, dy)` away.
+
+    Both halves are `_composite` calls on the same frame, which is exactly why
+    the commit path above had to stop being mask-shaped: a move is not one
+    coverage mask, it is two operations in a fixed order.
+
+    **The pixels are this frame's own.** That is what makes a move different
+    from a paste applied across frames: paste stamps one image everywhere, move
+    shifts whatever each frame happens to have in that rectangle. Nudging a
+    sprite three pixels left through a whole animation is the case, and stamping
+    frame 7's version of it over the other twenty would be the wrong answer to it.
+
+    Pixels pushed off the canvas are lost, like a crop's. Undo has them, and the
+    alternative -- growing the canvas to keep them -- would silently change the
+    document's size behind a gesture that said nothing about size.
+
+    **A zero offset needs no special case.** Erasing the region and compositing
+    the same pixels straight back into it is the identity, exactly, including
+    for partial alpha and for the RGB that erase leaves under transparent
+    pixels -- so `_apply_frames` sees no change and declines, which is what a
+    guard here would have arranged more expensively. An earlier draft had that
+    guard; a mutation run showed removing it changed nothing, which is the
+    second time this session that a check turned out to be standing in front of
+    a wall. `commit_float` still short-circuits an unplaced move, but for a
+    different reason -- to keep "nothing to do" off the status line.
+    """
+    if width < 1 or height < 1:
+        return None  # nothing to move -> decline
+    mask = _region_mask(image.size, x, y, width, height)
+    if mask is None:
+        return None
+    content = image.crop((x, y, x + width, y + height))
+    cleared = _composite(image, mask, (0, 0, 0, 0), "erase")
+    layer = _paste_layer(image.size, content, x + dx, y + dy)
+    if layer is None:
+        return cleared
+    return _composite(cleared, layer.getchannel("A"), (0, 0, 0, 0), "paint", layer)
+
+
+@register_op
+class MoveRegion:
+    """Shift the pixels inside a region by `(dx, dy)`, on one frame or many.
+
+    The commit half of a floating move (ARCHITECTURE.md 28). It is deliberately
+    *one* op rather than a cut followed by a paste, even though it does exactly
+    that: two ops would put two entries on the undo stack, and Ctrl+Z after
+    moving a sprite would give the hole back while leaving you still holding the
+    sprite. One user action, one undo entry.
+
+    Being one op is also what makes the floating preview free. The frontend
+    renders a drag in progress by *running this* and displaying the result
+    without committing -- no second implementation of what a move looks like,
+    and no way for the preview to disagree with the outcome.
+    """
+
+    id = "paint.move"
+    label = "Move"
+    accel = None
+    needs_selection = False
+    in_menu = False  # a drag chooses the offset; four numbers would not
+    params = ()
+
+    def apply(self, doc: Document, sel: Selection, index: int = 0, frames=(),
+              x: int = 0, y: int = 0, width: int = 0, height: int = 0,
+              dx: int = 0, dy: int = 0, **_) -> OpResult:
+        targets = tuple(frames) if frames else (int(index),)
+        return _apply_frames(
+            doc, sel, targets, int(index),
+            lambda image: _move_pixels(image, int(x), int(y), int(width),
+                                       int(height), int(dx), int(dy)))
 
 
 @register_op

@@ -640,6 +640,94 @@ class TestSoftMasksComposite:
         assert out.getpixel((0, 0)) == (10, 20, 30, 255)
 
 
+class TestMove:
+    def frame(self, size=(10, 10)):
+        image = Image.new("RGBA", size, (0, 0, 0, 0))
+        for px in range(2, 5):
+            for py in range(2, 5):
+                image.putpixel((px, py), (10, 20, 30, 255))
+        return image
+
+    def test_it_clears_the_source_and_lands_the_pixels(self):
+        d = Document((Frame.new(self.frame(), 100),), (10, 10))
+        r = run("paint.move", d, index=0, x=2, y=2, width=3, height=3, dx=4, dy=1)
+        image = r.doc.frames[0].image
+        assert image.getpixel((6, 3)) == (10, 20, 30, 255)
+        assert image.getpixel((2, 2))[3] == 0
+
+    def test_a_zero_offset_is_the_identity_and_declines(self):
+        """Load-bearing: it is *why* there is no zero-offset guard in
+        `_move_pixels`. Erase the region and composite the same pixels back and
+        you get the same bytes, so `_apply_frames` declines on its own.
+        """
+        d = Document((Frame.new(self.frame(), 100),), (10, 10))
+        assert run("paint.move", d, index=0, x=2, y=2,
+                   width=3, height=3, dx=0, dy=0).doc is d
+
+    def test_the_identity_holds_for_partial_alpha_too(self):
+        """The interesting half of the claim above -- erase leaves RGB alone
+        under transparent pixels, so a naive round trip could easily *not* be
+        byte-identical."""
+        image = Image.new("RGBA", (6, 6), (9, 8, 7, 0))
+        image.putpixel((2, 2), (10, 20, 30, 128))
+        image.putpixel((3, 3), (40, 50, 60, 255))
+        d = Document((Frame.new(image, 100),), (6, 6))
+        assert run("paint.move", d, index=0, x=1, y=1,
+                   width=4, height=4, dx=0, dy=0).doc is d
+
+    def test_each_frame_shifts_its_own_pixels(self):
+        frames = []
+        for i in range(3):
+            image = Image.new("RGBA", (10, 10), (0, 0, 0, 0))
+            image.putpixel((3, 3), (i, 9, 9, 255))
+            frames.append(Frame.new(image, 100))
+        d = Document(tuple(frames), (10, 10))
+        r = run("paint.move", d, index=0, frames=(0, 1, 2),
+                x=2, y=2, width=3, height=3, dx=4, dy=0)
+        assert [r.doc.frames[i].image.getpixel((7, 3))[0] for i in range(3)] == [0, 1, 2]
+
+    def test_pixels_pushed_off_the_canvas_are_lost(self):
+        d = Document((Frame.new(self.frame(), 100),), (10, 10))
+        r = run("paint.move", d, index=0, x=2, y=2, width=3, height=3, dx=20, dy=0)
+        assert r.doc.frames[0].image.getbbox() is None  # cleared, nothing landed
+
+    def test_an_empty_region_declines(self):
+        d = Document((Frame.new(self.frame(), 100),), (10, 10))
+        assert run("paint.move", d, index=0, x=2, y=2,
+                   width=0, height=3, dx=2, dy=2).doc is d
+
+    def test_it_names_the_playhead_and_keeps_the_selection(self):
+        frames = tuple(Frame.new(self.frame(), 100) for _ in range(4))
+        d = Document(frames, (10, 10))
+        sel = Selection(frozenset({0, 1, 2}))
+        r = run("paint.move", d, sel, index=2, frames=(0, 1, 2),
+                x=2, y=2, width=3, height=3, dx=1, dy=1)
+        assert r.index == 2
+        assert r.selection is sel
+
+    def test_moving_and_moving_back_restores_what_you_can_see(self):
+        """Visually identical, and deliberately *not* byte-identical.
+
+        `paint.erase` pulls alpha down and leaves RGB alone, so the vacated
+        square comes back as `(10, 20, 30, 0)` where it started as
+        `(0, 0, 0, 0)` -- two runs of pixels that are the same nothing on screen
+        and different numbers underneath. That is the whole subject of
+        `_clear_mask`, and asserting on bytes here would be asserting on the
+        colour of pixels you cannot see.
+        """
+        original = self.frame()
+        d = Document((Frame.new(original, 100),), (10, 10))
+        there = run("paint.move", d, index=0, x=2, y=2, width=3, height=3, dx=4, dy=1)
+        back = run("paint.move", there.doc, index=0, x=6, y=3,
+                   width=3, height=3, dx=-4, dy=-1)
+
+        def visible(image):
+            backdrop = Image.new("RGBA", image.size, (200, 100, 50, 255))
+            return Image.alpha_composite(backdrop, image).tobytes()
+
+        assert visible(back.doc.frames[0].image) == visible(original)
+
+
 class TestCutPasteRoundTrip:
     def test_cut_then_paste_in_place_restores_the_pixels(self):
         """The property that makes 'in place' the right default for slice 1: an
