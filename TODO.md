@@ -7,7 +7,7 @@
 - [ ] Sweep `tmp_obj_*` cruft from `.git\objects` after a reboot frees the handles (harmless if left)
 - [x] Crop and both painting slices are committed (HEAD `01feb8a`) — that old "commit the crop feature" item was stale
 - [x] Pixel grid committed (`328ccd7`) — a stale `.git/index.lock` had to be deleted first, as usual
-- [ ] Commit fill + shapes + the palette move: `git add -A; git commit -F COMMIT_MSG.txt`
+- [x] Fill + shapes + the palette move committed and pushed (`c0f18a4`)
 - [ ] Eyeball the new side panel on Windows — the preview no longer widens when
       you return to fit, which is deliberate but visible
 - [ ] Check the overwrite-warning wording reads right to you (`_confirm_overwrite_source` in `ui/tk/app.py`) — it's the one dialog standing between you and a lost original
@@ -203,7 +203,7 @@ out to be worse than advertised. Design in ARCHITECTURE §19.2–19.3.
 - [ ] M5 video import (`imageio-ffmpeg`, try/except registration), WebP/APNG export
 - [ ] Second frontend to actually prove the seam (Qt or Dear PyGui)
 - [x] Polish: warn before overwriting the *original* source on Ctrl+S (GIF re-save is lossy); default Save As to `<name>_edited.gif` — done 2026-07-27
-- [ ] Polish: `default_params` could seed Set-Delay from the current frame's delay
+- [x] Polish: `default_params` seeds Set-Delay from the frames it would change — done 2026-07-29 (mixed selections seed from the shortest)
 - [ ] Polish: crop is apply-on-release; a draggable/adjustable marquee with an explicit confirm (and maybe a keep-aspect modifier) would be nicer
 
 ## Zoom & pan ✅ (slice 1)
@@ -343,3 +343,42 @@ ARCHITECTURE §23.
       at 1000x1000, instant at GIF sizes. Only worth attacking if it bites
 - [ ] The panel measures ~211px against `PANEL_WIDTH` 200 — the Colour/Fill row
       is what exceeds it. Cosmetic
+
+## Per-frame timing, made reachable ✅
+
+Matthew asked for a way to set individual frame time rather than duplicating
+frames to hold a pose. No new op — `timing.set_delay` is M4; this is the fast
+path to it. Design in ARCHITECTURE §24.
+
+- [x] `delay_targets` / `target_delay_ms` / `current_delay_ms` /
+      `set_frame_delay` on the controller — scope policy and state derivation,
+      so a second frontend gets the same answers
+- [x] **Scope: the selection, but only one the playhead is standing in.** Never
+      "all frames" (that's the menu op's rule, right behind a dialog and wrong
+      for an inline box), and never a selection you have arrowed away from —
+      opening selects frame 0 and `seek` leaves it there, so the box would have
+      edited frame 0 while the preview showed frame 3
+- [x] Delay box in the side panel, ms, committing on Enter / focus-out / arrows.
+      Shows what *landed* after quantisation, not what was typed. Blank when the
+      targets disagree; the label carries the count
+- [x] Status line reports the frame's own delay — it only ever showed the
+      *total*, which coincides on a one-frame GIF and is a different number on
+      any other
+- [x] Timeline: each frame's delay under its thumbnail, inside `_draw_slot` so
+      it inherits the virtualisation
+- [x] **Fixed a real bug the box exposed:** both timing ops returned a fresh
+      Document unconditionally, so setting the delay already there pushed an
+      identity edit onto undo. Every other op family declines; these now do too,
+      comparing results rather than requests (103ms quantises to 100ms)
+- [x] **Two tests had no teeth** and mutation caught it — see ARCHITECTURE §24.4
+- [x] 452 headless (was 426), Xvfb smoke 224 checks (was 211). Four mutations
+      confirmed, plus the two rewritten checks re-verified
+
+**Later (additive):**
+
+- [ ] A delay edit moves the playhead to `selection.first` (run_op's rule for
+      every op). Retiming frames 3-6 while looking at 5 jumps you to 3. Harmless
+      but slightly rude; would need run_op to distinguish reordering ops from
+      in-place ones
+- [ ] Nudging delay from the keyboard (up/down on the selected frame) without
+      focusing the box

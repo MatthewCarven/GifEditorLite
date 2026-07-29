@@ -443,6 +443,85 @@ class AppController:
             return None
         return self._doc[self._clamp(self._index if index is None else index)].image
 
+    # ---- per-frame timing -------------------------------------------------
+    #
+    # `timing.set_delay` has existed since M4, reachable through a menu and a
+    # dialog. What lives here is the *fast path* a frontend needs to put a delay
+    # box on screen: what to show in it, how many frames it would retime, and a
+    # set that is scoped safely. The op is untouched -- this is state derivation
+    # and scope policy, which is exactly what the controller is for, and putting
+    # it here means a second frontend gets the same answers rather than
+    # re-deriving them (ARCHITECTURE.md 9).
+
+    @property
+    def current_delay_ms(self) -> int | None:
+        """The playhead frame's own delay. None when nothing is open.
+
+        The status line showed only `total_duration_ms`, which is a different
+        number that happens to coincide on a one-frame GIF -- so until now
+        nothing on screen reported a single frame's timing at all.
+        """
+        if self._doc is None:
+            return None
+        return self._doc[self._clamp(self._index)].duration_ms
+
+    @property
+    def delay_targets(self) -> tuple[int, ...]:
+        """The frames a delay edit would apply to, in order.
+
+        **The selection, or just the playhead frame -- never everything.** The
+        menu op treats "no selection" as "the whole animation", which is right
+        for a deliberate menu action with a dialog in front of it. An inline box
+        sitting beside the frame counter reads as "this frame", and having it
+        quietly retime all forty is the kind of surprise that costs someone an
+        afternoon. Different affordance, different default.
+
+        **And only a selection the playhead is actually in.** Opening a file
+        selects frame 0, and `seek`/`step` deliberately leave the selection
+        alone -- so arrowing to frame 3 leaves frame 0 selected, and a box keyed
+        on the selection alone would report and edit frame 0's delay while the
+        preview and the status line both showed frame 3. A selection you have
+        stepped away from is not what you are working on; a selection you are
+        standing inside is.
+        """
+        if self._doc is None:
+            return ()
+        index = self._clamp(self._index)
+        if self._selection and index in self._selection.indices:
+            return self._selection.ordered
+        return (index,)
+
+    @property
+    def target_delay_ms(self) -> int | None:
+        """The delay to show in a delay box: the shared value, or None if the
+        targets disagree. None means "mixed", which the frontend should render
+        as an empty box rather than as a number that is wrong for most of them.
+        """
+        if self._doc is None:
+            return None
+        delays = {self._doc[i].duration_ms for i in self.delay_targets}
+        return delays.pop() if len(delays) == 1 else None
+
+    def set_frame_delay(self, delay_ms: int) -> None:
+        """Retime `delay_targets` to `delay_ms`, as one undoable edit.
+
+        Runs the existing op rather than reimplementing it, by scoping the
+        selection to `delay_targets` first -- so quantisation, the 20ms floor,
+        validation, history and the events all behave exactly as they do from
+        the menu, and the frames retimed are exactly the ones the box said it
+        would retime. A decline restores the selection, because a no-op should
+        not leave frames selected that the user never selected.
+        """
+        if self._doc is None:
+            return
+        before_sel, before_doc = self._selection, self._doc
+        targets = Selection(frozenset(self.delay_targets))
+        if targets != before_sel:
+            self._selection = targets
+        self.run_op("timing.set_delay", delay_ms=delay_ms)
+        if self._doc is before_doc:
+            self._selection = before_sel
+
     # ---- internals -------------------------------------------------------
 
     def _clamp(self, index: int) -> int:

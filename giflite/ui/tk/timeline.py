@@ -33,6 +33,7 @@ BACKGROUND = "#1b1b1e"
 SELECTED_BG = "#3a4a63"
 SELECTED_OUTLINE = "#4a9eff"
 NUMBER_FG = "#8b8b93"
+DELAY_FG = "#7a7a82"     # dimmer than the frame number: it's reference, not identity
 CURRENT_BORDER = "#4a9eff"
 DROP_MARKER = "#f0c040"
 
@@ -40,7 +41,24 @@ THUMB_H = 56
 GAP = 6
 VPAD = 8
 NUMBER_H = 14
+# Room under each thumbnail for its delay. Uneven timing is invisible until you
+# can compare frames side by side, and comparing is the whole reason you go
+# looking -- a per-frame number in a dialog tells you about one frame at a time.
+DELAY_H = 13
 DRAG_THRESHOLD = 5  # px before a press becomes a drag rather than a click
+
+
+def _format_delay(ms: int) -> str:
+    """Compact enough to sit under a thumbnail.
+
+    Milliseconds below a second, seconds above it: "80" and "1.5s" both read at
+    a glance, where "1500" next to "80" invites reading the strip as if every
+    number were the same magnitude. The unit is only shown where it changes, so
+    the common case stays two or three characters wide.
+    """
+    if ms < 1000:
+        return f"{ms}"
+    return f"{ms / 1000:g}s"
 
 
 class Timeline(tk.Frame):
@@ -74,7 +92,7 @@ class Timeline(tk.Frame):
         self._drop_gap: int | None = None
         self._pending_collapse: int | None = None
 
-        row_h = NUMBER_H + THUMB_H + 2 * VPAD
+        row_h = NUMBER_H + THUMB_H + DELAY_H + 2 * VPAD
         self.canvas = tk.Canvas(
             self, height=row_h, background=BACKGROUND, highlightthickness=0
         )
@@ -199,6 +217,19 @@ class Timeline(tk.Frame):
             fill=CURRENT_BORDER if is_current else NUMBER_FG,
             font=("TkDefaultFont", 8),
         )
+
+        # The frame's delay, under its thumbnail. Drawn inside _draw_slot so it
+        # inherits the virtualisation for free: only slots in view cost anything,
+        # which is the property that lets a 200-frame GIF draw like a 20-frame
+        # one (risk 4).
+        if self._doc is not None:
+            self.canvas.create_text(
+                x + self._thumb_w // 2,
+                top + THUMB_H + DELAY_H // 2 + 2,
+                text=_format_delay(self._doc[i].duration_ms),
+                fill=CURRENT_BORDER if is_current else DELAY_FG,
+                font=("TkDefaultFont", 7),
+            )
 
     def _draw_drop_marker(self, gap: int, top: int) -> None:
         x = GAP + gap * self._slot_w - GAP // 2

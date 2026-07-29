@@ -21,6 +21,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from giflite.app.controller import AppController  # noqa: E402
+from giflite.core.model import Selection  # noqa: E402
 from giflite.ui.tk.app import MainWindow  # noqa: E402
 from tests.conftest import make_gif  # noqa: E402
 
@@ -1031,6 +1032,100 @@ def main() -> int:
         check(f"palette: {tid} selects", ok, window._tool_var.get())
     window._select_tool("cursor")
     window._fill_var.set(False)
+    while controller.can_undo:
+        controller.undo()
+    root.update()
+
+    # --- per-frame delay --------------------------------------------------
+    # The op is M4; what only a display answers is whether the box reports the
+    # right frames, edits the right frames, and stays out of the undo stack when
+    # it is merely tabbed past.
+    controller.set_selection(Selection.empty())
+    controller.seek(2)
+    root.update()
+    check("delay: the box shows the playhead frame's own delay",
+          window._delay_var.get() == str(controller.current_delay_ms),
+          f"box {window._delay_var.get()!r} vs frame {controller.current_delay_ms}")
+    check("delay: the status line reports the frame, not just the total",
+          f"frame {controller.current_delay_ms} ms" in window.status["text"],
+          window.status["text"])
+
+    window._delay_var.set("450")
+    window._commit_delay()
+    root.update()
+    check("delay: typing a value retimes the frame",
+          controller.doc[2].duration_ms == 450, str(controller.doc[2].duration_ms))
+    check("delay: and only that frame",
+          controller.doc[1].duration_ms != 450 and controller.doc[3].duration_ms != 450)
+
+    # A selection the playhead sits inside: the box speaks for all of it.
+    controller.set_selection(Selection(frozenset({0, 1})))
+    controller.seek(0)
+    root.update()
+    check("delay: the label names how many frames it would retime",
+          "2 frames" in window._delay_label["text"], window._delay_label["text"])
+    window._delay_var.set("333")
+    window._commit_delay()
+    root.update()
+    check("delay: it retimes the whole selection as one edit",
+          controller.doc[0].duration_ms == 330 and controller.doc[1].duration_ms == 330,
+          f"{controller.doc[0].duration_ms}, {controller.doc[1].duration_ms}")
+    check("delay: quantised to 10ms, and the box shows what landed rather than "
+          "what was typed", window._delay_var.get() == "330",
+          window._delay_var.get())
+
+    # Frames that disagree cannot be shown as one number.
+    controller.set_selection(Selection(frozenset({0, 2})))
+    controller.seek(0)
+    root.update()
+    check("delay: a mixed selection blanks the box rather than lying",
+          window._delay_var.get() == "", window._delay_var.get())
+
+    # Stepping away from a selection: the box has to follow your eyes, or it
+    # reports frame 0 while the preview shows frame 3.
+    controller.set_selection(Selection(frozenset({0, 1})))
+    controller.seek(3)
+    root.update()
+    check("delay: a selection the playhead has left is ignored",
+          window._delay_var.get() == str(controller.doc[3].duration_ms),
+          f"box {window._delay_var.get()!r} vs frame 3 {controller.doc[3].duration_ms}")
+
+    # Tabbing through the box fires <FocusOut> with the value unchanged. That
+    # must not cost an undo entry -- this is the reason the timing ops learned
+    # to decline.
+    #
+    # What this can actually observe is the *frontend* guard, and it took two
+    # goes to write a check with teeth. Comparing `undo_label` proved worthless:
+    # the op declines as well, so no undo entry appears whether the guard is
+    # there or not, and both mutations passed. The one visible difference is
+    # that reaching the op at all costs a "nothing to do" status message, so
+    # that is what gets asserted. The op-level decline is covered headlessly in
+    # tests/test_timing_ops.py, which is the right layer for it.
+    window.status.configure(text="untouched")
+    window._commit_delay()
+    root.update()
+    check("delay: tabbing past an unchanged value never reaches the op",
+          window.status["text"] == "untouched", window.status["text"])
+
+    # Garbage in the box is put back, not treated as zero.
+    window._delay_var.set("abc")
+    window._commit_delay()
+    root.update()
+    check("delay: garbage is replaced with the real value",
+          window._delay_var.get() == str(controller.doc[controller.index].duration_ms),
+          window._delay_var.get())
+
+    # The timeline labels: one per visible thumbnail, virtualised like the rest.
+    tl_texts = [window.timeline.canvas.itemcget(i, "text")
+                for i in window.timeline.canvas.find_all()
+                if window.timeline.canvas.type(i) == "text"]
+    check("timeline: every thumbnail carries its delay as well as its number",
+          len(tl_texts) >= 2 * controller.frame_count,
+          f"{len(tl_texts)} labels for {controller.frame_count} frames")
+    check("timeline: the delay labels show real durations",
+          any(t == "330" for t in tl_texts), str(sorted(set(tl_texts))))
+
+    controller.set_selection(Selection.empty())
     while controller.can_undo:
         controller.undo()
     root.update()

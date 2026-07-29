@@ -890,3 +890,110 @@ for the whole view section, none of it is shown: half a navigator is worse than
 none, because the half that remains looks like it works. The tools above it are
 never at risk, both because they are packed first and because the smoke test
 asserts every palette entry is mapped at the minimum window size.
+
+## 24. Per-frame timing, made reachable
+
+`timing.set_delay` has existed since M4, behind a menu item and a dialog. This
+adds no new op: it adds the fast path, because retiming a frame is the *correct*
+way to hold a pose and duplicating frames to do it bloats the file and
+multiplies the work of every later edit. A control for the right technique
+should be at least as reachable as the button for the wrong one.
+
+Three surfaces, one underlying op:
+
+- a delay box in the side panel, in milliseconds;
+- the frame's own delay in the status line;
+- each frame's delay under its thumbnail in the timeline.
+
+### 24.1 Scope: the selection, but only one you are standing in
+
+The controller answers "which frames would a delay edit touch" via
+`delay_targets`, and the rule has two halves, each fixing a distinct trap.
+
+**Never everything.** The menu op treats "no selection" as "the whole
+animation", which is right for a deliberate action with a dialog in front of it.
+An inline box beside the frame counter reads as "this frame", and having it
+quietly retime all forty is the kind of surprise that costs an afternoon. Same
+op, different affordance, different default.
+
+**And not a selection you have walked away from.** Opening a file selects frame
+0, and `seek`/`step` deliberately leave the selection alone -- so arrowing to
+frame 3 leaves frame 0 selected. A box keyed on the selection alone would report
+and edit frame 0's delay while the preview and the status line both showed frame
+3. So the selection counts only when the playhead is inside it. A selection you
+are standing in is what you are working on; one you have stepped away from is
+not.
+
+`target_delay_ms` returns `None` when the targets disagree, and the frontend
+renders that as an empty box. "Mixed" has to be representable: a single number
+would be wrong for most of them, and blank is the only display that isn't a lie.
+The label carries the count -- "Frame delay (4 frames)" -- so the box says what
+it would do before you type.
+
+`set_frame_delay` scopes the selection to `delay_targets` and then runs the
+existing op, so quantisation, the 20ms floor, validation, history and events all
+behave exactly as they do from the menu. A decline restores the previous
+selection, because a no-op must not leave frames selected that the user never
+selected.
+
+### 24.2 A decline the timing ops never had
+
+Every other op family returns the *same* document when nothing changes, so
+`run_op` reports "nothing to do" rather than pushing an identity snapshot onto
+undo. The two timing ops were the exception -- `replace(doc, frames=...)`
+unconditionally -- and it went unnoticed because the only way in was a dialog,
+and nobody opens a dialog to retype the value already in it.
+
+An inline box asks the question on every commit, so it surfaced immediately.
+`_retimed` now applies the convention to both ops. It compares *results*, not
+requests: durations are quantised on the way in, so "typed 103ms, already 100ms"
+is a no-op that a request-level check would miss.
+
+The frontend has its own guard on top, skipping the call entirely when the value
+is unchanged -- because reaching the op still costs a "nothing to do" status
+message, which is noise for a box the user merely tabbed past. The two guards
+are belt and braces, and that has a testing consequence: see §24.4.
+
+### 24.3 Committing, and what the box then shows
+
+Enter, focus-out, or the spinbox arrows -- never per keystroke, which would push
+"1", "10", "100" onto undo as three edits. Garbage or an empty box is ignored
+and the real value put back, rather than being read as zero.
+
+After a commit the box is refreshed *from state*, not from what was typed. The
+op quantises to 10ms and floors at `MIN_DURATION_MS`, so typing 333 leaves 330
+and typing 1 leaves 20. Showing the result is the only honest option, and it
+makes the quantisation discoverable rather than mysterious.
+
+`default_params` now seeds the *dialog* from the same reality (the long-deferred
+polish item). Where the targets disagree the shortest wins -- not the first, not
+the average: retiming a mixed run is nearly always about slowing part of it
+down, and the minimum is a delay some frame actually has rather than a number
+invented for the box.
+
+### 24.4 Two tests that had no teeth
+
+Worth recording because the pattern keeps recurring in this project.
+
+The obvious check for §24.2 was "committing an unchanged value doesn't change
+`undo_label`". It passed against a build with the decline removed: the preceding
+edit was *also* a delay edit, so an identity entry left the label reading "Set
+Frame Delay" either way. Making the neighbouring label differ still didn't help
+-- with both guards in place, no undo entry appears whether or not either guard
+is present, so the assertion could not distinguish any of the three worlds.
+
+What the display test can actually observe is the frontend guard, via the status
+message that reaching the op would produce. That is what it asserts now, and the
+op-level decline is covered headlessly instead -- the right layer for it. Both
+were verified by mutation rather than assumed.
+
+### 24.5 Timeline labels
+
+Drawn inside `_draw_slot`, so they inherit the virtualisation for free: only
+slots in view cost anything, which is the property that lets a 200-frame GIF
+draw like a 20-frame one (risk 4). Milliseconds below a second and seconds above
+it, because "1500" sitting next to "80" invites reading the strip as though
+every number were the same magnitude.
+
+This is the surface that makes uneven timing *findable*. A number in a box tells
+you about one frame; a row of numbers tells you which frame is wrong.

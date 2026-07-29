@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from PIL import Image
 
-from giflite.core.model import Document, Frame, Selection
+from giflite.core.model import MIN_DURATION_MS, Document, Frame, Selection
 from giflite.core.ops import get_op
 
 
@@ -77,3 +77,57 @@ class TestMetadata:
         assert {op.id for op in menu_groups()["timing"]} == {
             "timing.set_delay", "timing.scale_speed",
         }
+
+
+class TestRetimingDeclines:
+    """Both timing ops used to return a fresh Document unconditionally, so
+    setting the delay that was already there pushed an identity edit onto undo.
+    It went unnoticed while the only way in was a dialog -- you rarely open one
+    to retype the value already in it. An inline delay box asks on every commit.
+    """
+
+    def test_set_delay_to_the_value_already_there_declines(self):
+        d = doc([100, 100, 100])
+        assert run("timing.set_delay", d, Selection.empty(), delay_ms=100).doc is d
+
+    def test_a_request_that_quantises_to_the_current_value_also_declines(self):
+        """103ms quantises to 100ms, so the *request* differs while the result
+        does not -- comparing requests rather than results would miss this."""
+        d = doc([100, 100, 100])
+        assert run("timing.set_delay", d, Selection.empty(), delay_ms=103).doc is d
+
+    def test_a_real_change_still_applies(self):
+        d = doc([100, 100, 100])
+        assert run("timing.set_delay", d, Selection.empty(), delay_ms=250).doc is not d
+
+    def test_a_partial_change_still_applies(self):
+        """Only one frame moves; the op must not decline just because most
+        frames are untouched."""
+        d = doc([100, 200, 100])
+        r = run("timing.set_delay", d, Selection(frozenset({1})), delay_ms=100)
+        assert r.doc is not d
+        assert [f.duration_ms for f in r.doc] == [100, 100, 100]
+
+    def test_scaling_speed_by_one_declines(self):
+        d = doc([100, 200, 300])
+        assert run("timing.scale_speed", d, Selection.empty(), factor=1.0).doc is d
+
+    def test_scaling_speed_that_floors_everything_to_the_same_value_declines(self):
+        """Already at the floor, so a further speed-up cannot move anything."""
+        d = doc([MIN_DURATION_MS] * 3)
+        assert run("timing.scale_speed", d, Selection.empty(), factor=4.0).doc is d
+
+
+class TestSetDelayDialogSeed:
+    def test_it_seeds_from_the_frames_it_would_change(self):
+        d = doc([100, 250, 250])
+        op = get_op("timing.set_delay")
+        assert op.default_params(d, Selection(frozenset({1, 2})))["delay_ms"] == 250
+
+    def test_a_mixed_selection_seeds_from_the_shortest(self):
+        """Retiming a mixed run is nearly always about slowing part of it down,
+        so the smallest is the value you are most likely adjusting away from --
+        and unlike an average it is a delay some frame actually has."""
+        d = doc([300, 100, 200])
+        op = get_op("timing.set_delay")
+        assert op.default_params(d, Selection.empty())["delay_ms"] == 100

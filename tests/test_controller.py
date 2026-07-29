@@ -169,3 +169,148 @@ class TestPlayheadSurvivesDocumentChanges:
         controller.open(make_gif(tmp_path / "short.gif", frames=3))
         assert controller.index <= controller.frame_count - 1
         assert controller.frame_image() is not None
+
+
+class TestFrameDelay:
+    """The fast path a frontend needs to put a delay box on screen.
+
+    `timing.set_delay` has existed since M4; what's tested here is the state
+    derivation and the *scope policy* around it, which live in the controller so
+    a second frontend gets the same answers rather than re-deriving them.
+    """
+
+    @pytest.fixture
+    def loaded(self, wired, tmp_path):
+        from tests.conftest import make_gif
+        controller, frontend = wired
+        controller.open(make_gif(tmp_path / "d.gif", frames=5,
+                                 durations=[100, 100, 200, 300, 100]))
+        return controller, frontend
+
+    def test_current_delay_is_the_playhead_frames_own(self, loaded):
+        controller, _ = loaded
+        controller.seek(3)
+        assert controller.current_delay_ms == 300
+        controller.seek(0)
+        assert controller.current_delay_ms == 100
+
+    def test_current_delay_is_not_the_total(self, loaded):
+        """They coincide on a one-frame GIF, which is how the status line got
+        away with showing only the total for this long."""
+        controller, _ = loaded
+        assert controller.current_delay_ms != controller.doc.total_duration_ms
+
+    def test_no_document_has_no_delay(self, wired):
+        controller, _ = wired
+        assert controller.current_delay_ms is None
+        assert controller.target_delay_ms is None
+        assert controller.delay_targets == ()
+
+    def test_with_no_selection_the_target_is_the_playhead_frame_alone(self, loaded):
+        """Not the whole animation. The menu op treats "no selection" as "all",
+        which is right behind a dialog and wrong for an inline box that reads as
+        "this frame"."""
+        controller, _ = loaded
+        controller.set_selection(Selection.empty())
+        controller.seek(2)
+        assert controller.delay_targets == (2,)
+
+    def test_stepping_away_from_the_selection_follows_the_playhead(self, loaded):
+        controller, _ = loaded
+        controller.set_selection(Selection(frozenset({0, 1})))
+        controller.seek(3)                       # standing outside the selection
+        assert controller.delay_targets == (3,)
+        assert controller.target_delay_ms == 300
+
+    def test_standing_inside_the_selection_keeps_it(self, loaded):
+        controller, _ = loaded
+        controller.set_selection(Selection(frozenset({1, 3})))
+        controller.seek(3)                       # standing inside it
+        assert controller.delay_targets == (1, 3)
+
+    def test_opening_a_file_does_not_leave_the_box_pointed_at_frame_zero(self, loaded):
+        """The concrete form of the trap: open, arrow forward, and the box must
+        follow rather than silently still mean frame 0."""
+        controller, _ = loaded
+        assert controller.selection.ordered == (0,)   # what open() leaves behind
+        controller.seek(3)
+        assert controller.delay_targets == (3,)
+
+    def test_with_a_selection_the_targets_are_the_selection(self, loaded):
+        controller, _ = loaded
+        controller.set_selection(Selection(frozenset({1, 3})))
+        controller.seek(1)   # standing inside it -- see the two tests above
+        assert controller.delay_targets == (1, 3)
+
+    def test_target_delay_is_the_shared_value(self, loaded):
+        controller, _ = loaded
+        controller.set_selection(Selection(frozenset({0, 1})))   # both 100
+        assert controller.target_delay_ms == 100
+
+    def test_target_delay_is_none_when_the_targets_disagree(self, loaded):
+        """"Mixed" has to be representable: a single number would be wrong for
+        most of them, and blank is the one display that isn't a lie."""
+        controller, _ = loaded
+        controller.set_selection(Selection(frozenset({0, 3})))   # 100 and 300
+        assert controller.target_delay_ms is None
+
+    def test_setting_with_no_selection_retimes_only_that_frame(self, loaded):
+        controller, _ = loaded
+        controller.set_selection(Selection.empty())
+        controller.seek(2)
+        controller.set_frame_delay(500)
+        assert [f.duration_ms for f in controller.doc] == [100, 100, 500, 300, 100]
+
+    def test_setting_with_a_selection_retimes_all_of_it(self, loaded):
+        controller, _ = loaded
+        controller.set_selection(Selection(frozenset({0, 4})))
+        controller.set_frame_delay(250)
+        assert [f.duration_ms for f in controller.doc] == [250, 100, 200, 300, 250]
+
+    def test_it_is_one_undoable_edit(self, loaded):
+        controller, _ = loaded
+        controller.set_selection(Selection(frozenset({0, 1, 2})))
+        before = [f.duration_ms for f in controller.doc]
+        controller.set_frame_delay(400)
+        controller.undo()
+        assert [f.duration_ms for f in controller.doc] == before
+
+    def test_it_floors_at_the_minimum_rather_than_accepting_anything(self, loaded):
+        from giflite.core.model import MIN_DURATION_MS
+        controller, _ = loaded
+        controller.set_selection(Selection.empty())
+        controller.seek(0)
+        controller.set_frame_delay(1)
+        assert controller.doc[0].duration_ms == MIN_DURATION_MS
+
+    def test_setting_the_value_already_there_changes_nothing(self, loaded):
+        controller, _ = loaded
+        controller.set_selection(Selection.empty())
+        controller.seek(2)
+        before = controller.doc
+        controller.set_frame_delay(200)
+        assert controller.doc is before      # the op declined
+        assert not controller.dirty
+
+    def test_a_declined_set_does_not_leave_a_frame_selected(self, loaded):
+        """The scoping selects the playhead frame to run the op. If the op then
+        declines, that selection was never the user's and has to go back."""
+        controller, _ = loaded
+        controller.seek(2)
+        controller.set_selection(Selection.empty())
+        controller.set_frame_delay(200)      # already 200 -> declines
+        assert controller.selection == Selection.empty()
+
+    def test_a_successful_set_with_no_selection_does_select_the_frame(self, loaded):
+        """The other half of the same trade, and consistent with the paint ops,
+        which also hand back `Selection.single(index)`."""
+        controller, _ = loaded
+        controller.seek(2)
+        controller.set_selection(Selection.empty())
+        controller.set_frame_delay(500)
+        assert controller.selection.ordered == (2,)
+
+    def test_setting_with_no_document_is_a_no_op_not_a_crash(self, wired):
+        controller, _ = wired
+        controller.set_frame_delay(100)      # must not raise
+        assert controller.doc is None

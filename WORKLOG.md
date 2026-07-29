@@ -946,3 +946,79 @@ tool committing on drag as well as press.
   of the Colour/Fill row. If it feels wide, that row is where the width is.
 - Fill on a photographic or dithered GIF will want a tolerance well above 0.
   Flat pixel art wants exactly 0.
+
+## 2026-07-29 (later still) — Per-frame timing, made reachable
+
+Matthew: "is there a way to set the individual frame time? It would make it
+easier for editing instead of inserting duplicate frames." Right instinct —
+duplicating to hold a pose bloats the file and multiplies the work of every
+later edit. Design in ARCHITECTURE §24.
+
+**No new op.** `timing.set_delay` has been there since M4; what was missing was
+a way to reach it that wasn't a menu and a dialog. So this slice is a delay box
+in the panel, the frame's delay in the status line, and every frame's delay
+under its thumbnail — three surfaces onto one op.
+
+**A correction worth making early:** the status line's `0.10s` was the *total*
+animation duration, not the frame's. They coincide on a one-frame GIF, which is
+how it went unnoticed. Nothing on screen reported a single frame's timing at
+all, so Matthew was right that it was missing even though a number was sitting
+right there.
+
+**The scope rule took two goes and both halves matter.** The menu op reads "no
+selection" as "all frames", which is fine behind a dialog and wrong for a box
+that sits next to the frame counter reading "this frame". So: selection, or the
+playhead frame, never everything.
+
+Then the tests found the second half. Opening a file selects frame 0, and
+`seek`/`step` deliberately leave the selection alone — so arrow to frame 3 and
+frame 0 is still selected. A box keyed on the selection alone would have
+reported and edited frame 0's delay while the preview *and* the status line both
+showed frame 3. Now the selection counts only when the playhead is standing
+inside it. I found that because a test failed for what looked like a boring
+fixture reason (`delay_targets == (0,)`, expected `(2,)`) and was worth reading
+properly instead of patching the test.
+
+**A decline the timing ops never had.** Every other op family returns the same
+document when nothing changed, so `run_op` says "nothing to do" instead of
+pushing an identity snapshot onto undo. Both timing ops did `replace(doc, ...)`
+unconditionally. Invisible for three milestones, because the only way in was a
+dialog and nobody opens one to retype the value already in it — an inline box
+asks on every focus-out. `_retimed` compares *results*, not requests, so "typed
+103ms, already 100ms" is caught too.
+
+**Two tests with no teeth, caught by mutation.** The obvious check — "an
+unchanged commit doesn't change `undo_label`" — passed against a build with the
+decline removed, because the previous edit was also a delay edit and the label
+read the same either way. Making the labels differ *still* didn't help: with the
+frontend guard and the op decline both present, no undo entry appears in any of
+the three worlds, so the assertion couldn't distinguish them at all. The display
+test now asserts the one thing it can actually see (reaching the op would print
+"nothing to do"), and the decline is covered headlessly, which is its proper
+layer. Verified by mutating each guard separately.
+
+**The timeline labels are the surface that earns its keep.** A number in a box
+tells you about one frame; a row of numbers tells you *which* frame is wrong.
+On a 100/100/800/100/40/100 test GIF the 800 and the 40 jump straight out of the
+strip. Drawn inside `_draw_slot`, so they inherit the virtualisation for free.
+
+**Closed a long-deferred item while here:** `default_params` now seeds the Set
+Delay dialog from the frames it would change, instead of a static 100ms. Mixed
+selections seed from the shortest — retiming a mixed run is nearly always about
+slowing part of it down, and the minimum is a delay some frame actually has
+rather than a number invented for the box.
+
+**Numbers:** 452 headless (was 426), Xvfb smoke 224 checks (was 211). Four
+mutations confirmed to break the new checks — the scope ignoring the playhead,
+the scope falling back to all frames, the timing ops losing their decline, and a
+mixed selection showing one frame's value instead of blank — plus the two
+teethless checks above, each re-verified after being rewritten.
+
+**Handover**
+
+- The box means "the selected frames, if you're standing in the selection;
+  otherwise this frame". The label tells you which — it reads "Frame delay
+  (4 frames)" when it would change four.
+- Type 333 and you get 330; type 1 and you get 20. GIF quantises to 10ms with a
+  20ms floor, and the box shows what landed rather than what you typed.
+- Timeline labels show ms under a second and seconds above it.

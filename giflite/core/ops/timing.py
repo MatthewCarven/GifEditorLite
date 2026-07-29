@@ -22,6 +22,26 @@ def _targets(doc: Document, sel: Selection) -> frozenset[int]:
     return sel.indices if sel else frozenset(range(len(doc.frames)))
 
 
+def _retimed(doc: Document, sel: Selection, frames) -> Document:
+    """The new document, or the *same* one if the retiming changed nothing.
+
+    The decline convention every other op family already follows (crop, delete,
+    the paint ops): returning the same object makes `run_op` report "nothing to
+    do" instead of pushing an identity snapshot onto the undo stack.
+
+    These two ops were the exception, and it went unnoticed while the only way
+    in was a menu and a dialog -- you rarely open a dialog to retype the value
+    that is already there. An inline delay box asks the question on every commit,
+    which is how this surfaced. Durations are quantised on the way in, so this
+    also catches "typed 103ms, already 100ms", where the *request* differs but
+    the result does not.
+    """
+    if all(new is old or new.duration_ms == old.duration_ms
+           for new, old in zip(frames, doc.frames)):
+        return doc
+    return replace(doc, frames=frames)
+
+
 @register_op
 class SetDelay:
     id = "timing.set_delay"
@@ -33,13 +53,27 @@ class SetDelay:
         IntParam("delay_ms", "Delay per frame", default=100, min=MIN_DURATION_MS, max=60000, unit="ms"),
     )
 
+    def default_params(self, doc: Document, sel: Selection) -> dict:
+        """Seed the dialog with what the targets already hold, so the user edits
+        from reality rather than from a static 100ms.
+
+        When they disagree, the shortest wins -- not the first, and not the
+        average. Retiming a mixed run is nearly always about *slowing part of it
+        down*, so the smallest value is the one you are most likely adjusting
+        away from, and it is the only choice that is a real delay some frame
+        actually has rather than a number invented for the box.
+        """
+        targets = _targets(doc, sel)
+        delays = [f.duration_ms for i, f in enumerate(doc.frames) if i in targets]
+        return {"delay_ms": min(delays)} if delays else {}
+
     def apply(self, doc: Document, sel: Selection, delay_ms: int = 100, **_) -> OpResult:
         targets = _targets(doc, sel)
         frames = tuple(
             f.with_duration(delay_ms) if i in targets else f
             for i, f in enumerate(doc.frames)
         )
-        return OpResult(replace(doc, frames=frames), sel)
+        return OpResult(_retimed(doc, sel, frames), sel)
 
 
 @register_op
@@ -64,4 +98,4 @@ class ScaleSpeed:
             f.with_duration(f.duration_ms / factor) if i in targets else f
             for i, f in enumerate(doc.frames)
         )
-        return OpResult(replace(doc, frames=frames), sel)
+        return OpResult(_retimed(doc, sel, frames), sel)

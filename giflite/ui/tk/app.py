@@ -18,7 +18,7 @@ from giflite.app import events as ev
 from giflite.app.cache import ThumbnailCache
 from giflite.app.controller import AppController
 from giflite.core.io import open_filter, save_filter
-from giflite.core.model import Selection
+from giflite.core.model import MIN_DURATION_MS, Selection
 from giflite.core.ops import get_op, menu_groups, op_params
 from giflite.ui.base import Frontend
 from giflite.ui.tk.canvas import PreviewCanvas
@@ -129,6 +129,9 @@ class MainWindow:
         self._active_tool = None
         self._fg_color = (0, 0, 0, 255)
         self._brush_size = 4
+        # Set before _build_body: the delay box's <FocusOut> can fire while the
+        # window is still being assembled, and _commit_delay reads this first.
+        self._refreshing_delay = False
 
         self._build_menu()
         self._build_body()
@@ -428,6 +431,32 @@ class MainWindow:
         self._tolerance_box = ttk.Spinbox(size_row, from_=0, to=255, width=4,
                                           textvariable=self._tolerance_var)
         self._tolerance_box.pack(side="left")
+
+        ttk.Separator(self.side_panel, orient="horizontal").pack(
+            side="top", fill="x", pady=8)
+
+        # ---- per-frame timing ----
+        # The fast path to `timing.set_delay`, which until now was a menu item
+        # and a dialog. Retiming a frame is the correct way to hold a pose;
+        # duplicating frames to do it bloats the file and multiplies the work of
+        # every later edit, so the control for it should be at least as reachable
+        # as the duplicate button.
+        self._delay_label = ttk.Label(self.side_panel, text="Frame delay")
+        self._delay_label.pack(side="top", anchor="w")
+        delay_row = ttk.Frame(self.side_panel)
+        delay_row.pack(side="top", fill="x", pady=(2, 0))
+        self._delay_var = tk.StringVar(value="")
+        self._delay_box = ttk.Spinbox(delay_row, from_=MIN_DURATION_MS, to=60000,
+                                      increment=10, width=7,
+                                      textvariable=self._delay_var)
+        self._delay_box.pack(side="left")
+        ttk.Label(delay_row, text="ms").pack(side="left", padx=(4, 0))
+        # Commit on Enter or on leaving the box -- never per keystroke, which
+        # would push "1", "10", "100" onto the undo stack as three edits. The
+        # spinbox arrows commit too, via the same handler.
+        self._delay_box.configure(command=self._commit_delay)
+        self._delay_box.bind("<Return>", lambda _e: self._commit_delay())
+        self._delay_box.bind("<FocusOut>", lambda _e: self._commit_delay())
 
         self._build_view_section()
 
@@ -774,6 +803,56 @@ class MainWindow:
                           int(rgba[3]) if len(rgba) > 3 else 255)
         self._swatch.configure(bg=_rgb_hex(self._fg_color))
 
+    # ---- per-frame delay -------------------------------------------------
+
+    def _commit_delay(self) -> None:
+        """Apply what's in the box, if it is a number and it differs.
+
+        Guarded three ways, because this fires on every focus-out:
+
+        - garbage or an empty box is ignored rather than treated as zero;
+        - a value equal to what the targets already hold is skipped here, so a
+          click through the box never touches history. The op declines too, but
+          declining still costs a status message saying "nothing to do", which
+          would be noise for a box the user merely tabbed past;
+        - `_refreshing_delay` stops the refresh below from re-entering this.
+        """
+        if self._refreshing_delay or self.controller.doc is None:
+            return
+        try:
+            wanted = int(float(self._delay_var.get()))
+        except (TypeError, ValueError):
+            self._refresh_delay_box()   # put the real value back
+            return
+        if wanted == self.controller.target_delay_ms:
+            return
+        self.controller.set_frame_delay(wanted)
+        # The op quantises to 10ms and floors at MIN_DURATION_MS, so what landed
+        # may not be what was typed. Showing the result rather than the request
+        # is the only honest thing to put in the box.
+        self._refresh_delay_box()
+
+    def _refresh_delay_box(self) -> None:
+        """Point the box and its label at the current targets.
+
+        Empty when the selected frames disagree: a single number would be wrong
+        for most of them, and blank is the one display that isn't a lie. The
+        label carries the count, so "Frame delay (4 frames)" tells you what
+        typing here would do *before* you type it -- which is the whole reason
+        the inline path is scoped to the selection rather than to everything.
+        """
+        self._refreshing_delay = True
+        try:
+            targets = self.controller.delay_targets
+            shared = self.controller.target_delay_ms
+            self._delay_var.set("" if shared is None else str(shared))
+            suffix = f" ({len(targets)} frames)" if len(targets) > 1 else ""
+            self._delay_label.configure(text=f"Frame delay{suffix}")
+            self._delay_box.configure(
+                state="normal" if self.controller.doc is not None else "disabled")
+        finally:
+            self._refreshing_delay = False
+
     def _on_size_change(self) -> None:
         try:
             self._brush_size = max(1, min(int(float(self._size_var.get())), 256))
@@ -925,6 +1004,9 @@ class MainWindow:
     def _on_selection_changed(self, selection=None, **_) -> None:
         if selection is not None:
             self.timeline.set_selection(selection)
+        # The delay box is scoped to the selection, so its value and its
+        # "(N frames)" label both change when the selection does.
+        self._refresh_delay_box()
 
     def _on_playhead_moved(self, index: int = 0, **_) -> None:
         self.timeline.set_index(index)
@@ -954,6 +1036,7 @@ class MainWindow:
             self.canvas.show_placeholder(EMPTY_TEXT)
             self.status.configure(text="Ready")
             self._refresh_view_controls()
+            self._refresh_delay_box()
             return
         doc = self.controller.doc
         key = doc[self.controller.index].image_uid if doc is not None else None
@@ -975,6 +1058,7 @@ class MainWindow:
         self.speed.configure(state="readonly")
         self.pingpong_check.configure(state="normal" if self.controller.can_play else "disabled")
         self.counter.configure(text=f"Frame {self.controller.index + 1} of {len(doc)}")
+        self._refresh_delay_box()
 
     def _summary(self) -> str:
         """Derived from state, not from a remembered event, so it can't drift
@@ -982,9 +1066,14 @@ class MainWindow:
         doc = self.controller.doc
         if doc is None:
             return "Ready"
+        # The frame's own delay *and* the total. Only the total was here
+        # before, which reads as the frame's on a one-frame GIF and is silently
+        # a different number on any other.
+        delay = self.controller.current_delay_ms
         return (
             f"{doc.size[0]}x{doc.size[1]}   |   "
-            f"{doc.total_duration_ms / 1000:.2f}s   |   "
+            f"frame {delay} ms   |   "
+            f"total {doc.total_duration_ms / 1000:.2f}s   |   "
             f"{_format_bytes(doc.nbytes_estimate)}   |   "
             # Fit reports its percentage too: "Fit" alone leaves you unable to
             # tell a 40% view from a 400% one, which matters most on exactly the
