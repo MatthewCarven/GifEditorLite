@@ -8,6 +8,14 @@
 # Python, Tk and Windows all read LF happily, so pinning to LF costs nothing.
 * text=auto eol=lf
 
+# ...with one exception. cmd.exe parses batch files by seeking through them
+# byte by byte, and with LF-only endings it can mis-read labels, `goto` and
+# `( ... )` blocks. A one-line launcher survives it; the same file with a
+# `pause` and an `if` in it may not, and it would fail only after a fresh
+# clone -- working on the machine that wrote it and broken everywhere else.
+*.cmd text eol=crlf
+*.bat text eol=crlf
+
 # Binary — never touch these.
 *.gif binary
 *.png binary

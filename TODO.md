@@ -6,6 +6,9 @@
 - [x] M0 committed (`95cf542`), line endings pinned to LF (`92fd44e`)
 - [ ] Sweep `tmp_obj_*` cruft from `.git\objects` after a reboot frees the handles (harmless if left)
 - [x] Crop and both painting slices are committed (HEAD `01feb8a`) — that old "commit the crop feature" item was stale
+- [ ] Renormalise `start.cmd` to CRLF after the `.gitattributes` fix:
+      `git add --renormalize . ; git commit -m "Keep batch files CRLF"`
+      (cmd.exe mis-parses labels/goto/blocks in LF-only .cmd files)
 - [x] Pixel grid committed (`328ccd7`) — a stale `.git/index.lock` had to be deleted first, as usual
 - [x] Fill + shapes + the palette move committed and pushed (`c0f18a4`)
 - [ ] Eyeball the new side panel on Windows — the preview no longer widens when
