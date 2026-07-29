@@ -21,6 +21,12 @@ from typing import Any, Callable
 DOC_CHANGED = "doc_changed"  # (doc, selection, index, reason)
 
 SELECTION_CHANGED = "selection_changed"  # (selection)  -- selection-only edits
+# (region) -- the rectangular pixel selection, or None. Its own event rather
+# than a field on SELECTION_CHANGED because the two are independent: a region
+# outlives every frame you scrub past, and a frame selection outlives every
+# region you draw. Folding them together would mean each one redrawing for the
+# other's changes.
+REGION_CHANGED = "region_changed"
 PLAYHEAD_MOVED = "playhead_moved"  # (index)  -- playback tick or scrub
 PLAYBACK_STATE = "playback_state"  # (playing)  -- play/pause, incl. auto-stop
 TITLE_CHANGED = "title_changed"  # (path, dirty)  -- frontend formats the string

@@ -29,6 +29,22 @@ from giflite.core.params import Param
 class OpResult:
     doc: Document
     selection: Selection
+    # Where the playhead belongs afterwards, or None for "wherever the rule
+    # puts it" (the controller sends it to `selection.first`).
+    #
+    # That rule is right for the ops it was written for -- after moving or
+    # duplicating frames you want to be looking at what moved -- but it is a
+    # rule about *frames that shifted*, and an op that edits pixels in place
+    # shifts nothing. The painting ops have been working around it since M4 by
+    # returning `Selection.single(index)`, which keeps the playhead put at the
+    # cost of throwing away the user's frame selection. That trade is invisible
+    # while an op edits one frame and unacceptable once one edits many: pasting
+    # into frames 0-20 while standing on frame 7 must not yank the playhead to
+    # frame 0, and must not leave only one frame selected either.
+    #
+    # So an op may now simply say where the playhead goes. Optional, because
+    # every existing op is correct without it.
+    index: int | None = None
 
 
 @runtime_checkable

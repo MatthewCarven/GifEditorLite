@@ -19,6 +19,7 @@ from giflite.ui.base import Frontend
 ALL_EVENTS = (
     ev.DOC_CHANGED,
     ev.SELECTION_CHANGED,
+    ev.REGION_CHANGED,
     ev.PLAYHEAD_MOVED,
     ev.PLAYBACK_STATE,
     ev.TITLE_CHANGED,

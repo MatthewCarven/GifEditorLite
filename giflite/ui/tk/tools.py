@@ -24,6 +24,7 @@ unchanged. The context provides:
     tolerance   -> int              how near a colour must be for the fill bucket
     commit(op_id, **params)         run a core op (undoable)
     pick_color(x, y)                read a pixel and adopt it as the fg colour
+    set_region(region)              select a rectangle of canvas, or None
     preview_stroke(points, erase)   show/refresh the provisional stroke overlay
     preview_rect(box)               show/refresh a marquee, box in image pixels
     clear_preview()                 drop any overlay
@@ -57,6 +58,7 @@ class ToolContext(Protocol):
     def tolerance(self) -> int: ...
     def commit(self, op_id: str, **params) -> None: ...
     def pick_color(self, x: int, y: int) -> None: ...
+    def set_region(self, region: tuple[int, int, int, int] | None) -> None: ...
     def preview_stroke(self, points, erase: bool = False) -> None: ...
     def preview_rect(self, box: tuple[int, int, int, int]) -> None: ...
     def clear_preview(self) -> None: ...
@@ -209,6 +211,74 @@ class CropTool(Tool):
         ctx.clear_preview()
 
 
+class SelectTool(Tool):
+    """Rubber-band a rectangle of canvas. Commits no op.
+
+    The second tool after the eyedropper that changes state without touching
+    the document, and the first whose state *persists*: a stroke's points and a
+    crop's anchor die on release, but a region outlives the gesture, the frame
+    you drew it on, and every edit that doesn't invalidate it. That is why it
+    goes to the controller rather than staying here (session state,
+    ARCHITECTURE.md 9), and why the canvas has to draw its marquee on every
+    redraw rather than as gesture state that a redraw clears.
+
+    `coords = "edge"`, like crop and unlike the brushes: a region is described
+    by the lines between pixels, and copying "pixels 2 to 7" is the same
+    rectangle crop would take (ARCHITECTURE.md 19.1.1). The two even share the
+    argument list, which is what would make a future Crop-to-Selection a
+    one-liner rather than a second convention.
+
+    A click with no drag *clears* the region rather than declining like crop
+    does. Crop declines because an empty crop box has no sensible meaning;
+    here it has an obvious one -- clicking off a selection to dismiss it is
+    what a click on empty canvas means in every editor -- and `Region`
+    already reports a degenerate drag as None, so this is one branch, not two.
+    """
+
+    id = "select"
+    label = "Select"
+    hint = ("drag to select an area   |   Ctrl+C copy, Ctrl+X cut, Ctrl+V paste"
+            "   |   click or Esc to clear")
+    coords = "edge"
+
+    def __init__(self) -> None:
+        self._anchor: tuple[int, int] | None = None
+
+    @property
+    def is_gesturing(self) -> bool:
+        return self._anchor is not None
+
+    def on_press(self, ctx: ToolContext, x: int, y: int) -> None:
+        self._anchor = (x, y)
+        ctx.preview_rect((x, y, x, y))
+
+    def on_drag(self, ctx: ToolContext, x: int, y: int) -> None:
+        if self._anchor is None:
+            return
+        ctx.preview_rect((self._anchor[0], self._anchor[1], x, y))
+
+    def on_release(self, ctx: ToolContext, x: int, y: int) -> None:
+        anchor, self._anchor = self._anchor, None
+        # The provisional marquee goes; the committed one is redrawn by the
+        # canvas from the region itself, so for a moment there are neither and
+        # then there is one. Clearing after setting the region would delete the
+        # wrong overlay -- these are two different mechanisms on purpose.
+        ctx.clear_preview()
+        if anchor is None:
+            return
+        left, right = sorted((anchor[0], x))
+        top, bottom = sorted((anchor[1], y))
+        width, height = right - left, bottom - top
+        if width < 1 or height < 1:
+            ctx.set_region(None)  # a click dismisses the selection
+            return
+        ctx.set_region((left, top, width, height))
+
+    def on_cancel(self, ctx: ToolContext) -> None:
+        self._anchor = None
+        ctx.clear_preview()
+
+
 class FillTool(Tool):
     """Flood-fill the region under the click. Commits on *press*.
 
@@ -342,7 +412,7 @@ def default_tools() -> dict[str, Tool]:
     """The tool set, keyed by id. One instance each (they hold only transient
     per-gesture state, reset on press). Order here is palette order."""
     return {t.id: t for t in (
-        CropTool(),
+        SelectTool(), CropTool(),
         PencilTool(), EraserTool(), FillTool(),
         LineTool(), RectTool(), EllipseTool(),
         EyedropperTool(),

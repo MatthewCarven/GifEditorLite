@@ -217,3 +217,70 @@ class Selection:
         kept = frozenset(i for i in self.indices if 0 <= i < frame_count)
         anchor = self.anchor if self.anchor in kept else (min(kept) if kept else None)
         return Selection(kept, anchor)
+
+
+@dataclass(frozen=True, slots=True)
+class Region:
+    """Which *pixels* the next operation applies to -- Selection's other axis.
+
+    Selection answers "which frames", this answers "which part of the canvas",
+    and the two are deliberately independent: copying a sprite out of frame 7
+    and stamping it into frames 0-20 is one region and twenty-one frames.
+
+    **Edge coordinates, like a crop box and unlike a shape.** `x`/`y` are the
+    lines between pixels, and `width`/`height` count pixels, so a region is
+    exactly the argument list `canvas.crop` already takes and `SelectTool`
+    can declare `coords = "edge"` for the same reason `CropTool` does
+    (ARCHITECTURE.md 19.1.1). The conversion to the pixel-inclusive convention
+    the shape masks use happens in one named place, `_region_mask`, rather than
+    being open-coded wherever a region meets a drawing call.
+
+    Lives in core beside Selection rather than in the frontend because it is
+    session state a second frontend would otherwise re-derive -- and because
+    clamping it to a canvas that just got smaller is arithmetic, not UI.
+    """
+
+    x: int
+    y: int
+    width: int
+    height: int
+
+    def __bool__(self) -> bool:
+        return self.width > 0 and self.height > 0
+
+    @property
+    def box(self) -> tuple[int, int, int, int]:
+        """(left, top, right, bottom) with right/bottom *exclusive* -- what
+        `Image.crop` wants, and what the marquee is drawn corner to corner."""
+        return (self.x, self.y, self.x + self.width, self.y + self.height)
+
+    @classmethod
+    def from_corners(cls, x0: int, y0: int, x1: int, y1: int) -> "Region | None":
+        """Build from two dragged corners in either order. None for a click.
+
+        A zero-width or zero-height drag is not a tiny region, it is *no*
+        region -- the same call `CropTool` makes about a stray click, for the
+        same reason: an empty rectangle is never what someone meant.
+        """
+        left, right = sorted((int(x0), int(x1)))
+        top, bottom = sorted((int(y0), int(y1)))
+        if right - left < 1 or bottom - top < 1:
+            return None
+        return cls(left, top, right - left, bottom - top)
+
+    def clamped(self, size: tuple[int, int]) -> "Region | None":
+        """Trim to a canvas of `size`, or None if nothing is left inside it.
+
+        Called whenever the canvas changes shape -- crop, resize, rotate -- so
+        a region selected before the edit cannot outlive the pixels it named.
+        Returning None rather than an empty Region keeps "there is no region"
+        a single representation instead of two that have to agree.
+        """
+        width, height = size
+        left = max(0, min(self.x, width))
+        top = max(0, min(self.y, height))
+        right = max(left, min(self.x + self.width, width))
+        bottom = max(top, min(self.y + self.height, height))
+        if right - left < 1 or bottom - top < 1:
+            return None
+        return Region(left, top, right - left, bottom - top)

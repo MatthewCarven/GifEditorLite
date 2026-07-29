@@ -1147,3 +1147,92 @@ floating. The wrinkle to design carefully: a region selection is the first piece
 of UI state here that *persists* rather than being a gesture, so it belongs in
 the controller beside the frame `Selection`, and the canvas gains its first
 non-provisional overlay.
+
+## 2026-07-29 (later) — Select, copy, cut, paste-in-place (slice 1)
+
+Design in ARCHITECTURE §26. Three decisions were Matthew's, asked before any
+code: cut clears only the frame you are on, paste reuses the delay box's scope
+rule, and slice 2 (floating paste) is a separate session.
+
+**The shape of it.** `Region` joined `Selection` in `core/model.py` — same
+module, other axis: which pixels rather than which frames. Edge coordinates, so
+it is literally the argument list `canvas.crop` takes, which bought the marquee
+needing no `preview_box` correction and a test asserting that the same drag
+through `SelectTool` and `CropTool` gives the same rectangle. Region and
+clipboard live in the controller as session state; `paint.cut` and `paint.paste`
+are two more mask generators through the existing commit path.
+
+**Three things this slice found rather than built.**
+
+*1. A premultiplication bug that had been correct by accident.* `_composite`
+built its stroke with `Image.paste(colour, mask)`. `paste` with a mask blends
+every channel — `dst*(1-m) + src*m` — so a mask of 128 produced
+`(r/2, g/2, b/2, 128)`: premultiplied colour in a straight-alpha image, which
+`alpha_composite` then multiplies by the alpha *again*. Black at half coverage
+over white came out around 64 instead of 128.
+
+It never mattered, because every mask in this codebase is hard: 0 or 255, and at
+255 the blend is an exact copy. §19 promised that a soft or anti-aliased brush
+would be "a feathered mask and nothing else changes", and this is the line that
+would have made that false — the promise would have been broken by the first
+person to implement the thing it was written to reassure them about. A pasted
+sprite with a partly transparent edge is the first soft mask the project has
+ever produced. Fixed by setting the stroke's alpha rather than blending it in;
+all 502 existing tests unmoved, which is the evidence that hard masks are
+genuinely unaffected.
+
+*2. The playhead rule had been worked around, not satisfied.* `run_op` sends the
+playhead to `result.selection.first`, and the painting ops have quietly returned
+`Selection.single(index)` since M4 to stop it moving — throwing away the user's
+frame selection to do it. Invisible for a one-frame op; fatal for paste, where
+collapsing the selection means the *second* paste hits one frame instead of
+twenty-one. `OpResult` gained an optional `index`. Small change, and it turns a
+workaround that was never written down into something an op can just say.
+
+*3. Ctrl+C belongs to whatever is being typed in.* `_bind_bare_key` guarded
+unmodified keys on the theory that only those collide with text entry. They are
+not: `bind_all` fires after the widget's class binding, so Ctrl+C in the Size
+spinbox would have copied the number *and* replaced the image clipboard with a
+rectangle of canvas — with nothing on screen reporting what the clipboard holds,
+so it would only surface as a wrong paste some minutes later. Renamed
+`_bind_guarded_key`; the real rule is "does the focused widget have a better
+claim on this keystroke", and the modifier was never the test. Smoke check added
+in both directions (in the box: no; on the canvas: yes).
+
+**Esc is now four stages** — gesture, tool, region, frames — ordered by how
+recent each commitment is. Region before frames because the region is the thing
+you can see on the canvas you are looking at.
+
+**Deliberately not done:** `Delete` still deletes frames with a region selected,
+rather than clearing the region's pixels. Arguably a footgun; changing what an
+existing destructive shortcut does is not a change to make in passing. Noted in
+TODO.
+
+**Found while screenshotting, pre-existing:** at the 480x400 minimum window the
+Frame delay section is silently amputated by `pack` — §23.5 happening to a
+section that has no `_view_section_fits`-style guard. Measured against the
+palette at both nine and ten tools and it is identical, so this slice did not
+cause it and did not worsen it (nine and ten tools both fill five rows of two).
+In TODO.
+
+**Numbers:** 579 headless (was 502), 269 smoke checks (was 232). Eight
+production mutations confirmed to break the new checks: the premultiply revert,
+`run_op` ignoring `OpResult.index`, `Region.clamped` as a no-op,
+`_apply_mask_frames` rewriting unchanged frames, the region clamp dropped from
+`_emit_doc_changed`, `SelectTool` asking for pixel coordinates, cut spreading to
+every target frame, and paste ignoring `frame_targets`.
+
+One test wrote itself wrong and is worth remembering: the first `region_items()`
+in the smoke test filtered marquee rectangles on "has a dash", which finds one
+of the two ants rectangles (the other is the solid dark one underneath) and
+would have passed while asserting half of what it named. Filtering by outline
+colour fixed it. Same failure mode as the `coords` test that stopped covering
+four tools without going red.
+
+**Next session:** slice 2 — the floating paste. Drag to place, commit or cancel.
+The pieces it needs already exist: `paint.paste` takes an arbitrary `(x, y)`, the
+canvas can draw a persistent overlay from state, and `Tool.is_gesturing` /
+`on_cancel` already give a mode something to hang from. The new thing is that a
+floating paste is a state the *document* is not yet in — pixels shown but not
+committed — which is the first thing here that isn't either committed or a
+gesture.

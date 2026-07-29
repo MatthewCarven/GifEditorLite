@@ -29,7 +29,7 @@ from giflite.core.history import History, Snapshot
 from giflite.core.io import format_for, reader_for, writer_for
 from giflite.core.io.gif_read import probe_gif
 from giflite.core.io.gif_write import count_merges
-from giflite.core.model import Document, Selection
+from giflite.core.model import Document, Region, Selection
 from giflite.core.ops import get_op  # importing this also registers the ops
 from giflite.core.playback import MAX_TICK_MS, PlaybackClock
 
@@ -67,6 +67,16 @@ class AppController:
         self._clock = PlaybackClock()
         self._playing = False
         self._history = History()
+        # The rectangular pixel selection, beside the frame Selection. Session
+        # state, not document state: it is not undoable, it is not saved, and
+        # it survives every edit that doesn't invalidate it.
+        self._region: Region | None = None
+        # The clipboard, and where its pixels came from. Deliberately *not*
+        # cleared by `open`: copying a sprite out of one GIF and stamping it
+        # into another is a thing people do, and a clipboard that emptied
+        # whenever the document changed would be one nobody could plan around.
+        self._clipboard: Image.Image | None = None
+        self._clipboard_origin: tuple[int, int] = (0, 0)
 
     # ---- readable state --------------------------------------------------
 
@@ -102,6 +112,11 @@ class AppController:
         """A display name for a document with no path (an imported folder), or
         None. The frontend prefers `path.name` when there is a path."""
         return self._source_label
+
+    @property
+    def region(self) -> Region | None:
+        """The selected rectangle of canvas, or None. See core.model.Region."""
+        return self._region
 
     @property
     def dirty(self) -> bool:
@@ -186,6 +201,7 @@ class AppController:
         self._source_label = None    # it has a real path now
         self._index = 0
         self._selection = Selection.single(0)
+        self.set_region(None)  # a region names pixels in the document it left with
         self._clock.loop = doc.loop
         # A freshly opened file is the baseline saved state.
         self._history.reset(Snapshot(doc, self._selection, 0, "Open"))
@@ -236,6 +252,7 @@ class AppController:
         self._source_label = folder.name
         self._index = 0
         self._selection = Selection.single(0)
+        self.set_region(None)  # a region names pixels in the document it left with
         self._clock.loop = doc.loop
         self._history.reset(Snapshot(doc, self._selection, 0, "Import"))
         self._emit_doc_changed("open")   # same shape of change as opening a file
@@ -284,6 +301,7 @@ class AppController:
         self._source_label = None
         self._index = 0
         self._selection = Selection.empty()
+        self.set_region(None)
         self._history.clear()
         self._emit_doc_changed("close")
         self.events.emit(ev.TITLE_CHANGED, path=None, dirty=False)
@@ -428,7 +446,13 @@ class AppController:
         self._history.amend_current(self._selection, self._index)
         self._doc = result.doc
         self._selection = result.selection
-        self._index = self._clamp(result.selection.first if result.selection else self._index)
+        # An op may name the playhead itself; otherwise it goes to the start of
+        # whatever is now selected. See OpResult.index for why the second rule
+        # is not enough on its own.
+        if result.index is not None:
+            self._index = self._clamp(result.index)
+        else:
+            self._index = self._clamp(result.selection.first if result.selection else self._index)
         self._history.push(Snapshot(self._doc, self._selection, self._index, op.label))
         self._emit_doc_changed(f"op:{op_id}")
         self.events.emit(ev.TITLE_CHANGED, path=self._path, dirty=self.dirty)
@@ -450,6 +474,97 @@ class AppController:
         self._index = snap.index
         self._emit_doc_changed(reason)
         self.events.emit(ev.TITLE_CHANGED, path=self._path, dirty=self.dirty)
+
+    # ---- region and clipboard --------------------------------------------
+    #
+    # Both are *session* state, which is why they are here and not in the
+    # frontend and not in the Document (ARCHITECTURE.md 9). A region is not
+    # undoable -- undoing a paste should give you back your pixels, not
+    # rearrange what you had selected -- and a clipboard is not part of any
+    # document, or copying between two files would be impossible to express.
+    #
+    # The split with the frontend is the same one crop and save already use:
+    # this owns the fact and the arithmetic, the frontend owns the gesture that
+    # produces it and the marquee that shows it.
+
+    def set_region(self, region: Region | None) -> None:
+        """Select a rectangle of canvas, or None to clear it.
+
+        Clamped on the way in, so a region can never name pixels outside the
+        document -- a marquee dragged past the edge of a zoomed-out canvas is
+        the ordinary case, not an error.
+        """
+        if region is not None and self._doc is not None:
+            region = region.clamped(self._doc.size)
+        elif self._doc is None:
+            region = None
+        if region == self._region:
+            return
+        self._region = region
+        self.events.emit(ev.REGION_CHANGED, region=region)
+
+    @property
+    def can_copy(self) -> bool:
+        return self._doc is not None and self._region is not None
+
+    @property
+    def can_paste(self) -> bool:
+        return self._doc is not None and self._clipboard is not None
+
+    @property
+    def clipboard_size(self) -> tuple[int, int] | None:
+        """The clipboard's dimensions, for a status line or a menu label."""
+        return None if self._clipboard is None else self._clipboard.size
+
+    def copy_region(self) -> bool:
+        """Take the region's pixels from the frame the playhead is on.
+
+        One frame, because there is only one set of pixels a clipboard can
+        hold. `.copy()` rather than the bare `crop` result: Pillow's crop is
+        lazy about materialising, and a clipboard is exactly the sort of thing
+        that outlives the document it was taken from.
+        """
+        if not self.can_copy:
+            return False
+        image = self._doc[self._clamp(self._index)].image
+        self._clipboard = image.crop(self._region.box).copy()
+        self._clipboard_origin = (self._region.x, self._region.y)
+        w, h = self._clipboard.size
+        self.events.emit(ev.STATUS, message=f"Copied {w}x{h}")
+        return True
+
+    def cut_region(self) -> bool:
+        """Copy the region, then clear it -- on the playhead frame only.
+
+        The copy happens first and unconditionally. If the region was already
+        empty the op declines and says "nothing to do", but the clipboard still
+        holds what was there, which is the honest outcome: cutting nothing
+        copies nothing, and that is not a failure.
+        """
+        if not self.copy_region():
+            return False
+        region = self._region
+        self.run_op("paint.cut", index=self._index, x=region.x, y=region.y,
+                    width=region.width, height=region.height)
+        return True
+
+    def paste(self) -> bool:
+        """Paste the clipboard where it was copied from, into `frame_targets`.
+
+        In place, so a cut and an immediate paste is an exact undo of the cut
+        by hand, and so stamping across frames puts the sprite in the same spot
+        on every one of them -- which is the entire point of stamping across
+        frames. Moving it is slice 2's job (a floating paste), and until that
+        exists the honest thing is to land it somewhere predictable rather than
+        somewhere convenient.
+        """
+        if not self.can_paste:
+            return False
+        x, y = self._clipboard_origin
+        targets = self.frame_targets
+        self.run_op("paint.paste", index=self._index, frames=targets,
+                    image=self._clipboard, x=x, y=y)
+        return True
 
     # ---- playback --------------------------------------------------------
 
@@ -557,8 +672,14 @@ class AppController:
         return self._doc[self._clamp(self._index)].duration_ms
 
     @property
-    def delay_targets(self) -> tuple[int, ...]:
-        """The frames a delay edit would apply to, in order.
+    def frame_targets(self) -> tuple[int, ...]:
+        """The frames an inline, non-dialog edit applies to, in order.
+
+        Written for the delay box and named `frame_targets` for it, until paste
+        turned out to want the identical rule -- "every selected frame" is what
+        stamping a sprite across an animation means, and the qualification
+        below is exactly as necessary there. A scope rule with two callers is a
+        policy; renaming it says so.
 
         **The selection, or just the playhead frame -- never everything.** The
         menu op treats "no selection" as "the whole animation", which is right
@@ -590,14 +711,14 @@ class AppController:
         """
         if self._doc is None:
             return None
-        delays = {self._doc[i].duration_ms for i in self.delay_targets}
+        delays = {self._doc[i].duration_ms for i in self.frame_targets}
         return delays.pop() if len(delays) == 1 else None
 
     def set_frame_delay(self, delay_ms: int) -> None:
-        """Retime `delay_targets` to `delay_ms`, as one undoable edit.
+        """Retime `frame_targets` to `delay_ms`, as one undoable edit.
 
         Runs the existing op rather than reimplementing it, by scoping the
-        selection to `delay_targets` first -- so quantisation, the 20ms floor,
+        selection to `frame_targets` first -- so quantisation, the 20ms floor,
         validation, history and the events all behave exactly as they do from
         the menu, and the frames retimed are exactly the ones the box said it
         would retime. A decline restores the selection, because a no-op should
@@ -606,7 +727,7 @@ class AppController:
         if self._doc is None:
             return
         before_sel, before_doc = self._selection, self._doc
-        targets = Selection(frozenset(self.delay_targets))
+        targets = Selection(frozenset(self.frame_targets))
         if targets != before_sel:
             self._selection = targets
         self.run_op("timing.set_delay", delay_ms=delay_ms)
@@ -640,6 +761,17 @@ class AppController:
         """
         self._index = self._clamp(self._index)
         self._selection = self._selection.clamped(self.frame_count)
+        # A region names pixels, so it survives a frame-count change untouched
+        # and has to be re-clamped whenever the *canvas* changes shape -- crop,
+        # resize, rotate. Same funnel as the selection, for the same reason:
+        # every path that can invalidate it passes through here, so there is one
+        # place to get right rather than one per op. It is trimmed rather than
+        # dropped when it still overlaps, because after a crop the part you were
+        # working on is usually still on screen.
+        was_region = self._region
+        if self._region is not None:
+            self._region = (self._region.clamped(self._doc.size)
+                            if self._doc is not None else None)
         durations = [f.duration_ms for f in self._doc] if self._doc else []
         self._clock.set_durations(durations)
         self._clock.seek(self._index)
@@ -650,3 +782,8 @@ class AppController:
             index=self._index,
             reason=reason,
         )
+        # After DOC_CHANGED, never before: a listener told the region shrank
+        # while it still held the old document would redraw the marquee against
+        # a canvas that no longer exists.
+        if self._region != was_region:
+            self.events.emit(ev.REGION_CHANGED, region=self._region)

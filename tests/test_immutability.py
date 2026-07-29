@@ -50,6 +50,14 @@ CASES = [
                      "size": 1, "color": (0, 255, 0, 255), "filled": True}),
     ("paint.shape", {"index": 2, "kind": "line", "x0": 0, "y0": 0, "x1": 6, "y1": 6,
                      "size": 3, "color": (0, 0, 255, 255)}),
+    ("paint.cut", {"index": 1, "x": 2, "y": 2, "width": 4, "height": 4}),
+    # Paste is the first op to write pixels into *several* frames from one call,
+    # so "did every source frame survive" is a question with more than one
+    # answer here -- and the clipboard image is a source too. Both frames in the
+    # selection are targets, deliberately.
+    ("paint.paste", {"index": 1, "frames": (1, 2),
+                     "image": Image.new("RGBA", (3, 3), (9, 9, 9, 255)),
+                     "x": 2, "y": 2}),
 ]
 
 

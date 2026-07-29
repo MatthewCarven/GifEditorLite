@@ -18,7 +18,7 @@ from giflite.app import events as ev
 from giflite.app.cache import ThumbnailCache
 from giflite.app.controller import AppController
 from giflite.core.io import format_for, open_filter, save_filter
-from giflite.core.model import MIN_DURATION_MS, Selection
+from giflite.core.model import MIN_DURATION_MS, Region, Selection
 from giflite.core.ops import get_op, menu_groups, op_params
 from giflite.ui.base import Frontend
 from giflite.ui.tk.canvas import PreviewCanvas
@@ -47,25 +47,27 @@ MINIMAP_HEIGHT = 120
 CURSOR_TOOL = "cursor"
 
 # Palette order, filling the two-column grid left-to-right. Cursor first because
-# it is the way *out* of a tool; the rest are grouped as marks (pencil, eraser,
-# fill), shapes (line, rect, ellipse), then the two that don't paint at all.
+# it is the way *out* of a tool, then Select and Crop -- the two that address a
+# rectangle rather than a mark -- then marks (pencil, eraser, fill), shapes
+# (line, rect, ellipse), and the one that doesn't paint at all.
 TOOL_BUTTONS = (
-    ("cursor", "Cursor"), ("crop", "Crop"),
-    ("pencil", "Pencil"), ("eraser", "Eraser"),
-    ("fill", "Fill"), ("line", "Line"),
-    ("rect", "Rect"), ("ellipse", "Ellipse"),
-    ("eyedropper", "Picker"),
+    ("cursor", "Cursor"), ("select", "Select"),
+    ("crop", "Crop"), ("pencil", "Pencil"),
+    ("eraser", "Eraser"), ("fill", "Fill"),
+    ("line", "Line"), ("rect", "Rect"),
+    ("ellipse", "Ellipse"), ("eyedropper", "Picker"),
 )
 
 # Bare-key shortcuts for the palette. B/E/I/C are the inherited ones (b for
-# brush, i for the picker -- both borrowed from every other editor); F/L/R/O are
-# the new ones and were checked against the existing bare keys, which are space,
-# the arrows, Home/End and Delete/BackSpace. All of them yield to a focused text
-# field via `_bind_bare_key`, or typing "4" then "e" in the Size box would
-# quietly swap your tool.
+# brush, i for the picker -- both borrowed from every other editor); F/L/R/O/S
+# are the new ones and were checked against the existing bare keys, which are
+# space, the arrows, Home/End and Delete/BackSpace. All of them yield to a
+# focused text field via `_bind_guarded_key`, or typing "4" then "e" in the Size
+# box would quietly swap your tool.
 TOOL_KEYS = (
-    ("c", "crop"), ("b", "pencil"), ("e", "eraser"), ("f", "fill"),
-    ("l", "line"), ("r", "rect"), ("o", "ellipse"), ("i", "eyedropper"),
+    ("s", "select"), ("c", "crop"), ("b", "pencil"), ("e", "eraser"),
+    ("f", "fill"), ("l", "line"), ("r", "rect"), ("o", "ellipse"),
+    ("i", "eyedropper"),
 )
 
 # Widget classes that own their keystrokes. Every bare-key shortcut below is
@@ -191,6 +193,17 @@ class MainWindow:
         self.edit_menu.add_command(label="Undo", accelerator="Ctrl+Z", command=self.controller.undo)
         self.edit_menu.add_command(label="Redo", accelerator="Ctrl+Shift+Z", command=self.controller.redo)
         self.edit_menu.add_separator()
+        # Region editing. The menu is where these are discoverable -- the
+        # shortcuts are the ones everybody already knows, but "cut what?" has a
+        # non-obvious answer here (a rectangle of canvas, not frames), and a
+        # greyed-out item that says why is the cheapest way to teach it.
+        self.edit_menu.add_command(label="Cut Area", accelerator="Ctrl+X",
+                                   command=self.cut_region)
+        self.edit_menu.add_command(label="Copy Area", accelerator="Ctrl+C",
+                                   command=self.copy_region)
+        self.edit_menu.add_command(label="Paste", accelerator="Ctrl+V",
+                                   command=self.paste_region)
+        self.edit_menu.add_separator()
         self.edit_menu.add_command(label="Select All", accelerator="Ctrl+A", command=self._select_all)
         self.edit_menu.add_command(label="Deselect", accelerator="Esc", command=self._clear_selection)
         menubar.add_cascade(label="Edit", menu=self.edit_menu)
@@ -251,12 +264,22 @@ class MainWindow:
         self.root.bind_all("<Control-s>", lambda _e: self.save_file())
         self.root.bind_all("<Control-Shift-S>", lambda _e: self.save_file_as())
         self.root.bind_all("<Control-w>", lambda _e: self.controller.close())
-        bind_key = self._bind_bare_key
+        bind_key = self._bind_guarded_key
         bind_key("<space>", self._on_space)
         bind_key("<Left>", lambda _e: self.controller.step(-1))
         bind_key("<Right>", lambda _e: self.controller.step(1))
         bind_key("<Home>", lambda _e: self.controller.seek(0))
         bind_key("<End>", lambda _e: self.controller.seek(self.controller.frame_count - 1))
+        # Cut / copy / paste. **Guarded, despite carrying a modifier.** The rule
+        # in §19.3 was written as "bare keys yield to text fields" and the real
+        # rule is "a keystroke something else has a better claim on yields to
+        # it" -- which Ctrl+C in the Size spinbox absolutely does. `bind_all`
+        # fires after the widget's class binding, so without the guard copying
+        # a number out of a text box would *also* copy a rectangle of canvas
+        # into the image clipboard, silently replacing whatever was there.
+        bind_key("<Control-x>", lambda _e: self.cut_region())
+        bind_key("<Control-c>", lambda _e: self.copy_region())
+        bind_key("<Control-v>", lambda _e: self.paste_region())
         # editing shortcuts -- the controller no-ops these when they can't apply
         self.root.bind_all("<Control-z>", lambda _e: self.controller.undo())
         self.root.bind_all("<Control-Shift-Z>", lambda _e: self.controller.redo())
@@ -302,8 +325,16 @@ class MainWindow:
         except tk.TclError:  # widget destroyed mid-event
             return False
 
-    def _bind_bare_key(self, sequence: str, action) -> None:
-        """Bind a shortcut that has no modifier, yielding to any text field.
+    def _bind_guarded_key(self, sequence: str, action) -> None:
+        """Bind a shortcut that yields to whatever is being typed in.
+
+        Was `_bind_bare_key`, on the theory that only unmodified keys collide
+        with typing. Cut/copy/paste disproved it: Ctrl+C is a text-editing
+        keystroke in every entry widget in this window, and `bind_all` fires
+        *after* the widget's class binding, so an unguarded binding would copy
+        the number and then also overwrite the image clipboard. The test is not
+        "does it have a modifier", it is "does the focused widget have a better
+        claim on this keystroke".
 
         Returns None rather than "break" when it yields: the field's own class
         binding has already run by the time `bind_all` fires, and other listeners
@@ -516,6 +547,7 @@ class MainWindow:
         bus = self.controller.events
         bus.on(ev.DOC_CHANGED, self._on_doc_changed)
         bus.on(ev.SELECTION_CHANGED, self._on_selection_changed)
+        bus.on(ev.REGION_CHANGED, self._on_region_changed)
         bus.on(ev.PLAYHEAD_MOVED, self._on_playhead_moved)
         bus.on(ev.PLAYBACK_STATE, self._on_playback_state)
         bus.on(ev.TITLE_CHANGED, self._on_title_changed)
@@ -671,7 +703,58 @@ class MainWindow:
             )
 
     def _clear_selection(self) -> None:
+        """Esc, and the Deselect menu item: drop the region first, then frames.
+
+        Esc is now a four-stage ladder, and the order is by how recent and how
+        transient each thing is: abandon the gesture, put the tool away (both
+        the canvas's, since it owns Esc while a tool is active), clear the
+        region, clear the frame selection. Each press undoes the most recent
+        commitment, which is the only ordering nobody has to memorise.
+
+        The region goes before the frames deliberately. It is the thing you can
+        see on the canvas you are looking at, so it is what Esc appears to be
+        aimed at; a frame selection that quietly vanished first would look like
+        Esc had done nothing.
+        """
+        if self.controller.region is not None:
+            self.controller.set_region(None)
+            return
         self.controller.set_selection(Selection.empty())
+
+    # ---- region editing --------------------------------------------------
+    #
+    # Thin, like the zoom commands: the controller owns the region, the
+    # clipboard and the scope rule, and these exist to say what happened when
+    # nothing did. A shortcut that silently does nothing is indistinguishable
+    # from one that isn't bound.
+
+    def cut_region(self) -> None:
+        if not self.controller.can_copy:
+            self.status.configure(text="Select an area first (S, then drag)")
+            return
+        self.controller.cut_region()
+
+    def copy_region(self) -> None:
+        if not self.controller.can_copy:
+            self.status.configure(text="Select an area first (S, then drag)")
+            return
+        self.controller.copy_region()
+
+    def paste_region(self) -> None:
+        if not self.controller.can_paste:
+            self.status.configure(text="Nothing copied yet")
+            return
+        count = len(self.controller.frame_targets)
+        self.controller.paste()
+        if count > 1:
+            # Worth saying out loud: paste is the one edit here that can touch
+            # frames you are not looking at, and the number is the whole
+            # difference between "stamped it everywhere" and "stamped it once".
+            self.status.configure(text=f"Pasted into {count} frames")
+
+    def set_region(self, region) -> None:
+        """ToolContext hook: SelectTool finished a drag (or a click)."""
+        self.controller.set_region(None if region is None else Region(*region))
 
     def _invoke_op(self, op_id: str) -> None:
         """Run an op from a menu: collect its params via a generated dialog
@@ -908,7 +991,7 @@ class MainWindow:
         """
         self._refreshing_delay = True
         try:
-            targets = self.controller.delay_targets
+            targets = self.controller.frame_targets
             shared = self.controller.target_delay_ms
             self._delay_var.set("" if shared is None else str(shared))
             suffix = f" ({len(targets)} frames)" if len(targets) > 1 else ""
@@ -1025,14 +1108,30 @@ class MainWindow:
             self.file_menu.entryconfigure(label, state=state)
 
     def _refresh_edit_menu(self) -> None:
+        """Everything in Edit, by label except the two whose labels move.
+
+        Undo and Redo stay indices 0 and 1: their text is rewritten right here,
+        so there is no stable label to address them by, and being the first two
+        entries is a property of the menu rather than a count anyone maintains.
+        Everything else goes by label, which is the lesson `_refresh_file_menu`
+        records -- inserting Cut/Copy/Paste is exactly the edit that repointed
+        those numbers last time, and it would have done so again.
+        """
         c = self.controller
         undo_text = f"Undo {c.undo_label}" if c.undo_label else "Undo"
         redo_text = f"Redo {c.redo_label}" if c.redo_label else "Redo"
         self.edit_menu.entryconfigure(0, label=undo_text, state="normal" if c.can_undo else "disabled")
         self.edit_menu.entryconfigure(1, label=redo_text, state="normal" if c.can_redo else "disabled")
         has_doc = c.doc is not None
-        self.edit_menu.entryconfigure(3, state="normal" if has_doc else "disabled")
-        self.edit_menu.entryconfigure(4, state="normal" if c.selection else "disabled")
+        for label, enabled in (
+            ("Cut Area", c.can_copy),
+            ("Copy Area", c.can_copy),
+            ("Paste", c.can_paste),
+            ("Select All", has_doc),
+            ("Deselect", bool(c.selection) or c.region is not None),
+        ):
+            self.edit_menu.entryconfigure(
+                label, state="normal" if enabled else "disabled")
 
     def _on_space(self, _event: tk.Event) -> str:
         self.controller.toggle_play()
@@ -1086,6 +1185,20 @@ class MainWindow:
         # "(N frames)" label both change when the selection does.
         self._refresh_delay_box()
 
+    def _on_region_changed(self, region=None, **_) -> None:
+        self._show_region(region)
+
+    def _show_region(self, region) -> None:
+        """Point the canvas at the controller's region.
+
+        One place, called from the event and from `_render`, because the canvas
+        forgets nothing but a *new document* replaces what it is showing and the
+        two have to agree at that moment as well.
+        """
+        self.canvas.set_region(
+            None if region is None
+            else (region.x, region.y, region.width, region.height))
+
     def _on_playhead_moved(self, index: int = 0, **_) -> None:
         self.timeline.set_index(index)
         self._render()
@@ -1120,6 +1233,7 @@ class MainWindow:
         doc = self.controller.doc
         key = doc[self.controller.index].image_uid if doc is not None else None
         self.canvas.show(image, key=key)
+        self._show_region(self.controller.region)
         self._update_status()
 
     def _update_transport(self) -> None:

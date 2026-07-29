@@ -29,6 +29,18 @@ mask *generators* and reuse `_composite` and `_apply_mask` unchanged. Every
 property already established -- alpha compositing, immutability, fresh uids,
 declining a no-op, the playhead staying put -- comes along for free rather than
 being reimplemented twice more and getting one of them subtly wrong.
+
+**Cut and paste are two more of them, and they cost the bet its first real
+concession.** `paint.cut` is a solid rectangle erased, which is the existing
+shape mask read in edge coordinates. `paint.paste` is the pasted image's own
+alpha, plus the one genuinely new thing in here: a *colour layer*, because a
+paste supplies a colour per pixel where every previous op supplied one for all
+of them. That is a parameter on `_composite`, not a second pipeline.
+
+The concession is frame count. Everything before this edited exactly one frame,
+and pasting into every selected frame does not, so the commit path became
+`_apply_mask_frames` and `_apply_mask` became the single-frame caller of it --
+which is also what forced `OpResult.index` (see registry.py) to exist.
 """
 
 from __future__ import annotations
@@ -196,44 +208,141 @@ def _shape_mask(canvas_size: tuple[int, int], kind: str,
     return mask
 
 
-def _composite(base: Image.Image, mask: Image.Image, color: Color, mode: str) -> Image.Image:
-    """Apply the mask to a *copy* of `base`; the original is never touched."""
+def _region_mask(canvas_size: tuple[int, int],
+                 x: int, y: int, width: int, height: int) -> Image.Image | None:
+    """Coverage mask for a `Region` -- a solid rectangle in *edge* coordinates.
+
+    The one place the two rectangle conventions meet. A `Region` describes the
+    lines between pixels (like a crop box); `_shape_mask` addresses the pixels
+    themselves, so the far edge comes back in by one. Doing that conversion here
+    rather than at each call site is the same discipline as `preview_box` doing
+    it once for the shape preview -- ARCHITECTURE.md 19.1/23.3 is the record of
+    what two derivations of the same coordinate cost.
+    """
+    if width < 1 or height < 1:
+        return None
+    return _shape_mask(canvas_size, "rect",
+                       (x, y, x + width - 1, y + height - 1), 1, True)
+
+
+def _paste_layer(canvas_size: tuple[int, int], image: Image.Image,
+                 x: int, y: int) -> Image.Image | None:
+    """Position a pasted image on the canvas, ready to composite.
+
+    **Paste is one more mask generator** (ARCHITECTURE.md 23.1); the only thing
+    it adds is that the colour varies per pixel instead of being one value. The
+    mask is the pasted image's own alpha -- which is what makes the transparent
+    corners of a copied sprite land as *nothing* rather than as a rectangular
+    bite taken out of the frame -- and here the mask and the colour arrive
+    already together, as the alpha channel of the positioned layer.
+
+    Pillow's `paste` clips a box that hangs off the canvas (verified, including
+    negative origins), so a paste half off the edge needs no arithmetic here.
+    Pasting without a mask is a straight channel copy, so the layer comes out
+    in straight alpha -- which is what `_composite` needs and what the version
+    of this that used a mask here failed to produce; see there.
+    """
+    if image is None or image.size[0] < 1 or image.size[1] < 1:
+        return None
+    source = image if image.mode == "RGBA" else image.convert("RGBA")
+    layer = Image.new("RGBA", canvas_size, (0, 0, 0, 0))
+    layer.paste(source, (int(x), int(y)))
+    return layer
+
+
+def _composite(base: Image.Image, mask: Image.Image, color: Color, mode: str,
+               layer: Image.Image | None = None) -> Image.Image:
+    """Apply the mask to a *copy* of `base`; the original is never touched.
+
+    `layer` is the paste case: a canvas-sized image carrying both the colour
+    *and* the coverage, since a pasted sprite's alpha is its own mask. Erase and
+    flat-colour painting are unchanged.
+
+    **The stroke layer is built by setting its alpha, not by pasting through
+    the mask**, and that is a bug fix rather than a preference. `Image.paste`
+    with a mask *blends* -- `dst*(1-m) + src*m` on every channel -- so pasting
+    an opaque colour into a transparent layer through a mask of 128 yields
+    `(r/2, g/2, b/2, 128)`: premultiplied colour sitting in a straight-alpha
+    image. `alpha_composite` then multiplies by the alpha a second time and the
+    result comes out too dark, over a light background visibly so.
+
+    It had been correct for two years by accident: every mask in here was hard,
+    0 or 255, and at 255 the blend is an exact copy. §19 promised that a soft
+    or anti-aliased brush would be "a feathered mask and nothing else changes",
+    and this is the line that would have made that false. A pasted sprite with
+    a soft edge is the first soft mask the codebase has ever seen, which is why
+    it surfaced now.
+    """
     out = base.copy()
     if mode == "erase":
         # Pull the frame's alpha down by the mask: hard mask clears to 0, a
-        # future soft mask feathers the edge.
+        # soft one feathers the edge.
         out.putalpha(ImageChops.subtract(out.getchannel("A"), mask))
     else:
-        # Lay the colour into a transparent layer through the mask, then
-        # alpha-composite -- correct even when the colour or mask is partial.
-        stroke = Image.new("RGBA", out.size, (0, 0, 0, 0))
-        stroke.paste(Image.new("RGBA", out.size, color), (0, 0), mask)
+        if layer is not None:
+            stroke = layer  # already colour + coverage, in straight alpha
+        else:
+            stroke = Image.new("RGBA", out.size, (color[0], color[1], color[2], 255))
+            alpha = mask
+            if color[3] != 255:
+                # A translucent colour and a soft mask are the same kind of
+                # coverage, so they multiply rather than one winning.
+                alpha = ImageChops.multiply(
+                    mask, Image.new("L", out.size, color[3]))
+            stroke.putalpha(alpha)
         out.alpha_composite(stroke)
     return out
 
 
+def _apply_mask_frames(doc: Document, sel: Selection, frames, index: int | None,
+                       mask: Image.Image | None, color: Color, mode: str,
+                       layer: Image.Image | None = None) -> OpResult:
+    """Composite `mask` into every frame in `frames`; the single commit path.
+
+    A stroke, a flood fill, a shape, a cut and a paste differ only in how their
+    coverage mask is built and how many frames they land on; from here on they
+    are indistinguishable, which is why immutability, fresh uids and the decline
+    convention are stated once rather than five times.
+
+    Frames that the mask changes nothing in are left *shared by reference*, not
+    rewritten -- so stamping a sprite onto twenty frames where three already
+    have it allocates seventeen images, and undo stays cheap. If no frame
+    changed at all the same document comes back and `run_op` reports "nothing to
+    do" instead of pushing an identity snapshot.
+    """
+    if mask is None:
+        return OpResult(doc, sel)
+    targets = sorted({int(i) for i in frames if 0 <= int(i) < len(doc.frames)})
+    if not targets:
+        return OpResult(doc, sel)  # no such frame -> decline
+    out_frames = list(doc.frames)
+    changed = False
+    for i in targets:
+        frame = out_frames[i]
+        out = _composite(frame.image, mask, color, mode, layer)
+        if out.tobytes() == frame.image.tobytes():
+            continue  # missed / painted what was already there
+        out_frames[i] = Frame.new(out, frame.duration_ms)  # fresh uid, same timing
+        changed = True
+    if not changed:
+        return OpResult(doc, sel)
+    return OpResult(replace(doc, frames=tuple(out_frames)), sel, index)
+
+
 def _apply_mask(doc: Document, sel: Selection, index: int,
                 mask: Image.Image | None, color: Color, mode: str) -> OpResult:
-    """Composite `mask` into frame `index` and hand back a new document.
+    """The single-frame case: composite into frame `index` alone.
 
-    The single commit path for every painting op. A stroke, a flood fill and a
-    shape differ only in how their coverage mask is built; from here on they are
-    indistinguishable, which is why immutability, fresh uids, the decline
-    convention and the playhead rule are stated once rather than three times.
+    Keep the playhead on the frame just painted, and select it. The op must own
+    this: `run_op` sends the index to `result.selection.first`, so passing the
+    old selection through would jump the playhead off the frame we just edited.
+    (An op that edits *many* frames cannot use this trick and says where the
+    playhead goes directly instead -- see `OpResult.index`.)
     """
-    if mask is None or not (0 <= int(index) < len(doc.frames)):
-        return OpResult(doc, sel)  # nothing to paint / no such frame -> decline
-    index = int(index)
-    frame = doc.frames[index]
-    out = _composite(frame.image, mask, color, mode)
-    if out.tobytes() == frame.image.tobytes():
-        return OpResult(doc, sel)  # missed / painted what was already there -> decline
-    frames = list(doc.frames)
-    frames[index] = Frame.new(out, frame.duration_ms)  # fresh uid, same timing
-    # Keep the playhead on the frame just painted (and select it). The op must
-    # own this: run_op moves the index to result.selection.first, so passing the
-    # old selection through would jump the playhead off the frame we just edited.
-    return OpResult(replace(doc, frames=tuple(frames)), Selection.single(index))
+    result = _apply_mask_frames(doc, sel, (index,), None, mask, color, mode)
+    if result.doc is doc:
+        return result
+    return OpResult(result.doc, Selection.single(int(index)))
 
 
 def _apply_stroke(doc: Document, sel: Selection, index: int,
@@ -321,3 +430,72 @@ class DrawShape:
               filled: bool = False, **_) -> OpResult:
         mask = _shape_mask(doc.size, kind, (x0, y0, x1, y1), size, bool(filled))
         return _apply_mask(doc, sel, index, mask, _rgba(color), "paint")
+
+
+@register_op
+class CutRegion:
+    """Clear the pixels inside a region, on the frame the playhead is on.
+
+    Named for the action rather than for what it does, because what it does is
+    only half of it: cut is *copy the pixels* (session state -- the clipboard
+    lives in the controller and survives undo, because a clipboard that
+    reverted with the document would be a clipboard nobody could rely on) plus
+    *clear them* (document state -- this). Calling the op `paint.clear` and
+    labelling it "Clear" would put "Undo Clear" in the menu after the user
+    pressed Cut, which is an accurate description of an implementation detail
+    and a wrong description of what happened.
+
+    One frame, unlike paste. Copy can only read the frame you are looking at,
+    so cut clears the frame it read; clearing frames you cannot see, on the
+    strength of a selection you may have made for another reason, is the kind
+    of destruction that is undoable and unnoticeable at the same time.
+    """
+
+    id = "paint.cut"
+    label = "Cut"
+    accel = None
+    needs_selection = False
+    in_menu = False  # region-driven; there is no dialog that could ask for one
+    params = ()
+
+    def apply(self, doc: Document, sel: Selection, index: int = 0,
+              x: int = 0, y: int = 0, width: int = 0, height: int = 0,
+              **_) -> OpResult:
+        mask = _region_mask(doc.size, int(x), int(y), int(width), int(height))
+        return _apply_mask(doc, sel, index, mask, (0, 0, 0, 0), "erase")
+
+
+@register_op
+class PasteRegion:
+    """Composite a clipboard image into one or more frames at (x, y).
+
+    The mask is the pasted image's own alpha, so this is one more entry in the
+    table in ARCHITECTURE.md 23.1 rather than a new kind of edit -- see
+    `_paste_layers` for the one thing it adds.
+
+    **`frames` is a tuple, and that is the whole reason `OpResult.index`
+    exists.** Stamping a sprite across an animation is the case this was asked
+    for, and it is the first op here to edit several frames' pixels at once.
+    The single-frame ops keep the playhead still by returning
+    `Selection.single(index)`; this one cannot, because it must leave the user's
+    frame selection exactly as they made it -- otherwise a second paste would
+    land on one frame instead of twenty. So it states the playhead directly.
+    """
+
+    id = "paint.paste"
+    label = "Paste"
+    accel = None
+    needs_selection = False
+    in_menu = False  # the interesting argument is a clipboard, not a number
+    params = ()
+
+    def apply(self, doc: Document, sel: Selection, index: int = 0, frames=(),
+              image: Image.Image | None = None, x: int = 0, y: int = 0,
+              **_) -> OpResult:
+        layer = _paste_layer(doc.size, image, x, y)
+        if layer is None:
+            return OpResult(doc, sel)
+        targets = tuple(frames) if frames else (int(index),)
+        return _apply_mask_frames(doc, sel, targets, int(index),
+                                  layer.getchannel("A"), (0, 0, 0, 0),
+                                  "paint", layer)

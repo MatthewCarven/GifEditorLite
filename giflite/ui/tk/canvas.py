@@ -41,6 +41,17 @@ CHECKER_DARK = (48, 48, 54, 255)
 CHECKER_SQUARE = 8          # displayed pixels per square
 CANVAS_BORDER = "#55555c"
 MARQUEE = "#4a9eff"         # accent for provisional overlays (crop box, erase)
+# The committed region marquee. Two offset dashed rectangles, dark under light,
+# which is the "marching ants" look standing still -- the alternation is what
+# makes the outline legible over both a dark sprite and a light one, and the
+# animation was never the part doing that work. A different colour from
+# MARQUEE on purpose: a rectangle you are still dragging and a rectangle you
+# have already committed are different things, and a preview that looked
+# identical to a selection would leave you unable to tell whether releasing the
+# mouse had done anything.
+ANTS_DARK = "#1b1b1e"
+ANTS_LIGHT = "#f2f2f5"
+ANTS_DASH = (4, 4)
 # The pixel grid. Stippled rather than solid: Tk canvas items have no alpha, and
 # a 50% dither is the only way to get a rule that reads as a guide over both a
 # dark sprite and a light one without picking a colour that vanishes into one of
@@ -94,6 +105,16 @@ class PreviewCanvas(tk.Canvas):
         self._tool = None
         self._tool_ctx = None
         self._overlay_items: list[int] = []
+        # The committed region, (x0, y0, x1, y1) in image pixels, or None.
+        #
+        # **The first thing on this canvas that a redraw must rebuild rather
+        # than discard.** Every overlay until now belonged to a gesture, so
+        # `_draw`'s `delete("all")` taking them was correct and the tool
+        # redrew on the next mouse event. A region has no next mouse event: it
+        # persists while you scrub, play, zoom and paint, so it is drawn from
+        # state inside `_draw` alongside the grid, and is deliberately *not* in
+        # `_overlay_items` -- `clear_overlay()` must not touch it.
+        self._region: tuple[int, int, int, int] | None = None
         # Called after every redraw so a frontend can keep zoom controls in step.
         # A plain attribute rather than an event: this is one widget telling its
         # own window something, not application state, and the controller's bus
@@ -346,6 +367,7 @@ class PreviewCanvas(tk.Canvas):
         self._photo = self._compose(rect, (out_w, out_h), (px - left, py - top))
         self.create_image(px, py, image=self._photo, anchor="nw")
         self._draw_grid()
+        self._draw_region()
         # A crisp edge so the canvas bounds read even where the frame's own
         # pixels reach the border. Drawn at the *whole* image's bounds, which
         # when zoomed in are mostly off-screen; Tk clips it for free.
@@ -389,6 +411,40 @@ class PreviewCanvas(tk.Canvas):
         for y in lines.ys:
             self.create_line(lines.left, y, lines.right, y,
                              fill=GRID_COLOR, stipple=GRID_STIPPLE, width=1)
+
+    def set_region(self, region: tuple[int, int, int, int] | None) -> None:
+        """Show a committed selection marquee, `(x, y, w, h)` in image pixels.
+
+        A plain setter plus a redraw, rather than creating canvas items here:
+        the region has to be redrawn on every `_draw` anyway (zoom, pan, scrub,
+        window resize all move it), so having one drawing path means a marquee
+        cannot be correct at the moment it is set and wrong a frame later.
+        """
+        box = None if region is None else (
+            int(region[0]), int(region[1]),
+            int(region[0]) + int(region[2]), int(region[1]) + int(region[3]),
+        )
+        if box == self._region:
+            return
+        self._region = box
+        self._draw()  # not _redraw: nothing about the *view* changed
+
+    def _draw_region(self) -> None:
+        """Rule the committed region, in the same mapping every tool uses.
+
+        Edge coordinates map straight through `image_to_display(center=False)`,
+        which returns a pixel's top-left corner -- exactly right here, and the
+        reason `SelectTool` declares `coords = "edge"`. This is the one overlay
+        that needs no `preview_box`-style adjustment (ARCHITECTURE.md 23.3).
+        """
+        if self._region is None or self._image_geom is None or self._source is None:
+            return
+        x0, y0, x1, y1 = self._region
+        dx0, dy0 = self._image_to_display(x0, y0)
+        dx1, dy1 = self._image_to_display(x1, y1)
+        self.create_rectangle(dx0, dy0, dx1, dy1, outline=ANTS_DARK, width=1)
+        self.create_rectangle(dx0, dy0, dx1, dy1, outline=ANTS_LIGHT, width=1,
+                              dash=ANTS_DASH)
 
     # ---- mouse dispatch: one path, straight to the active tool ------------
     #

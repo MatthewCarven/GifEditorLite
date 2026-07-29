@@ -7,6 +7,7 @@ from giflite.core.model import (
     MIN_DURATION_MS,
     Document,
     Frame,
+    Region,
     Selection,
     quantise_duration,
 )
@@ -123,3 +124,38 @@ class TestSelection:
     def test_empty_is_falsey(self):
         assert not Selection.empty()
         assert Selection.single(0)
+
+
+class TestRegion:
+    """Selection's other axis: which pixels, rather than which frames."""
+
+    def test_box_is_right_and_bottom_exclusive(self):
+        """Edge coordinates, so `box` is exactly what Image.crop takes -- and a
+        region 3 wide starting at 2 must end at 5, not 4."""
+        assert Region(2, 3, 3, 4).box == (2, 3, 5, 7)
+
+    def test_from_corners_normalises_either_direction(self):
+        assert Region.from_corners(9, 8, 2, 3) == Region(2, 3, 7, 5)
+        assert Region.from_corners(2, 3, 9, 8) == Region(2, 3, 7, 5)
+
+    @pytest.mark.parametrize("corners", [(4, 4, 4, 9), (4, 4, 9, 4), (4, 4, 4, 4)])
+    def test_a_degenerate_drag_is_no_region_at_all(self, corners):
+        assert Region.from_corners(*corners) is None
+
+    def test_clamped_trims_to_the_canvas(self):
+        assert Region(6, 6, 10, 10).clamped((10, 10)) == Region(6, 6, 4, 4)
+        assert Region(-4, -4, 8, 8).clamped((10, 10)) == Region(0, 0, 4, 4)
+
+    def test_clamped_leaves_a_region_that_already_fits(self):
+        region = Region(1, 1, 3, 3)
+        assert region.clamped((10, 10)) == region
+
+    def test_clamped_is_none_when_nothing_is_left_inside(self):
+        """A crop can move the canvas out from under a region entirely. None,
+        not an empty Region, so 'there is no region' has one representation."""
+        assert Region(20, 20, 5, 5).clamped((10, 10)) is None
+        assert Region(-9, 0, 5, 5).clamped((10, 10)) is None
+
+    def test_empty_is_falsey(self):
+        assert not Region(1, 1, 0, 4)
+        assert Region(1, 1, 1, 1)

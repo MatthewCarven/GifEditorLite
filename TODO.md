@@ -202,7 +202,11 @@ out to be worse than advertised. Design in ARCHITECTURE §19.2–19.3.
 
 - [x] **Image-sequence IO** — done 2026-07-29, see below
 - [ ] **Project / sidecar format** (`.gifproj`?) — lossless zip of PNG frames + JSON manifest, so authored frames/timing survive a round-trip GIF can't represent. One `read_x`/`write_x` pair; see ARCHITECTURE §18. Matthew wants this eventually
-- [ ] M5 video import (`imageio-ffmpeg`, try/except registration), WebP/APNG export
+- [ ] M5 video import (`imageio-ffmpeg`, try/except registration). **WebP/APNG
+      export is no longer planned here** — Matthew's call 2026-07-29: if those
+      land it's a fork, *APNG Editor Lite*, so the two tools can promise
+      different things. See the eraser-opacity note below for why the split is
+      about purpose rather than code
 - [ ] Second frontend to actually prove the seam (Qt or Dear PyGui)
 - [x] Polish: warn before overwriting the *original* source on Ctrl+S (GIF re-save is lossy); default Save As to `<name>_edited.gif` — done 2026-07-27
 - [x] Polish: `default_params` seeds Set-Delay from the frames it would change — done 2026-07-29 (mixed selections seed from the shortest)
@@ -435,17 +439,115 @@ erased anything.
       setting anyone could have got right
 - [x] 502 headless (was 497); two mutations confirmed
 
-## Select / copy / paste — planned, not started
+## Select / copy / paste
 
 Matthew's calls: floating draggable paste, paste into every selected frame, no
-clipping of the paint tools.
+clipping of the paint tools. Then, asked before slice 1: cut clears only the
+playhead frame, and paste reuses the delay box's scope rule.
 
-- [ ] **Slice 1:** rect select tool, copy, cut, paste-in-place. Region selection
-      lives in the controller beside the frame `Selection` — it is the first UI
-      state here that *persists* rather than being a gesture, and the canvas
-      gains its first non-provisional overlay (marching ants redrawn every
-      `_draw`, where overlays are currently cleared as gesture state)
-- [ ] **Slice 2:** make the paste floating — drag to place, commit or cancel.
-      A genuine interaction mode with its own rules, hence the split
-- [ ] Paste is one more mask generator (§23): the mask is the pasted image's own
-      alpha. Cut is `_shape_mask` in erase mode, which already exists
+### Slice 1 — done 2026-07-29 (ARCHITECTURE §26)
+
+- [x] `Region` in `core/model.py` beside `Selection` — edge coordinates, so it
+      is the argument list `canvas.crop` already takes; `from_corners`,
+      `clamped`, `box`
+- [x] Region + clipboard as controller session state: not undoable, not saved,
+      re-clamped in `_emit_doc_changed` when the *canvas* changes shape, and the
+      clipboard deliberately survives `open`
+- [x] `REGION_CHANGED`, emitted after `DOC_CHANGED` so no listener draws a
+      marquee against a canvas that has gone
+- [x] `paint.cut` and `paint.paste` — two more mask generators; `_apply_mask`
+      became the single-frame caller of a multi-frame `_apply_mask_frames`
+- [x] `OpResult.index` — an op may say where the playhead belongs, because the
+      `Selection.single(index)` workaround cannot survive a multi-frame op
+- [x] `SelectTool`, the first tool whose result outlives the gesture; the canvas
+      gains its first overlay redrawn from state rather than cleared with the
+      gesture
+- [x] Edit menu Cut/Copy/Paste + Ctrl+X/C/V, guarded against text fields;
+      `_bind_bare_key` → `_bind_guarded_key`
+- [x] Esc ladder: gesture → tool → region → frames
+- [x] Fixed a premultiplication bug in `_composite` that would have broken §19's
+      "a soft brush is just a feathered mask" promise for whoever implemented it
+- [x] 579 headless (was 502), 269 smoke (was 232), 8 mutations confirmed
+
+### Slice 2 — floating paste, next
+
+- [ ] Drag to place, commit or cancel. A genuine interaction mode with its own
+      rules, which is why it was split off
+- [ ] The pieces exist: `paint.paste` already takes an arbitrary `(x, y)`, the
+      canvas already draws a persistent overlay from state, and
+      `Tool.is_gesturing` / `on_cancel` give the mode somewhere to hang
+- [ ] The genuinely new thing: a floating paste is a state the *document* is not
+      yet in — pixels shown but not committed. Everything on this canvas so far
+      is either committed or a gesture, and this is neither
+- [ ] Decide what commits it. Enter, a click outside, switching tools, and
+      starting another paste are all candidates; so is "any other edit"
+- [ ] Undo semantics: the float itself must not be undoable, only its commit
+
+### Known, deliberately deferred
+
+- [ ] **`Delete` with a region selected still deletes frames**, not the region's
+      pixels. Arguably a footgun — but changing what an existing destructive
+      shortcut does is not a change to make while adding a feature. Cut is the
+      supported way to clear a region
+- [ ] **Crop to Selection** is nearly free now: `Region` and `canvas.crop` take
+      the same four numbers on purpose
+- [ ] No system clipboard integration — the clipboard is internal only. Copying
+      a region out to another application is a separate piece of work and would
+      want a format decision (PNG bytes, probably)
+
+## The Frame delay section is amputated at the minimum window size
+
+Found while screenshotting slice 1; **pre-existing, and not caused by it** —
+measured at both nine and ten palette tools and identical, since nine and ten
+both fill five rows of two.
+
+At 480x400 the side panel has 225px and its children want 406. `_view_section_fits`
+stands the view section down deliberately (§23.5), but nothing does the same for
+the Frame delay section, so `pack` simply drops it: no error, a control silently
+gone. Exactly §21/§23.5 again, on a section that was added after both.
+
+- [ ] The narrow fix is a second `_fits`-style guard. The better one is to make
+      "sections stand down whole, in priority order" a property of the panel
+      rather than a check per section — there are now three candidates for it
+      (tools, delay, view) and the next one added will get it wrong too
+- [ ] The smoke test currently asserts only that the *tools* stay mapped at the
+      minimum size. Whatever the fix is, it needs a check that names every
+      section, or this recurs a fourth time
+
+## Eraser opacity — investigated, declined ❌
+
+Matthew asked for a 0-255 eraser opacity to feather sprite edges so they don't
+look wrong against different backgrounds. Then asked the right question before
+I built it: does a GIF palette carry more than 1 bit of alpha?
+
+**It does not, and there are no deviations.** Verified against the repo's own
+files: the palette is RGB triples (768 bytes for 256 entries, 3 per entry, no
+fourth byte). Transparency is a Graphic Control Extension flag plus a single
+byte naming *one* fully-invisible palette index; `Claude_Glasses.gif` reports it
+as the int `255`. The index may differ per frame (`claude_blinky.gif` has frames
+with one and frames with none) but it is always exactly one, always binary.
+
+Measured consequence: an authored alpha ramp of `255,223,191,159,127,95,63,31`
+comes back from a GIF save/reload as `255,255,255,255,0,0,0,0` — `gif_write`'s
+`_ALPHA_CUTOFF` at 128 is not a choice we could make differently. The same ramp
+survives a PNG-sequence round trip untouched.
+
+So the feature would work in the editor, survive PNG export, and silently
+evaporate on every GIF save. Declined — Matthew's call, and the right one.
+
+**Revisit only if one of these becomes true:**
+
+- [ ] WebP/APNG export lands. Both carry real 8-bit alpha, at which point partial
+      erase means something on the way out — **but that is now a fork**, not a
+      feature here. The registry would happily hold an APNG writer beside the GIF
+      one; the reason to split is that an editor promising soft edges and one
+      promising GIF fidelity want different defaults, different warnings and a
+      different answer to "why did my feathering vanish". Purpose, not capability
+- [ ] A PNG-sequence or `.gifproj` workflow becomes the primary output rather
+      than GIF — partial alpha is already real in `Document` and already
+      round-trips through `write_sequence`
+- [ ] The actual goal (edges that don't look wrong on a different backdrop) is
+      wanted badly enough to solve the GIF-native way: **matting** — blend edge
+      pixels toward the background colour they'll sit on, staying fully opaque.
+      Needs no partial alpha and nothing is lost on save. Not requested; noted
+      so the underlying want isn't forgotten along with the rejected mechanism

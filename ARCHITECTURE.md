@@ -1105,3 +1105,177 @@ Kept as written-down history because the reasoning still lands, just
 differently: the loudness was luck. Had the insertion landed one entry earlier,
 all three indices would have hit real entries and it would have been exactly as
 silent as first claimed.
+
+---
+
+## 26. Select, copy, cut, paste
+
+Slice 1 of two. This adds the rectangular selection, the clipboard, and paste
+*in place*; making the paste floating and draggable is slice 2, and is a genuine
+interaction mode with its own rules, which is why it is not here.
+
+### 26.1 A region is Selection's other axis
+
+`Selection` answers "which frames". `Region` answers "which part of the canvas".
+They are deliberately independent, because the thing this was asked for -- copy a
+sprite out of one frame and stamp it into twenty -- is one region and twenty-one
+frames, and neither number constrains the other.
+
+`Region` lives in `core/model.py` beside `Selection`, in **edge coordinates**:
+`x`/`y` are lines between pixels and `width`/`height` count pixels, which makes a
+region exactly the argument list `canvas.crop` already takes. That is not tidiness
+for its own sake. It means `SelectTool` declares `coords = "edge"` for the same
+reason `CropTool` does (§19.1.1), the marquee needs no `preview_box`-style
+correction (§23.3), the same drag produces the same rectangle through both tools
+-- pinned by a test -- and a future Crop-to-Selection is a call, not a second
+derivation of the same arithmetic.
+
+The one place the two rectangle conventions still meet is `_region_mask`, which
+converts an edge box to the pixel-inclusive one `_shape_mask` wants. Named, and
+alone, because §19.1 is the record of what two derivations of one coordinate cost.
+
+### 26.2 It is session state, so it lives in the controller
+
+The region and the clipboard sit in `AppController` beside the playhead, not in
+the frontend and not in `Document`. Three consequences that are the whole reason:
+
+- **Not undoable.** Undoing a paste gives back your pixels; it does not
+  rearrange what you had selected. A region is not part of the document's
+  history, and `undo` restoring one would be a surprise with no upside.
+- **Re-clamped, not dropped, when the canvas changes shape.** A region names
+  pixels, so a frame-count change is none of its business -- unlike the frame
+  selection, which is clamped for exactly that -- but a crop, resize or rotate
+  can move the canvas out from under it. That happens in `_emit_doc_changed`,
+  the same funnel the selection clamp uses, so there is one place to get right
+  rather than one per op. It is trimmed while it still overlaps, because after a
+  crop the part you were working on is usually still on screen, and dropped only
+  when nothing is left. `REGION_CHANGED` is emitted *after* `DOC_CHANGED`: a
+  listener told the region shrank while it still held the old document would
+  draw the marquee against a canvas that no longer exists.
+- **The clipboard outlives the document.** `open` clears the region -- it names
+  pixels in the file it left with -- and deliberately does *not* clear the
+  clipboard, because copying a sprite out of one GIF and stamping it into
+  another is a thing people do, and a clipboard that emptied whenever the
+  document changed is one nobody could plan around.
+
+### 26.3 The canvas's first overlay that survives a redraw
+
+Every overlay before this belonged to a gesture, so `_draw`'s `delete("all")`
+taking it was correct and the tool redrew on the next mouse event. §20.4 even
+turns that into a safety property: any view change cancels a gesture, partly
+because a gesture that survived a redraw is one whose preview has silently
+disappeared.
+
+A region has no next mouse event. It persists while you scrub, play, zoom, pan
+and paint. So it is drawn from state inside `_draw`, next to the grid, and is
+deliberately not in `_overlay_items` -- `clear_overlay()` must not touch it. The
+two mechanisms now coexist and `SelectTool.on_release` uses both: it clears the
+provisional marquee and hands over a region, and for an instant there is neither
+and then there is one.
+
+It is drawn as a dark solid rectangle under a light dashed one: marching ants
+standing still. The alternation is what makes the outline legible over both a
+dark sprite and a light one; the animation was never the part doing that work.
+A different colour from the gesture marquee on purpose -- a rectangle you are
+dragging and a rectangle you have committed are different things, and a preview
+that looked identical to a selection would leave you unable to tell whether
+releasing the mouse had done anything.
+
+### 26.4 Paste made the playhead rule show its age
+
+`run_op` sent the playhead to `result.selection.first`. That is right for the
+ops it was written for: after moving or duplicating frames you want to be
+looking at what moved. But it is a rule about *frames that shifted*, and an op
+that edits pixels in place shifts nothing. The painting ops have worked around
+it since M4 by returning `Selection.single(index)` -- which keeps the playhead
+still at the cost of throwing away the user's frame selection.
+
+That trade is invisible while an op edits one frame and unacceptable once one
+edits many. Pasting into frames 0-20 while standing on frame 7 must not yank the
+playhead to frame 0, and must not collapse the selection to one frame either --
+otherwise a second paste lands on one frame instead of twenty-one.
+
+So `OpResult` gained an optional `index`: an op may say where the playhead
+belongs, and `None` means "wherever the existing rule puts it". Optional because
+every existing op is correct without it. It is the smallest change that makes
+the multi-frame case expressible rather than a special case in the controller.
+
+### 26.5 Scope: cut is one frame, paste is many
+
+Matthew's call, and the asymmetry is deliberate.
+
+**Paste** targets `frame_targets` -- the property the delay box already used,
+renamed from `delay_targets` because a scope rule with two callers is a policy
+(§24.1): the selection, but only one the playhead is standing in, otherwise just
+the playhead frame. Stamping across an animation is the case this was asked for,
+and the qualification is exactly as necessary here as it was there: a selection
+you have arrowed away from is not what you are working on.
+
+**Cut** clears the playhead frame alone. Copy can only read the frame you are
+looking at, so cut clears the frame it read. The two are not symmetric because
+the risks are not: paste is additive and was explicitly asked for across frames,
+while clearing frames you cannot see, on the strength of a selection you may
+have made for another reason, is destruction that is undoable and unnoticeable
+at the same time.
+
+The op is `paint.cut` and labelled "Cut" rather than "Clear", because what it
+does is only half of what happened -- the other half is the clipboard, which is
+session state and not the op's business. "Undo Clear" after pressing Cut would
+be an accurate description of an implementation detail and a wrong description
+of the user's action.
+
+### 26.6 Paste is one more mask generator, and it found a bug
+
+The claim in §23.1 held again: paste is the pasted image's own alpha as the
+mask, which is what makes the transparent corners of a copied sprite land as
+*nothing* rather than as a rectangular bite out of the frame. The one thing it
+adds is a colour that varies per pixel, which is a parameter on `_composite`,
+not a second pipeline.
+
+What it also did was falsify §19's other promise -- that a soft or
+anti-aliased brush would be "a feathered mask and nothing else changes".
+
+`_composite` built the stroke with `Image.paste(colour, mask)`. `paste` with a
+mask *blends*: `dst*(1-m) + src*m`, on every channel. Pasting an opaque colour
+into a transparent layer through a mask of 128 therefore yields
+`(r/2, g/2, b/2, 128)` -- premultiplied colour sitting in a straight-alpha image
+-- and `alpha_composite` then applies the alpha a second time. Black at half
+coverage over white came out at about 64 instead of 128.
+
+It had been correct by accident for as long as it existed, because every mask in
+the codebase was hard: 0 or 255, and at 255 the blend is an exact copy. A pasted
+sprite with a partly transparent edge is the first soft mask this project has
+ever produced, which is why it surfaced now and not when the fill bucket landed.
+
+The stroke's alpha is now *set* rather than blended in, and a translucent colour
+multiplies with the mask rather than one of them winning. Nothing about hard
+masks changes, which the existing 502 tests confirm by not moving.
+
+### 26.7 Ctrl+C is a text-editing keystroke
+
+§19.3 was written as "bare keys yield to text fields", on the theory that only
+unmodified keys collide with typing. Cut/copy/paste disproved it: `bind_all`
+fires after the focused widget's class binding, so an unguarded `<Control-c>`
+would copy the number out of the Size spinbox *and* replace the image clipboard
+with a rectangle of canvas -- silently, since nothing on screen reports what the
+clipboard holds.
+
+`_bind_bare_key` is now `_bind_guarded_key`, and the rule it implements is the
+one that was always true: a keystroke yields when the focused widget has a
+better claim on it. Whether it carries a modifier is not the test.
+
+### 26.8 Esc is a four-stage ladder
+
+Abandon the gesture, put the tool away (both the canvas's, since it owns Esc
+while a tool is active), clear the region, clear the frame selection. Ordered by
+how recent and how transient each thing is, so each press undoes the most recent
+commitment -- the only ordering nobody has to memorise.
+
+Region before frames deliberately: the region is the thing visible on the canvas
+you are looking at, so it is what Esc appears to be aimed at, and a frame
+selection that quietly vanished first would look like Esc had done nothing.
+
+`Delete` is *not* rerouted. With a region selected it still deletes frames, not
+pixels. That is arguably a footgun and is noted in TODO rather than fixed on a
+hunch: changing what an existing destructive shortcut does is not a change to
+make while adding a feature.

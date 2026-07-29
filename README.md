@@ -27,11 +27,22 @@ dialog generated from the operation itself.
 press **C** or pick Image → Crop, drag a rectangle on the preview — a live box
 shows the pixel size — and release to crop every frame to it. Esc cancels.
 
-**Painting** uses the tool palette across the top: pick **Pencil** (B), **Eraser**
-(E) or **Eyedropper** (I), choose a colour and brush size, and drag on the preview
-to paint the current frame. The stroke previews as you drag and commits as one
-undoable edit on release. Hard-edged brushes for now; soft brushes, a fill bucket
-and shapes are on the roadmap.
+**Painting** uses the tool palette in the panel beside the preview: pick
+**Pencil** (B), **Eraser** (E), **Fill** (F), **Line** (L), **Rect** (R),
+**Ellipse** (O) or **Eyedropper** (I), choose a colour and brush size, and drag
+on the preview to paint the current frame. The mark previews as you drag and
+commits as one undoable edit on release. Hard-edged brushes for now; soft brushes
+are on the roadmap.
+
+**Select, copy and paste:** press **S** or pick Select, drag a rectangle on the
+preview, and a marching-ants marquee marks it. **Ctrl+C** copies those pixels
+from the frame you are on, **Ctrl+X** cuts them, **Ctrl+V** pastes them back
+where they came from. Paste lands on every *selected* frame when the playhead is
+standing inside the selection, and on just the current frame otherwise — which is
+how you stamp one sprite across a whole animation in a single edit. The clipboard
+survives opening another file, so you can copy out of one GIF and into another.
+Esc clears the region before it clears the frame selection. Dragging the paste
+somewhere new is on the roadmap.
 
 **Saving:** Ctrl+S to save, Ctrl+Shift+S for Save As. One quirk to know about —
 GIF merges identical *consecutive* frames and sums their durations, so a frame

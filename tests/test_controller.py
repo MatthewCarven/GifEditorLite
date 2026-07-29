@@ -204,7 +204,7 @@ class TestFrameDelay:
         controller, _ = wired
         assert controller.current_delay_ms is None
         assert controller.target_delay_ms is None
-        assert controller.delay_targets == ()
+        assert controller.frame_targets == ()
 
     def test_with_no_selection_the_target_is_the_playhead_frame_alone(self, loaded):
         """Not the whole animation. The menu op treats "no selection" as "all",
@@ -213,20 +213,20 @@ class TestFrameDelay:
         controller, _ = loaded
         controller.set_selection(Selection.empty())
         controller.seek(2)
-        assert controller.delay_targets == (2,)
+        assert controller.frame_targets == (2,)
 
     def test_stepping_away_from_the_selection_follows_the_playhead(self, loaded):
         controller, _ = loaded
         controller.set_selection(Selection(frozenset({0, 1})))
         controller.seek(3)                       # standing outside the selection
-        assert controller.delay_targets == (3,)
+        assert controller.frame_targets == (3,)
         assert controller.target_delay_ms == 300
 
     def test_standing_inside_the_selection_keeps_it(self, loaded):
         controller, _ = loaded
         controller.set_selection(Selection(frozenset({1, 3})))
         controller.seek(3)                       # standing inside it
-        assert controller.delay_targets == (1, 3)
+        assert controller.frame_targets == (1, 3)
 
     def test_opening_a_file_does_not_leave_the_box_pointed_at_frame_zero(self, loaded):
         """The concrete form of the trap: open, arrow forward, and the box must
@@ -234,13 +234,13 @@ class TestFrameDelay:
         controller, _ = loaded
         assert controller.selection.ordered == (0,)   # what open() leaves behind
         controller.seek(3)
-        assert controller.delay_targets == (3,)
+        assert controller.frame_targets == (3,)
 
     def test_with_a_selection_the_targets_are_the_selection(self, loaded):
         controller, _ = loaded
         controller.set_selection(Selection(frozenset({1, 3})))
         controller.seek(1)   # standing inside it -- see the two tests above
-        assert controller.delay_targets == (1, 3)
+        assert controller.frame_targets == (1, 3)
 
     def test_target_delay_is_the_shared_value(self, loaded):
         controller, _ = loaded

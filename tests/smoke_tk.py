@@ -21,7 +21,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from giflite.app.controller import AppController  # noqa: E402
-from giflite.core.model import Selection  # noqa: E402
+from giflite.core.model import Region, Selection  # noqa: E402
+from giflite.ui.tk import canvas as canvas_module  # noqa: E402
 from giflite.ui.tk.app import MainWindow  # noqa: E402
 from tests.conftest import make_gif  # noqa: E402
 
@@ -1034,6 +1035,156 @@ def main() -> int:
     window._fill_var.set(False)
     while controller.can_undo:
         controller.undo()
+    root.update()
+
+    # --- select / copy / cut / paste ---------------------------------------
+    # The ops and the region arithmetic are covered headlessly. What only a
+    # display answers: does a drag on screen select the rectangle the user
+    # aimed at, does the marquee *survive a redraw* (it is the first overlay
+    # here that has to), and do the shortcuts fire while a text box has focus.
+    window.zoom_fit()
+    root.update()
+    doc_w, doc_h = controller.doc.size
+
+    # Paint a known block so a copy has something identifiable in it.
+    window._set_fg_color((0, 200, 255, 255))
+    window._fill_var.set(True)
+    drag("rect", (4, 4, 11, 9))
+    window._fill_var.set(False)
+    root.update()
+
+    def region_items():
+        """The marching-ants pair, by colour.
+
+        By outline rather than by dash: the ants are a dark solid rectangle
+        under a light dashed one, so filtering on "has a dash" finds half of
+        them and passes anyway -- which is exactly the sort of check that
+        looks green while testing nothing.
+        """
+        ants = (canvas_module.ANTS_DARK, canvas_module.ANTS_LIGHT)
+        return [i for i in window.canvas.find_all()
+                if window.canvas.type(i) == "rectangle"
+                and window.canvas.itemcget(i, "outline") in ants]
+
+    drag("select", (4, 4, 12, 10))
+    check("select: the drag became a region",
+          controller.region is not None, str(controller.region))
+    check("select: the region is the rectangle that was dragged",
+          controller.region == Region(4, 4, 8, 6),
+          str(controller.region))
+    check("select: marching ants drawn", len(region_items()) == 2,
+          f"{len(region_items())} dashed rectangles")
+    check("select: the gesture overlay is gone", len(window.canvas._overlay_items) == 0)
+
+    # The point of the whole persistent-overlay exercise: every earlier overlay
+    # died on the next `delete("all")` and was redrawn by the next mouse event.
+    # A region has no next mouse event.
+    controller.seek(3)
+    root.update()
+    check("select: the marquee survives scrubbing to another frame",
+          len(region_items()) == 2 and controller.region is not None,
+          f"{len(region_items())} rectangles")
+    window.zoom_actual()
+    root.update()
+    check("select: and survives a zoom", len(region_items()) == 2,
+          f"{len(region_items())} rectangles")
+    window.zoom_fit()
+    controller.seek(0)
+    root.update()
+
+    ants = region_items()
+    if len(ants) == 2:
+        ax0, ay0, ax1, ay1 = window.canvas.coords(ants[0])
+        want0 = window.canvas._image_to_display(4, 4)
+        want1 = window.canvas._image_to_display(12, 10)
+        check("select: the marquee sits on the region's own edges",
+              abs(ax0 - want0[0]) < 1.5 and abs(ay0 - want0[1]) < 1.5
+              and abs(ax1 - want1[0]) < 1.5 and abs(ay1 - want1[1]) < 1.5,
+              f"drawn {(ax0, ay0, ax1, ay1)} want {want0 + want1}")
+
+    window.copy_region()
+    check("copy: the clipboard matches the region",
+          controller.clipboard_size == (8, 6), str(controller.clipboard_size))
+
+    edits_before = controller.can_undo
+    window.cut_region()
+    root.update()
+    frame = controller.frame_image()
+    check("cut: the region is now empty", frame.getpixel((5, 5))[3] == 0,
+          str(frame.getpixel((5, 5))))
+    check("cut: outside the region is untouched", frame.getpixel((13, 11))[3] == 255,
+          str(frame.getpixel((13, 11))))
+    check("cut: it is one undoable edit named for the action",
+          controller.undo_label == "Cut", str(controller.undo_label))
+    check("cut: the marquee stays put after the edit", len(region_items()) == 2,
+          f"{len(region_items())} rectangles")
+
+    window.paste_region()
+    root.update()
+    frame = controller.frame_image()
+    check("paste: in place, so it undoes the cut by hand",
+          frame.getpixel((5, 5)) == (0, 200, 255, 255), str(frame.getpixel((5, 5))))
+    check("paste: recorded as its own edit", controller.undo_label == "Paste",
+          str(controller.undo_label))
+
+    # Paste across a selection, and the playhead rule that makes it usable.
+    controller.run_op("paint.cut", index=controller.index, x=4, y=4, width=8, height=6)
+    controller.set_selection(Selection(frozenset({0, 1, 2})))
+    controller.seek(2)
+    root.update()
+    window.paste_region()
+    root.update()
+    check("paste: it stamped every selected frame",
+          all(controller.doc[i].image.getpixel((5, 5))[3] == 255 for i in (0, 1, 2)),
+          str([controller.doc[i].image.getpixel((5, 5)) for i in (0, 1, 2)]))
+    check("paste: the playhead stayed where it was", controller.index == 2,
+          f"index={controller.index}")
+    check("paste: the selection stayed as the user made it",
+          controller.selection.ordered == (0, 1, 2), str(controller.selection.ordered))
+    check("paste: the status line says how many frames it touched",
+          "3 frames" in window.status["text"], window.status["text"])
+
+    # Ctrl+C in a text field belongs to the text field. bind_all fires *after*
+    # the widget's class binding, so an unguarded binding would copy the number
+    # and silently replace the image clipboard as well.
+    window._select_tool("cursor")
+    controller.set_region(Region(0, 0, 3, 3))
+    window._size_box.focus_set()
+    root.update()
+    before_clip = controller.clipboard_size
+    root.event_generate("<Control-c>")
+    root.update()
+    check("keys: Ctrl+C in the Size box does not touch the image clipboard",
+          controller.clipboard_size == before_clip,
+          f"{before_clip} -> {controller.clipboard_size}")
+    window.canvas.focus_set()
+    root.update()
+    root.event_generate("<Control-c>")
+    root.update()
+    check("keys: Ctrl+C away from a text field copies the region",
+          controller.clipboard_size == (3, 3), str(controller.clipboard_size))
+
+    # Esc: region before frames, because the region is the thing on the canvas
+    # you are looking at.
+    controller.set_selection(Selection.single(1))
+    window._clear_selection()
+    check("esc: the region goes first", controller.region is None)
+    check("esc: the frame selection is still there", bool(controller.selection))
+    window._clear_selection()
+    check("esc: a second press clears the frames", not controller.selection)
+
+    # A crop the region does not survive.
+    controller.set_region(Region(20, 12, 8, 6))
+    controller.run_op("canvas.crop", x=0, y=0, width=10, height=8)
+    root.update()
+    check("select: a crop that excludes the region clears it and its marquee",
+          controller.region is None and len(region_items()) == 0,
+          f"region={controller.region} items={len(region_items())}")
+
+    while controller.can_undo:
+        controller.undo()
+    controller.set_region(None)
+    controller.set_selection(Selection.empty())
     root.update()
 
     # --- per-frame delay --------------------------------------------------

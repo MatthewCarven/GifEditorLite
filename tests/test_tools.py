@@ -22,6 +22,7 @@ from giflite.ui.tk.tools import (
     LineTool,
     PencilTool,
     RectTool,
+    SelectTool,
     ShapeTool,
     default_tools,
 )
@@ -42,6 +43,7 @@ class FakeContext:
         self.strokes: list[tuple[tuple, bool]] = []
         self.rects: list[tuple] = []
         self.picks: list[tuple[int, int]] = []
+        self.regions: list = []
         self.clears = 0
         self.ended = 0
 
@@ -70,6 +72,9 @@ class FakeContext:
 
     def pick_color(self, x: int, y: int) -> None:
         self.picks.append((x, y))
+
+    def set_region(self, region) -> None:
+        self.regions.append(None if region is None else tuple(region))
 
     def preview_stroke(self, points, erase: bool = False) -> None:
         self.strokes.append((tuple(points), erase))
@@ -213,28 +218,112 @@ class TestEyedropper:
         assert not tool.is_gesturing  # so Esc puts it away rather than "cancelling"
 
 
+class TestSelectTool:
+    """The first tool whose result *outlives the gesture*.
+
+    Everything checked here is about that: it hands the region over instead of
+    committing an op, a click is a dismissal rather than a decline, and the
+    provisional marquee is cleared exactly once on release -- the committed one
+    is a different mechanism drawn by the canvas from state.
+    """
+
+    def test_a_drag_hands_over_the_region_and_commits_nothing(self, ctx):
+        tool = SelectTool()
+        tool.on_press(ctx, 10, 20)
+        tool.on_drag(ctx, 30, 50)
+        tool.on_release(ctx, 30, 50)
+        assert ctx.regions == [(10, 20, 20, 30)]
+        assert ctx.commits == []  # a selection is not an edit
+
+    def test_a_backwards_drag_normalises_the_region(self, ctx):
+        tool = SelectTool()
+        tool.on_press(ctx, 40, 60)
+        tool.on_release(ctx, 10, 20)
+        assert ctx.regions == [(10, 20, 30, 40)]
+
+    def test_it_matches_the_crop_box_for_the_same_drag(self, ctx):
+        """Both address the edges between pixels, so the same drag has to give
+        the same rectangle -- that shared convention is what would make a
+        Crop-to-Selection a one-liner instead of a second set of arithmetic."""
+        crop_ctx = FakeContext()
+        crop = CropTool()
+        crop.on_press(crop_ctx, 4, 6)
+        crop.on_release(crop_ctx, 19, 26)
+        select = SelectTool()
+        select.on_press(ctx, 4, 6)
+        select.on_release(ctx, 19, 26)
+        x, y, w, h = ctx.regions[0]
+        assert crop_ctx.commits == [("canvas.crop", {"x": x, "y": y,
+                                                     "width": w, "height": h})]
+
+    @pytest.mark.parametrize("end", [(10, 20), (10, 50), (40, 20)])
+    def test_a_click_or_zero_area_drag_clears_the_region(self, ctx, end):
+        """Unlike crop, which declines. Clicking off a selection to dismiss it
+        is what a click means everywhere else, and an empty selection -- unlike
+        an empty crop box -- has an obvious meaning."""
+        tool = SelectTool()
+        tool.on_press(ctx, 10, 20)
+        tool.on_release(ctx, *end)
+        assert ctx.regions == [None]
+        assert ctx.commits == []
+
+    def test_previews_the_box_while_dragging_then_clears_it_once(self, ctx):
+        tool = SelectTool()
+        tool.on_press(ctx, 10, 20)
+        tool.on_drag(ctx, 30, 50)
+        assert ctx.rects == [(10, 20, 10, 20), (10, 20, 30, 50)]
+        assert ctx.clears == 0
+        tool.on_release(ctx, 30, 50)
+        assert ctx.clears == 1
+
+    def test_a_cancelled_gesture_leaves_the_region_alone(self, ctx):
+        """Esc mid-drag, or a window resize, must not clear a selection the
+        user made earlier -- it abandons the *new* rectangle, nothing else."""
+        tool = SelectTool()
+        tool.on_press(ctx, 10, 20)
+        tool.on_drag(ctx, 30, 50)
+        tool.on_cancel(ctx)
+        assert ctx.regions == []
+        assert not tool.is_gesturing
+
+    def test_a_release_with_no_press_does_nothing(self, ctx):
+        SelectTool().on_release(ctx, 5, 5)
+        assert ctx.regions == []
+
+    def test_it_reports_gesturing_between_press_and_release(self, ctx):
+        tool = SelectTool()
+        assert not tool.is_gesturing
+        tool.on_press(ctx, 1, 1)
+        assert tool.is_gesturing  # so Esc abandons the drag before the tool
+        tool.on_release(ctx, 9, 9)
+        assert not tool.is_gesturing
+
+
 class TestToolSet:
     def test_default_tools_are_keyed_by_id(self):
         tools = default_tools()
-        assert set(tools) == {"crop", "pencil", "eraser", "fill",
+        assert set(tools) == {"select", "crop", "pencil", "eraser", "fill",
                               "line", "rect", "ellipse", "eyedropper"}
         assert all(tool.id == key for key, tool in tools.items())
 
-    def test_pixel_tools_want_pixels_and_crop_wants_edges(self):
-        """A brush addresses the pixel under the cursor; a crop box addresses the
-        boundaries *between* pixels. The canvas maps each differently (floor vs
-        round), so a tool declaring the wrong one paints a pixel off -- invisible
-        at 1:1 zoom, a whole pixel wrong on blown-up pixel art.
+    def test_pixel_tools_want_pixels_and_rect_tools_want_edges(self):
+        """A brush addresses the pixel under the cursor; a crop box and a
+        selection address the boundaries *between* pixels. The canvas maps each
+        differently (floor vs round), so a tool declaring the wrong one paints a
+        pixel off -- invisible at 1:1 zoom, a whole pixel wrong on blown-up
+        pixel art.
 
         Derived from the palette rather than from a hardcoded list, because a
         hardcoded list is a test that silently stops covering the thing it names.
         This one did: adding fill and the three shape tools left it passing while
         checking none of them.
         """
+        edge_tools = {"crop", "select"}
         tools = default_tools()
-        assert tools["crop"].coords == "edge"
+        for tid in edge_tools:
+            assert tools[tid].coords == "edge", tid
         for tid, tool in tools.items():
-            if tid == "crop":
+            if tid in edge_tools:
                 continue
             assert tool.coords == "pixel", tid
 
