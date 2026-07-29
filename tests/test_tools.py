@@ -33,12 +33,13 @@ class FakeContext:
 
     def __init__(self, frame_index: int = 2, brush_size: int = 3,
                  fg_color=(255, 0, 0, 255), fill_shapes: bool = False,
-                 tolerance: int = 0) -> None:
+                 tolerance: int = 0, erase_mode: bool = False) -> None:
         self._frame_index = frame_index
         self._brush_size = brush_size
         self._fg_color = fg_color
         self._fill_shapes = fill_shapes
         self._tolerance = tolerance
+        self._erase_mode = erase_mode
         self.commits: list[tuple[str, dict]] = []
         self.strokes: list[tuple[tuple, bool]] = []
         self.rects: list[tuple] = []
@@ -62,6 +63,10 @@ class FakeContext:
     @property
     def fill_shapes(self) -> bool:
         return self._fill_shapes
+
+    @property
+    def erase_mode(self) -> bool:
+        return self._erase_mode
 
     @property
     def tolerance(self) -> int:
@@ -195,6 +200,88 @@ class TestStrokeTools:
         tool.on_release(ctx, 3, 3)
         assert ctx.commits == []
         assert not tool.is_gesturing
+
+
+class TestEraseMode:
+    """One checkbox, every painting tool.
+
+    The point of the flag is that "erase" is not a colour and never could be:
+    painting alpha-composites, so no colour subtracts alpha. It is the other
+    branch of the same operation, which is why it reaches the strokes by
+    swapping the op and the fill and shapes by a `mode` param -- the strokes
+    have had two ops since M4 and the others have one.
+    """
+
+    def erasing(self, **kwargs) -> FakeContext:
+        return FakeContext(erase_mode=True, **kwargs)
+
+    def test_the_pencil_becomes_an_eraser(self):
+        ctx = self.erasing()
+        tool = PencilTool()
+        tool.on_press(ctx, 1, 1)
+        tool.on_release(ctx, 4, 4)
+        (op_id, params), = ctx.commits
+        assert op_id == "paint.erase"
+        assert "color" not in params, "erase subtracts alpha; a colour would be a lie"
+
+    def test_the_eraser_still_erases_with_the_box_unticked(self):
+        """`or`, not the checkbox alone. Reading the flag straight would turn
+        the Eraser into a pencil whenever the box happened to be off."""
+        ctx = FakeContext(erase_mode=False)
+        tool = EraserTool()
+        tool.on_press(ctx, 1, 1)
+        tool.on_release(ctx, 4, 4)
+        assert ctx.commits[0][0] == "paint.erase"
+
+    def test_the_stroke_previews_as_an_erase(self):
+        """The preview is how you know before releasing. A pencil that draws a
+        solid red line and then removes pixels is a worse surprise than no
+        preview at all."""
+        ctx = self.erasing()
+        tool = PencilTool()
+        tool.on_press(ctx, 1, 1)
+        tool.on_drag(ctx, 2, 2)
+        assert [erase for _points, erase in ctx.strokes] == [True, True]
+
+    def test_the_fill_bucket_clears_instead(self):
+        ctx = self.erasing()
+        FillTool().on_press(ctx, 3, 4)
+        assert ctx.commits[0][1]["mode"] == "erase"
+
+    def test_shapes_clear_instead(self):
+        ctx = self.erasing(fill_shapes=True)
+        tool = RectTool()
+        tool.on_press(ctx, 1, 1)
+        tool.on_release(ctx, 6, 6)
+        params = ctx.commits[0][1]
+        assert params["mode"] == "erase"
+        assert params["filled"] is True, "an erased rect still needs to be solid"
+
+    @pytest.mark.parametrize("cls", [LineTool, RectTool, EllipseTool])
+    def test_every_shape_tool_carries_it(self, cls):
+        ctx = self.erasing()
+        tool = cls()
+        tool.on_press(ctx, 1, 1)
+        tool.on_release(ctx, 5, 5)
+        assert ctx.commits[0][1]["mode"] == "erase"
+
+    def test_off_is_the_default_and_says_paint(self):
+        ctx = FakeContext()
+        FillTool().on_press(ctx, 1, 1)
+        assert ctx.commits[0][1]["mode"] == "paint"
+
+    def test_the_tools_it_does_not_reach_are_untouched(self):
+        """Select, crop and the eyedropper edit no pixels, so the flag has
+        nothing to say to them -- and must not quietly change what they commit.
+        """
+        for tool, expected in ((CropTool(), [("canvas.crop", ...)]), (SelectTool(), [])):
+            ctx = self.erasing()
+            tool.on_press(ctx, 1, 1)
+            tool.on_release(ctx, 9, 9)
+            assert [op for op, _ in ctx.commits] == [op for op, _ in expected]
+        ctx = self.erasing()
+        EyedropperTool().on_press(ctx, 2, 2)
+        assert ctx.commits == []
 
 
 class TestEyedropper:
@@ -360,6 +447,7 @@ class TestFillTool:
         tool.on_press(ctx, 7, 9)
         assert ctx.commits == [("paint.fill", {
             "index": 4, "x": 7, "y": 9, "color": (0, 255, 0, 255), "tolerance": 0,
+            "mode": "paint",
         })]
 
     def test_it_passes_the_tolerance_from_the_context(self):

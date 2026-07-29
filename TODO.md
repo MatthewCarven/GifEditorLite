@@ -495,6 +495,37 @@ playhead frame, and paste reuses the delay box's scope rule.
       a region out to another application is a separate piece of work and would
       want a format decision (PNG bytes, probably)
 
+## Erase mode — done 2026-07-29 (ARCHITECTURE §27)
+
+From Matthew's question, which had a wrong premise worth recording: *what colour
+do I fill with to get transparent?* None, and none could — painting
+alpha-composites, so a transparent colour contributes nothing and the op
+declines. Removing alpha is the other branch of the same operation.
+
+- [x] An **Erase checkbox** beside Fill, applying to every painting tool: pencil,
+      bucket, line, rect, ellipse. His pick from three options (the others were a
+      separate erase-bucket tool and a modifier-click)
+- [x] Strokes swap the op (`paint.erase` has existed since M4); fill and shapes
+      take a `mode` param. Mask generators untouched
+- [x] `StrokeTool._erasing` is `self.erase or ctx.erase_mode` — the flag alone
+      would turn the Eraser into a pencil whenever the box was off
+- [x] Optional `label_for(**params)` hook + `op_label`, so the undo entry says
+      "Erase Fill" rather than "Fill". Same shape as the `default_params` hook
+- [x] Colour swatch *and* the "Colour" label grey out while erasing — the swatch
+      alone shows nothing, since its explicit `bg` survives being disabled
+- [x] 607 headless (was 579), 281 smoke (was 269), 10 mutations confirmed
+
+Small things noticed and deliberately left alone:
+
+- [ ] **"Fill" now means two things in the panel**: the bucket tool, and the
+      checkbox that makes shapes solid. They sit two sections apart and the
+      ambiguity predates this, but erase mode put them closer together.
+      "Solid" would fix it in one word — not done, because renaming a control
+      nobody asked to have renamed is its own small surprise
+- [ ] Erase mode has no keyboard shortcut. Every bare letter that suggests
+      itself (`x`, `t`, `d`) is unclaimed, so this is available if it turns out
+      to be worth one
+
 ## The Frame delay section is amputated at the minimum window size
 
 Found while screenshotting slice 1; **pre-existing, and not caused by it** —

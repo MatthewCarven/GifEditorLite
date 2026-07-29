@@ -1229,6 +1229,68 @@ would have passed while asserting half of what it named. Filtering by outline
 colour fixed it. Same failure mode as the `coords` test that stopped covering
 four tools without going red.
 
+## 2026-07-29 (later still) — Erase mode
+
+Matthew, using the editor: *"what colour do i fill with to get transparent? or
+what do i do with the eraser tool to make it flood fill?"*
+
+Neither works, and the first cannot: painting alpha-composites, so a fully
+transparent colour contributes nothing and the op declines. Alpha is removed by
+subtraction, which is the `"erase"` branch `_composite` has had since M4 behind
+exactly one tool. The answer is not a colour, it is the other branch — so the
+feature is an **Erase checkbox** (his call, from three options) applying to
+every painting tool at once, rather than a second bucket in the palette.
+
+Design in ARCHITECTURE §27. It reaches the tools two ways and that is not sloppy:
+strokes *swap the op*, because Pencil and Eraser have been two ops since M4, and
+fill and shapes take a `mode` param because they have one op each. The mask
+generators are untouched — "which pixels" and "what happens to them" were
+already separate questions, and this is the first thing to answer the second one
+differently. Erase-shapes came along free, which is the short way to clear a
+rectangle.
+
+**The subtle one:** `StrokeTool._erasing` is `self.erase or ctx.erase_mode`.
+Reading the flag alone turns the *Eraser* into a pencil whenever the box is off
+— an inversion that reads as a double-negative bug long before it reads as a
+design error. Mutation-tested.
+
+**The undo menu had to be told.** "Undo Fill" after removing pixels describes the
+implementation and misdescribes the action, in the one place a user looks to
+find out what they just did. `OpResult` could not carry it — the label is wanted
+whether the op applies *or declines* — so the op names the run through an
+optional `label_for(**params)` hook, resolved by a new `op_label`. Same shape as
+the `default_params` hook that already existed.
+
+**Two mutations were not caught, and they failed differently.**
+
+A `_mode()` helper normalised anything that was not `"erase"` to `"paint"`.
+Replacing its body with `return mode` broke nothing, because `_composite`
+compares `mode == "erase"` and had already decided. Defence in front of a wall.
+Deleted; the reasoning moved to the comparison that makes the choice, and
+mutating *that* is caught.
+
+The second was a real hole: every label test called `op_label` directly, so
+`run_op` reverting to `op.label` passed everything. "`op_label` is correct" and
+"`run_op` uses it" are two claims and only one was tested. `TestUndoLabels` is
+the second. Worth remembering as the pattern — a helper tested in isolation says
+nothing about its caller.
+
+**Layout, measured before trusting it** (§21/§23.5 twice bitten): Fill and Erase
+went on a row of their own rather than as a fourth widget beside the swatch.
+Panel height 406 → 427 with 505 available at the default size, and width
+unchanged at 211 because the two-column tools grid sets it. Height is guarded by
+`_view_section_fits`; width is not guarded at all and comes straight off the
+preview, so height is the cheaper axis to spend. Screenshotted.
+
+**And a thing the swatch could not say.** Disabling it while erasing does
+nothing visible — a `tk.Button` whose background *is* the colour looks identical
+disabled, because the explicit `bg` beats the disabled style. Greying the
+"Colour" label beside it is the half you can see. Same "two claims" shape as the
+label bug above: "we disabled it" is not "it looks disabled".
+
+**Numbers:** 607 headless (was 579), 281 smoke (was 269). Ten mutations
+confirmed after the two misses were fixed.
+
 **Next session:** slice 2 — the floating paste. Drag to place, commit or cancel.
 The pieces it needs already exist: `paint.paste` takes an arbitrary `(x, y)`, the
 canvas can draw a persistent overlay from state, and `Tool.is_gesturing` /

@@ -454,14 +454,35 @@ class MainWindow:
         # off the preview for no reason -- the minimap only needs 188.
         colour_row = ttk.Frame(self.side_panel)
         colour_row.pack(side="top", fill="x")
-        ttk.Label(colour_row, text="Colour").pack(side="left")
+        # Kept as an attribute so erase mode can grey it: a `tk.Button` whose
+        # background *is* the colour does not visibly change when disabled --
+        # the explicit bg wins -- so the swatch alone cannot show that the
+        # colour has stopped being used. The label greying is the visible half.
+        self._colour_label = ttk.Label(colour_row, text="Colour")
+        self._colour_label.pack(side="left")
         # Classic tk.Button so the swatch can carry the colour as its background.
         self._swatch = tk.Button(colour_row, width=3, bg=_rgb_hex(self._fg_color),
                                  relief="sunken", command=self._choose_color)
         self._swatch.pack(side="left", padx=(4, 0))
+
+        # The two mode toggles, on a row of their own rather than tucked beside
+        # the swatch. Both answer "what does a mark do" rather than "what does it
+        # look like", so they belong together -- and putting a fourth widget on
+        # the colour row would widen the panel, which comes straight off the
+        # preview and is the one axis with no guard on it (§21). Height is
+        # guarded; width is not, so height is the cheaper thing to spend.
+        mode_row = ttk.Frame(self.side_panel)
+        mode_row.pack(side="top", fill="x", pady=(6, 0))
         self._fill_var = tk.BooleanVar(value=False)
-        ttk.Checkbutton(colour_row, text="Fill", variable=self._fill_var).pack(
-            side="right")
+        ttk.Checkbutton(mode_row, text="Fill", variable=self._fill_var).pack(
+            side="left")
+        self._erase_var = tk.BooleanVar(value=False)
+        # Erase is the answer to "what colour do I fill with to get transparent".
+        # None: painting composites *over*, so a transparent colour changes
+        # nothing. Removing alpha is a different operation, and this is it --
+        # for every tool at once, rather than as a second bucket in the palette.
+        ttk.Checkbutton(mode_row, text="Erase", variable=self._erase_var,
+                        command=self._on_erase_toggle).pack(side="right")
 
         size_row = ttk.Frame(self.side_panel)
         size_row.pack(side="top", fill="x", pady=(6, 0))
@@ -934,7 +955,19 @@ class MainWindow:
         # would repaint over the live overlay on the next tick.
         self.controller.pause()
         self.canvas.set_tool(tool, self)
-        self.status.configure(text=f"{tool.label}: {tool.hint}")
+        self.status.configure(text=self._tool_status(tool))
+
+    def _tool_status(self, tool) -> str:
+        """The status line for an active tool, erase mode included.
+
+        "(erasing)" because the checkbox lives elsewhere on screen and a tool
+        quietly doing the opposite of its name is worth one word. Not shown for
+        the tools erase mode does not reach -- select, crop and the eyedropper
+        edit no pixels -- nor for the Eraser, which would be saying it twice.
+        """
+        untouched = ("select", "crop", "eyedropper", "eraser")
+        erasing = self.erase_mode and tool.id not in untouched
+        return f"{tool.label}{' (erasing)' if erasing else ''}: {tool.hint}"
 
     def end_tool(self) -> None:
         """ToolContext hook: put tools away (the canvas calls this on Esc)."""
@@ -950,6 +983,27 @@ class MainWindow:
         self._fg_color = (int(rgba[0]), int(rgba[1]), int(rgba[2]),
                           int(rgba[3]) if len(rgba) > 3 else 255)
         self._swatch.configure(bg=_rgb_hex(self._fg_color))
+
+    def _on_erase_toggle(self) -> None:
+        """Erase changed: grey the colour out, and say what the tool now does.
+
+        The swatch is disabled rather than left live because while erasing the
+        colour is not used by anything, and a control that looks active and
+        does nothing is the failure this project keeps meeting from new angles
+        (§23.5, and the whole of `_after_grid_change`). The status line matters
+        for the same reason: this is a *mode*, so it changes what the tool you
+        already have selected will do, with nothing else on screen moving.
+        """
+        erasing = self.erase_mode
+        self._swatch.configure(state="disabled" if erasing else "normal")
+        self._colour_label.state(["disabled"] if erasing else ["!disabled"])
+        tool = self._active_tool
+        if tool is None:
+            self.status.configure(
+                text="Erase: pencil, fill and shapes now remove pixels"
+                if erasing else self._summary())
+            return
+        self.status.configure(text=self._tool_status(tool))
 
     # ---- per-frame delay -------------------------------------------------
 
@@ -1024,6 +1078,19 @@ class MainWindow:
     @property
     def fill_shapes(self) -> bool:
         return bool(self._fill_var.get())
+
+    @property
+    def erase_mode(self) -> bool:
+        """Whether a mark removes pixels instead of adding them.
+
+        One flag for every painting tool rather than an erase variant of each,
+        because "erase" is not a colour and never could be -- painting
+        composites *over*, so no colour, however transparent, subtracts alpha.
+        It is the other branch of the same operation, and a single toggle says
+        that far better than a second bucket and a second rectangle in the
+        palette would.
+        """
+        return bool(self._erase_var.get())
 
     @property
     def tolerance(self) -> int:

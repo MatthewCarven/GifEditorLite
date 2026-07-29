@@ -15,6 +15,7 @@ from giflite.core.ops.registry import (
     get_op,
     menu_groups,
     op_defaults,
+    op_label,
     op_params,
     register_op,
 )
@@ -26,6 +27,7 @@ __all__ = [
     "get_op",
     "menu_groups",
     "op_defaults",
+    "op_label",
     "op_params",
     "register_op",
 ]

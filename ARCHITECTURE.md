@@ -1279,3 +1279,86 @@ selection that quietly vanished first would look like Esc had done nothing.
 pixels. That is arguably a footgun and is noted in TODO rather than fixed on a
 hunch: changing what an existing destructive shortcut does is not a change to
 make while adding a feature.
+
+---
+
+## 27. Erase mode
+
+Prompted by a question with a wrong premise, which is the useful kind: *what
+colour do I fill with to get transparent?*
+
+### 27.1 There is no such colour, and there could not be
+
+Painting alpha-composites the colour *through* the mask. A fully transparent
+colour composited over a frame contributes nothing, so the op declines and
+reports "nothing to do" -- which is correct, and completely unhelpful if you
+were expecting a hole. Alpha is removed by `ImageChops.subtract` on the frame's
+own alpha channel, which is the `"erase"` branch of `_composite` and has been
+there since M4 behind exactly one tool.
+
+So the answer is not a colour, it is the other branch of the same operation.
+`test_no_colour_can_erase` pins the premise, because "why doesn't a transparent
+colour work" is a question someone will ask again.
+
+### 27.2 One flag, not an erase variant of each tool
+
+`erase_mode` on the `ToolContext`, driven by a checkbox beside `Fill`. It
+reaches the tools two different ways, and the difference is not an
+inconsistency:
+
+- **Strokes swap the op.** Pencil and Eraser have been two ops since M4, so a
+  pencil in erase mode is not a parameterised stroke, it is `paint.erase`.
+- **Fill and shapes take a `mode` param**, because they have one op each and the
+  mask does not care what happens to it. `_fill_mask` and `_shape_mask` are
+  untouched: which pixels and what happens to them were already separate
+  questions, and this is the first thing to ask the second one differently.
+
+`StrokeTool._erasing` is `self.erase or ctx.erase_mode`, not the flag alone.
+Reading the flag straight would turn the *Eraser* into a pencil whenever the box
+happened to be off, which is the sort of inversion that looks like a
+double-negative bug for ten minutes before it looks like a design error.
+
+The Eraser stays in the palette rather than being absorbed. Erasing is common
+enough to deserve one click, and a tool you can see is selected is a better
+default than a checkbox you have to remember to untick.
+
+### 27.3 The undo menu had to be told
+
+`paint.fill` filling and `paint.fill` clearing are correctly one op, and "Undo
+Fill" after removing pixels describes the implementation while misdescribing the
+action -- in the one place a user looks to find out what they just did.
+
+`OpResult` could not carry it: the label is wanted whether the op applies or
+declines. So the *op* names the run, through an optional `label_for(**params)`
+hook resolved by `op_label`. Same shape as the `default_params` hook that
+already existed, and for the same reason: the general case is a constant, so the
+exception should cost one method on the op that has it rather than a mechanism
+every op pays for.
+
+`run_op` resolves it once, up front, so the undo entry and both status messages
+cannot disagree about what was attempted.
+
+### 27.4 Two mutations that were not caught, and what they meant
+
+The mutation run over this section found two gaps, and they failed differently.
+
+A `_mode()` helper normalised anything that was not `"erase"` to `"paint"`
+before handing it on. Replacing its body with `return mode` broke nothing --
+because `_composite` compares `mode == "erase"` and had already decided it. The
+helper was defence in front of a wall. Deleted, and the reasoning moved to the
+comparison that actually makes the choice; `_composite` treating any non-`paint`
+value as erase *is* caught, which is the check that was wanted all along.
+
+The second was a real hole. Every label test called `op_label` directly, so
+`run_op` falling back to `op.label` passed everything. `op_label` being correct
+and `run_op` *using* it are two claims, and only one of them was tested.
+`TestUndoLabels` in `tests/test_controller_region.py` tests the second.
+
+### 27.5 The swatch cannot show this on its own
+
+Erase mode makes the foreground colour irrelevant, so the swatch is disabled --
+and a `tk.Button` whose background *is* the colour looks identical disabled,
+because the explicit `bg` wins over the disabled style. Greying the "Colour"
+label beside it is the half you can actually see. Checked in the smoke test in
+both directions, because "we disabled it" and "it looks disabled" are, once
+again, two claims.

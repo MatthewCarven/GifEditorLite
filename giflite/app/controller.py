@@ -30,7 +30,7 @@ from giflite.core.io import format_for, reader_for, writer_for
 from giflite.core.io.gif_read import probe_gif
 from giflite.core.io.gif_write import count_merges
 from giflite.core.model import Document, Region, Selection
-from giflite.core.ops import get_op  # importing this also registers the ops
+from giflite.core.ops import get_op, op_label  # importing this also registers the ops
 from giflite.core.playback import MAX_TICK_MS, PlaybackClock
 
 # Above this, a load is worth mentioning before it happens. 640x480x120 frames
@@ -423,21 +423,26 @@ class AppController:
         if op.needs_selection and not self._selection:
             self.events.emit(ev.STATUS, message="Select one or more frames first")
             return
+        # What this *run* is called, which is not always the op's static label:
+        # one op can do materially different things depending on its arguments
+        # (paint.fill fills or clears). Resolved once, here, so the undo entry
+        # and the two status messages cannot disagree about what just happened.
+        label = op_label(op, **params)
 
         try:
             result = op.apply(self._doc, self._selection, **params)
         except Exception as exc:  # noqa: BLE001 -- surfaced to the user
-            self.events.emit(ev.ERROR, exception=exc, context=op.label)
+            self.events.emit(ev.ERROR, exception=exc, context=label)
             return
 
         if result.doc is self._doc:
             # The op declined (e.g. delete-everything). Say why, change nothing.
-            self.events.emit(ev.STATUS, message=f"{op.label}: nothing to do")
+            self.events.emit(ev.STATUS, message=f"{label}: nothing to do")
             return
         try:
             result.doc.validate()
         except ValueError as exc:
-            self.events.emit(ev.STATUS, message=f"{op.label}: {exc}")
+            self.events.emit(ev.STATUS, message=f"{label}: {exc}")
             return
 
         self._stop_playback()
@@ -453,7 +458,7 @@ class AppController:
             self._index = self._clamp(result.index)
         else:
             self._index = self._clamp(result.selection.first if result.selection else self._index)
-        self._history.push(Snapshot(self._doc, self._selection, self._index, op.label))
+        self._history.push(Snapshot(self._doc, self._selection, self._index, label))
         self._emit_doc_changed(f"op:{op_id}")
         self.events.emit(ev.TITLE_CHANGED, path=self._path, dirty=self.dirty)
 

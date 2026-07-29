@@ -237,6 +237,50 @@ class TestCut:
         assert not controller.cut_region()
 
 
+class TestUndoLabels:
+    """What the Edit menu says you are about to undo.
+
+    Here rather than beside the op, because `op_label` being right is not the
+    same claim as `run_op` *using* it — a mutation run caught exactly that gap:
+    replacing the call with the static label broke nothing until this existed.
+    """
+
+    def test_an_erase_fill_says_so(self, loaded):
+        controller, _ = loaded
+        painted(controller)
+        controller.run_op("paint.fill", index=0, x=1, y=1, mode="erase")
+        assert controller.undo_label == "Erase Fill"
+
+    def test_an_ordinary_fill_still_says_fill(self, loaded):
+        controller, _ = loaded
+        painted(controller)
+        controller.run_op("paint.fill", index=0, x=1, y=1, color=(1, 2, 3, 255))
+        assert controller.undo_label == "Fill"
+
+    def test_an_erased_shape_says_so(self, loaded):
+        controller, _ = loaded
+        painted(controller)
+        controller.run_op("paint.shape", index=0, kind="rect", x0=1, y0=1,
+                          x1=5, y1=5, filled=True, mode="erase")
+        assert controller.undo_label == "Erase Shape"
+
+    def test_a_decline_is_reported_under_the_same_name(self, loaded):
+        """The "nothing to do" message and the undo entry have to agree about
+        what was attempted, or the one you get tells you nothing about the other.
+        """
+        controller, frontend = loaded
+        painted(controller, (0, 0, 0, 0))
+        frontend.clear()
+        controller.run_op("paint.fill", index=0, x=1, y=1, mode="erase")
+        assert frontend.last(ev.STATUS).payload["message"] == "Erase Fill: nothing to do"
+
+    def test_ops_without_the_hook_are_unaffected(self, loaded):
+        controller, _ = loaded
+        controller.set_selection(Selection.single(1))
+        controller.run_op("frames.duplicate")
+        assert controller.undo_label == "Duplicate Frames"
+
+
 class TestPaste:
     def setup_clipboard(self, controller, region=Region(2, 2, 4, 4)):
         painted(controller)

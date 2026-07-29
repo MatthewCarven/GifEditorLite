@@ -64,6 +64,8 @@ def _rgba(color) -> Color:
     return (c[0], c[1], c[2], c[3])
 
 
+
+
 def _brush_mask(canvas_size: tuple[int, int], points, size: int) -> Image.Image:
     """Coverage mask for a round hard brush of diameter `size` along `points`.
 
@@ -274,6 +276,13 @@ def _composite(base: Image.Image, mask: Image.Image, color: Color, mode: str,
     it surfaced now.
     """
     out = base.copy()
+    # Only the exact string "erase" erases; anything else paints. `mode` comes
+    # from a frontend checkbox, so a stale or misspelt value is the failure to
+    # defend against -- and of the two ways to be wrong, painting when erase was
+    # meant is visible and one undo away, while erasing when paint was meant
+    # destroys pixels that were there. This one line is the whole guard: an
+    # earlier draft normalised `mode` in a helper first, which a mutation run
+    # showed changed nothing, because the comparison here already decides it.
     if mode == "erase":
         # Pull the frame's alpha down by the mask: hard mask clears to 0, a
         # soft one feathers the edge.
@@ -382,11 +391,23 @@ class EraseStroke:
 
 @register_op
 class FloodFill:
-    """Paint the connected run of similar pixels under a click.
+    """Paint -- or clear -- the connected run of similar pixels under a click.
 
     Registered `in_menu=False` and carrying no `Param`s for the same reason crop
     and the strokes are: the interesting argument is a point on the image, and
     typing two numbers is a poor way to choose one.
+
+    **`mode="erase"` is the whole of "flood fill with transparency".** It needs
+    no new mask generator and no new op, because the mask answers *which pixels*
+    and the mode answers *what happens to them* -- two questions that were
+    already separate. What it does need is a truthful undo label, since "Undo
+    Fill" after removing pixels describes the code and not the action; hence
+    `label_for`.
+
+    Worth stating because it is the question a user actually asks: there is no
+    colour that erases. Painting alpha-composites, so a fully transparent colour
+    composited over a frame changes nothing and the op declines. Removing alpha
+    is a different operation, not a different colour.
     """
 
     id = "paint.fill"
@@ -396,25 +417,32 @@ class FloodFill:
     in_menu = False
     params = ()
 
+    def label_for(self, mode: str = "paint", **_) -> str:
+        return "Erase Fill" if mode == "erase" else self.label
+
     def apply(self, doc: Document, sel: Selection, index: int = 0,
               x: int = 0, y: int = 0, color: Color = (0, 0, 0, 255),
-              tolerance: int = 0, **_) -> OpResult:
+              tolerance: int = 0, mode: str = "paint", **_) -> OpResult:
         if not (0 <= int(index) < len(doc.frames)):
             return OpResult(doc, sel)
         image = doc.frames[int(index)].image
         mask = _fill_mask(image, int(x), int(y), max(0, int(tolerance)))
-        return _apply_mask(doc, sel, index, mask, _rgba(color), "paint")
+        return _apply_mask(doc, sel, index, mask, _rgba(color), mode)
 
 
 @register_op
 class DrawShape:
-    """Line, rectangle or ellipse from one drag.
+    """Line, rectangle or ellipse from one drag, drawn or erased.
 
     One op with a `kind` rather than three ops, because the three differ by a
     single `ImageDraw` call and nothing else -- the same reasoning that makes
     Pencil and Eraser one `StrokeTool` in the frontend. An unknown kind declines
     rather than guessing, so a typo in a future tool surfaces as "nothing to do"
     instead of quietly drawing a rectangle.
+
+    `mode="erase"` arrived with the fill bucket's and cost the same: nothing.
+    Erasing a filled rectangle is the shortest way to clear an area, which is
+    the second half of the question that asked for erase-fill in the first place.
     """
 
     id = "paint.shape"
@@ -424,12 +452,15 @@ class DrawShape:
     in_menu = False
     params = ()
 
+    def label_for(self, mode: str = "paint", **_) -> str:
+        return "Erase Shape" if mode == "erase" else self.label
+
     def apply(self, doc: Document, sel: Selection, index: int = 0, kind: str = "line",
               x0: int = 0, y0: int = 0, x1: int = 0, y1: int = 0,
               size: int = 1, color: Color = (0, 0, 0, 255),
-              filled: bool = False, **_) -> OpResult:
+              filled: bool = False, mode: str = "paint", **_) -> OpResult:
         mask = _shape_mask(doc.size, kind, (x0, y0, x1, y1), size, bool(filled))
-        return _apply_mask(doc, sel, index, mask, _rgba(color), "paint")
+        return _apply_mask(doc, sel, index, mask, _rgba(color), mode)
 
 
 @register_op

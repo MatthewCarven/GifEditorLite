@@ -21,6 +21,7 @@ unchanged. The context provides:
     brush_size  -> int
     fg_color    -> (r, g, b, a)
     fill_shapes -> bool             whether a shape tool draws solid or outline
+    erase_mode  -> bool             whether marks remove pixels instead of adding
     tolerance   -> int              how near a colour must be for the fill bucket
     commit(op_id, **params)         run a core op (undoable)
     pick_color(x, y)                read a pixel and adopt it as the fg colour
@@ -54,6 +55,8 @@ class ToolContext(Protocol):
     def fg_color(self) -> tuple[int, int, int, int]: ...
     @property
     def fill_shapes(self) -> bool: ...
+    @property
+    def erase_mode(self) -> bool: ...
     @property
     def tolerance(self) -> int: ...
     def commit(self, op_id: str, **params) -> None: ...
@@ -101,6 +104,13 @@ class StrokeTool(Tool):
 
     Pencil and eraser differ only in which op they commit and whether they carry
     a colour -- everything else, including the transient point buffer, is shared.
+
+    Erase mode is therefore free here in a way it is not for the other tools:
+    strokes have had two ops since M4, so the pencil in erase mode is not a
+    parameter, it is the eraser's op. The Eraser tool stays in the palette
+    regardless -- erasing is common enough to deserve one click rather than two,
+    and a checkbox you have to remember to turn off is a worse default than a
+    tool you can see is selected.
     """
 
     op_id: str = ""
@@ -113,9 +123,17 @@ class StrokeTool(Tool):
     def is_gesturing(self) -> bool:
         return bool(self._points)
 
+    def _erasing(self, ctx: ToolContext) -> bool:
+        """The eraser always erases; everything else asks the checkbox.
+
+        `or`, not the checkbox alone: with Erase ticked *off* the Eraser has to
+        go on erasing, or the box would silently turn the eraser into a pencil.
+        """
+        return self.erase or bool(ctx.erase_mode)
+
     def on_press(self, ctx: ToolContext, x: int, y: int) -> None:
         self._points = [(x, y)]
-        ctx.preview_stroke(self._points, erase=self.erase)
+        ctx.preview_stroke(self._points, erase=self._erasing(ctx))
 
     def on_drag(self, ctx: ToolContext, x: int, y: int) -> None:
         if not self._points:
@@ -123,19 +141,20 @@ class StrokeTool(Tool):
         # Skip duplicate samples so a still cursor doesn't pile up points.
         if (x, y) != self._points[-1]:
             self._points.append((x, y))
-            ctx.preview_stroke(self._points, erase=self.erase)
+            ctx.preview_stroke(self._points, erase=self._erasing(ctx))
 
     def on_release(self, ctx: ToolContext, x: int, y: int) -> None:
         if not self._points:
             return
         if (x, y) != self._points[-1]:
             self._points.append((x, y))
+        erasing = self._erasing(ctx)
         params = dict(index=ctx.frame_index, points=tuple(self._points), size=ctx.brush_size)
-        if not self.erase:
+        if not erasing:
             params["color"] = ctx.fg_color
         self._points = []
         ctx.clear_preview()
-        ctx.commit(self.op_id, **params)
+        ctx.commit("paint.erase" if erasing else self.op_id, **params)
 
     def on_cancel(self, ctx: ToolContext) -> None:
         self._points = []
@@ -298,7 +317,8 @@ class FillTool(Tool):
 
     def on_press(self, ctx: ToolContext, x: int, y: int) -> None:
         ctx.commit(self.op_id, index=ctx.frame_index, x=x, y=y,
-                   color=ctx.fg_color, tolerance=ctx.tolerance)
+                   color=ctx.fg_color, tolerance=ctx.tolerance,
+                   mode="erase" if ctx.erase_mode else "paint")
 
 
 class ShapeTool(Tool):
@@ -365,7 +385,8 @@ class ShapeTool(Tool):
         # to guard against. The op declines anyway if the mark changes nothing.
         ctx.commit(self.op_id, index=ctx.frame_index, kind=self.kind,
                    x0=anchor[0], y0=anchor[1], x1=x, y1=y,
-                   size=ctx.brush_size, color=ctx.fg_color, filled=ctx.fill_shapes)
+                   size=ctx.brush_size, color=ctx.fg_color, filled=ctx.fill_shapes,
+                   mode="erase" if ctx.erase_mode else "paint")
 
     def on_cancel(self, ctx: ToolContext) -> None:
         self._anchor = None

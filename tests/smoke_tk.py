@@ -1037,6 +1037,81 @@ def main() -> int:
         controller.undo()
     root.update()
 
+    # --- erase mode --------------------------------------------------------
+    # The ops are covered headlessly. What only a display answers: does the
+    # checkbox actually reach a tool that is already selected, and does the
+    # colour swatch stand down when the colour stops being used.
+    window.zoom_fit()
+    root.update()
+    doc_w, doc_h = controller.doc.size
+    window._set_fg_color((10, 20, 30, 255))
+    window._fill_var.set(True)
+    drag("rect", (0, 0, doc_w - 1, doc_h - 1))
+    check("erase: a solid frame to clear",
+          controller.frame_image().getpixel((4, 4)) == (10, 20, 30, 255),
+          str(controller.frame_image().getpixel((4, 4))))
+
+    window._select_tool("fill")
+    window._erase_var.set(True)
+    window._on_erase_toggle()
+    root.update()
+    check("erase: the swatch stands down, since the colour is unused",
+          str(window._swatch["state"]) == "disabled", str(window._swatch["state"]))
+    # The swatch alone cannot show this: its background *is* the colour, and an
+    # explicit bg survives being disabled, so the button looks identical either
+    # way. The label greying is the half you can actually see.
+    check("erase: and the Colour label greys, which is the visible half",
+          "disabled" in window._colour_label.state(),
+          str(window._colour_label.state()))
+    check("erase: the status line says the selected tool now erases",
+          "erasing" in window.status["text"], window.status["text"])
+
+    click("fill", doc_w // 2, doc_h // 2)
+    check("erase: the bucket cleared the region instead of recolouring it",
+          controller.frame_image().getpixel((4, 4))[3] == 0,
+          str(controller.frame_image().getpixel((4, 4))))
+    check("erase: the undo entry names what happened, not what the op is called",
+          controller.undo_label == "Erase Fill", str(controller.undo_label))
+
+    # One edit, checked by undoing it rather than by comparing a boolean to
+    # itself -- `can_undo` was already True before the fill, so the obvious
+    # version of this check passes without asserting anything.
+    controller.undo()
+    root.update()
+    check("erase: one undo put every cleared pixel back",
+          controller.frame_image().getpixel((4, 4)) == (10, 20, 30, 255),
+          str(controller.frame_image().getpixel((4, 4))))
+    window._select_tool("pencil")
+    root.update()
+    px, py = window.canvas._image_to_display(3, 3, center=True)
+    ex, ey = window.canvas._image_to_display(9, 3, center=True)
+    window.canvas._on_press(_XY(int(px), int(py)))
+    window.canvas._on_drag(_XY(int(ex), int(ey)))
+    window.canvas._on_release(_XY(int(ex), int(ey)))
+    root.update()
+    check("erase: the pencil erased rather than painted",
+          controller.frame_image().getpixel((6, 3))[3] == 0,
+          str(controller.frame_image().getpixel((6, 3))))
+    check("erase: and it is recorded as an erase",
+          controller.undo_label == "Erase", str(controller.undo_label))
+
+    window._erase_var.set(False)
+    window._on_erase_toggle()
+    root.update()
+    check("erase: unticking brings the swatch back",
+          str(window._swatch["state"]) == "normal", str(window._swatch["state"]))
+    check("erase: and the Colour label with it",
+          "disabled" not in window._colour_label.state(),
+          str(window._colour_label.state()))
+    check("erase: and the hint drops the qualifier",
+          "erasing" not in window.status["text"], window.status["text"])
+
+    window._select_tool("cursor")
+    window._fill_var.set(False)
+    while controller.can_undo:
+        controller.undo()
+    root.update()
+
     # --- select / copy / cut / paste ---------------------------------------
     # The ops and the region arithmetic are covered headlessly. What only a
     # display answers: does a drag on screen select the rectangle the user

@@ -64,6 +64,26 @@ def op_params(op: "Operation") -> tuple[Param, ...]:
     return getattr(op, "params", ())
 
 
+def op_label(op: "Operation", **params) -> str:
+    """What to call this run of the op -- in "Undo X", and in its messages.
+
+    An op may expose `label_for(**params)` when the same op does materially
+    different things depending on its arguments; otherwise the static `label`
+    stands. Same optional-hook shape as `default_params` below, and for the same
+    reason: the general case is a constant, and the exception should cost one
+    method on the op that has it rather than a mechanism everything pays for.
+
+    Earns its place with erase mode. `paint.fill` filling and `paint.fill`
+    clearing are one op with one mask generator -- correctly so -- but "Undo
+    Fill" after removing pixels describes the implementation and misdescribes
+    what the user did, and the undo menu is the one place they look to find out.
+    """
+    dynamic = getattr(op, "label_for", None)
+    if dynamic is not None:
+        return dynamic(**params)
+    return op.label
+
+
 def op_defaults(op: "Operation", doc: Document, sel: Selection) -> dict:
     """Initial values for an op's dialog.
 

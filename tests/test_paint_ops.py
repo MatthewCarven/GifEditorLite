@@ -8,6 +8,7 @@ a no-op onto undo. Source-pixel immutability is covered in test_immutability.py.
 
 from __future__ import annotations
 
+import pytest
 from PIL import Image
 
 from giflite.core.model import Document, Frame, Selection
@@ -520,6 +521,77 @@ class TestPaste:
         r = run("paint.paste", d, index=0, frames=(0, 9), image=self.clip(), x=1, y=1)
         assert len(r.doc) == 2
         assert r.doc.frames[0].image.getpixel((2, 2)) == (0, 0, 255, 255)
+
+
+class TestEraseMode:
+    """Erase-fill and erase-shape: the same mask, the other branch.
+
+    This is what "what colour do I fill with to get transparent" actually
+    needs. The answer to the question as asked is that there isn't one --
+    `test_no_colour_can_erase` is that answer, pinned.
+    """
+
+    def test_no_colour_can_erase(self):
+        """Painting alpha-composites, so a fully transparent colour composited
+        over a frame changes nothing and the op declines. Erase is not a colour
+        you can reach; it is a different operation."""
+        d = doc(1, (8, 8))
+        assert run("paint.fill", d, index=0, x=1, y=1, color=(0, 0, 0, 0)).doc is d
+
+    def test_fill_in_erase_mode_clears_the_region(self):
+        d = doc(1, (8, 8))
+        r = run("paint.fill", d, index=0, x=1, y=1, mode="erase")
+        assert r.doc.frames[0].image.getpixel((4, 4))[3] == 0
+
+    def test_erase_fill_respects_the_region_boundary(self):
+        """It floods the matching run, not the whole frame -- the mask is
+        unchanged, only what happens to it is."""
+        im = Image.new("RGBA", (8, 4), (255, 255, 255, 255))
+        for y in range(4):
+            for x in range(4, 8):
+                im.putpixel((x, y), (10, 10, 10, 255))
+        d = Document((Frame.new(im, 100),), (8, 4))
+        r = run("paint.fill", d, index=0, x=0, y=0, mode="erase")
+        img = r.doc.frames[0].image
+        assert img.getpixel((1, 1))[3] == 0     # the white run went
+        assert img.getpixel((6, 1))[3] == 255   # the dark run stayed
+
+    def test_shape_in_erase_mode_clears(self):
+        d = doc(1, (8, 8))
+        r = run("paint.shape", d, index=0, kind="rect", x0=2, y0=2, x1=5, y1=5,
+                filled=True, mode="erase")
+        img = r.doc.frames[0].image
+        assert img.getpixel((3, 3))[3] == 0
+        assert img.getpixel((6, 6))[3] == 255
+
+    def test_erasing_already_empty_pixels_declines(self):
+        d = doc(1, (8, 8), color=(0, 0, 0, 0))
+        assert run("paint.fill", d, index=0, x=1, y=1, mode="erase").doc is d
+
+    @pytest.mark.parametrize("mode", ["paint", "", "ERASE", "Erase", None, "nonsense"])
+    def test_anything_that_is_not_erase_paints(self, mode):
+        """The mode comes from a frontend checkbox, and of the two ways to be
+        wrong, painting when erase was meant is visible and recoverable while
+        erasing when paint was meant destroys pixels. Default to the additive
+        branch."""
+        d = doc(1, (8, 8), color=(0, 0, 0, 0))
+        r = run("paint.fill", d, index=0, x=1, y=1, color=(9, 9, 9, 255), mode=mode)
+        assert r.doc.frames[0].image.getpixel((1, 1)) == (9, 9, 9, 255)
+
+    def test_the_undo_label_says_what_happened(self):
+        """"Undo Fill" after removing pixels describes the code and misdescribes
+        the action, and the undo menu is where you look to find out."""
+        from giflite.core.ops import get_op, op_label
+        fill, shape = get_op("paint.fill"), get_op("paint.shape")
+        assert op_label(fill) == "Fill"
+        assert op_label(fill, mode="erase") == "Erase Fill"
+        assert op_label(shape, mode="erase") == "Erase Shape"
+
+    def test_ops_without_the_hook_keep_their_static_label(self):
+        from giflite.core.ops import all_ops, op_label
+        for op in all_ops():
+            if not hasattr(op, "label_for"):
+                assert op_label(op, anything=1, at_all=2) == op.label
 
 
 class TestSoftMasksComposite:

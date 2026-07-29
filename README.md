@@ -34,6 +34,14 @@ on the preview to paint the current frame. The mark previews as you drag and
 commits as one undoable edit on release. Hard-edged brushes for now; soft brushes
 are on the roadmap.
 
+**To erase, tick Erase** — there is no transparent colour to pick, and there
+couldn't be: painting composites *over* the frame, so a transparent colour adds
+nothing and the editor will tell you there was nothing to do. Erase is the other
+half of the same operation, and the checkbox applies it to every painting tool
+at once: the pencil erases, the bucket clears a whole region, and a filled
+rectangle wipes an area. The Eraser tool is still there for when that's all you
+want. The colour swatch greys out while Erase is on, because nothing is using it.
+
 **Select, copy and paste:** press **S** or pick Select, drag a rectangle on the
 preview, and a marching-ants marquee marks it. **Ctrl+C** copies those pixels
 from the frame you are on, **Ctrl+X** cuts them, **Ctrl+V** pastes them back
