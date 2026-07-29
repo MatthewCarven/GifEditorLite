@@ -864,3 +864,85 @@ and the shortcut path not writing the menu variable. Screenshotted at 2013% on
   opening with the grid already on annoys you, that is the constant.
 - Ctrl+' cycles Off -> Auto -> Always. The View > Pixel Grid submenu sets it
   directly and reports the current mode.
+
+## 2026-07-29 (later) — Fill, shapes, and the palette moving house
+
+Matthew picked fill + shape tools as the next slice, then made three design
+calls: a Fill checkbox rather than separate filled/outline tools, a tolerance
+box on the bucket, and the palette moved into the view panel. The third was the
+consequential one. Design in ARCHITECTURE §23.
+
+**The §19 mask bet paid, and that is the headline.** "The brush is a mask" was
+written to make a soft brush cheap later. It turned out to make two *different*
+things cheap: fill and shapes cost one mask generator each and nothing else.
+`_apply_stroke` became a thin caller of a new `_apply_mask`, so alpha
+compositing, immutability, fresh uids, the decline convention and the playhead
+rule are now stated once and inherited three times instead of being written out
+three times and got wrong in one of them. Three ops, one commit path.
+
+**Fill splits the question in two.** *Which pixels match* is colour, answered in
+whole-image Pillow ops (C). *Which of those are reachable* is connectivity,
+answered by `ImageDraw.floodfill` walking the match mask. The trick that makes
+the second stage free: flood with 128, and the pixels still at 255 are exactly
+the matching-but-unreachable ones. Which also means the global "replace every
+matching pixel" variant, if ever wanted, is this function with the flood
+deleted. Measured cost is ~1µs/pixel — instant at GIF sizes, 1.1s for a
+whole-canvas fill at 1000x1000. Noted rather than optimised.
+
+**Tolerance is Chebyshev on purpose.** Largest single-channel difference, so
+"tolerance 8" means "no channel differs by more than 8" — a sentence you can
+hold in your head, unlike a radius in RGBA space.
+
+**Shapes are pixel-inclusive; crop is not.** A shape addresses the pixels it
+covers, a crop box the boundaries between them. The conversion has to be undone
+in exactly one place: the marquee draws through pixel *corners*, so a shape's
+far edge is pushed out by one, or the box you drew is a pixel short of the box
+you get. `ShapeTool.preview_box` is that adjustment, static so it is testable
+without a gesture, and both the headless and the display test check it.
+
+**The toolbar couldn't take nine tools, so it stopped being a toolbar.** §21
+already recorded what that row does when it runs out of width — pack drops
+widgets with no error, and the 480px minimum makes it permanent. The palette
+moved into the strip beside the preview, which is now the side panel: tools and
+settings always, view section conditional. The top row is gone, which hands the
+preview back ~34px of height.
+
+**And the failure came straight back on the other axis.** A column runs out of
+*height*, and at the 480x400 minimum it does: the panel wanted 412px and had
+238. Pack's answer was to keep the map and silently drop the zoom row. Half a
+navigator, no error, exactly the shape of the original bug. `_view_section_fits`
+makes it a decision — whole section or none of it, because the half that remains
+looks like it works. I only found this because I went looking; the lesson from
+§21 is that this window will not tell you.
+
+**Two of my own tests were wrong again, in the same way as this morning.** The
+`coords` test hardcoded its list of pixel tools, so adding four tools left it
+passing while checking none of them — it derives from the palette now. And the
+new smoke check for the committed rect drew it in the colour I had just flooded
+the entire frame with, so it asserted nothing at all; it passed on a build where
+the shape op did nothing. Both are the same failure mode: a test that still runs
+but has quietly stopped covering its subject.
+
+**A cheap win I did not expect.** The immutability suite's
+`test_every_registered_op_is_covered_here` failed the moment the new ops
+registered, before I had written a line of test for them. That guard has been
+sitting there since M2 doing nothing visible; this is what it was for. Fill is a
+sharper case for it than any previous op, too — it is the only one that *reads*
+the frame it is about to paint.
+
+**Numbers:** 426 headless (was 376), Xvfb smoke 211 checks (was 187). Six
+mutations confirmed to break the new checks: fill losing its connectivity stage
+(becoming a global replace), the shape box treated as exclusive, the marquee
+forgetting its +1, the panel fit guard dropped, tolerance ignored, and the fill
+tool committing on drag as well as press.
+
+**Handover**
+
+- Keys: F fill, L line, R rect, O ellipse, alongside the existing C/B/E/I. All
+  yield to a focused text field, so typing in Size or Tol. is safe.
+- The preview no longer widens when you return to fit — the palette lives there
+  permanently now. Deliberate, but it is a visible change and you may dislike it.
+- `PANEL_WIDTH` is 200 (was 168); the strip measures ~211px in practice because
+  of the Colour/Fill row. If it feels wide, that row is where the width is.
+- Fill on a photographic or dithered GIF will want a tolerance well above 0.
+  Flat pixel art wants exactly 0.

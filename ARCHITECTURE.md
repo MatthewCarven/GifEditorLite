@@ -785,3 +785,108 @@ Fit is not a synonym for "zoomed out". A 160x80 GIF fits at 552% in a 900px
 window, so with `Auto` the grid is on the moment the file opens. That is the
 rule working as specified — you are, in fact, past 4x — but it is a surprise
 worth naming, and `GRID_AUTO_SCALE` is the one constant that changes it.
+
+## 23. Fill and shapes, and the palette moving house
+
+Four new tools -- flood fill, line, rectangle, ellipse -- plus the layout change
+they forced.
+
+### 23.1 The mask bet paid
+
+§19 claimed "the brush is a mask", meaning a soft brush later would swap the
+stamp and change nothing above it. Fill and shapes are the first real test of
+that claim from a different direction, and they cost two mask *generators* and
+nothing else:
+
+    _brush_mask   points + diameter    -> L        (§19)
+    _fill_mask    seed + tolerance     -> L        new
+    _shape_mask   kind + box + width   -> L        new
+                                          |
+                                    _apply_mask -> OpResult
+
+`_apply_stroke` became a thin caller of a new `_apply_mask`, which is now the
+single commit path for every painting op. Alpha compositing, immutability, fresh
+uids, declining a no-op and the playhead rule are therefore stated once and
+inherited three times, rather than reimplemented and got subtly wrong in one of
+them.
+
+`paint.shape` is one op with a `kind`, not three ops, for the same reason Pencil
+and Eraser are one `StrokeTool`: they differ by a single `ImageDraw` call. An
+unknown kind declines rather than defaulting, so a typo in a future tool
+surfaces as "nothing to do" instead of quietly drawing a rectangle.
+
+### 23.2 Fill: two stages, one in C and one in Python
+
+`_fill_mask` answers two different questions separately.
+
+*Which pixels match?* is a colour question, answered by `_match_mask` in whole-
+image Pillow operations -- `ImageChops.difference` plus a 256-entry LUT, both C.
+Tolerance is Chebyshev (the largest single-channel difference), not Euclidean:
+"tolerance 8" then means "no channel differs by more than 8", which is a
+sentence a user can hold in their head rather than a radius in a 4-space they
+cannot picture.
+
+*Which of those are reachable?* is a connectivity question, answered by
+`ImageDraw.floodfill` walking the match mask. Marking the reachable run with 128
+means the pixels left at 255 are exactly the matching-but-unreachable ones, and
+a LUT separates them -- which is the whole of "contiguous, not global", and
+means a global variant would be this function without the flood.
+
+Writing one combined flood in Python would put a per-pixel colour comparison
+inside a per-pixel walk. As it stands the walk is the only Python, and it costs
+~1µs/pixel: instant at GIF sizes, ~1.1s for a whole-canvas fill at 1000x1000.
+Acceptable for "lite"; noted in TODO if it ever bites.
+
+### 23.3 Pixel-inclusive, unlike crop
+
+A shape addresses the pixels it covers; a crop box addresses the boundaries
+*between* pixels. So `ShapeTool.coords = "pixel"` while `CropTool.coords =
+"edge"`, and a rectangle dragged from pixel 2 to pixel 7 covers both ends.
+
+That convention has to be undone in one place. `preview_rect` draws corner-to-
+corner through `image_to_display(..., center=False)`, which returns a pixel's
+top-left corner -- correct for crop, whose numbers are already boundaries. For a
+shape the far edge must be pushed out by one, or the marquee is a pixel short on
+each far side and the committed shape does not match the box the user drew.
+`ShapeTool.preview_box` is that adjustment, and it is a static method so it can
+be tested without a gesture.
+
+Fill is the one committing tool that fires on *press*. There is nothing to
+preview -- the affected region depends on pixels the frontend would have to
+reimplement the op to know -- so waiting for the release would add latency and
+change nothing. `is_gesturing` stays False, which also means Esc puts the tool
+away rather than cancelling a gesture that was never in progress.
+
+### 23.4 The toolbar became a panel
+
+Five tools fitted across the top. Nine would not, and §21 records precisely what
+this window does when a row runs out of width: `pack` drops widgets off the end
+with no error, and only a screenshot catches it. The 480px minimum width makes
+that permanent rather than merely tight.
+
+So the palette moved into the strip beside the preview, which stops being
+view-only and becomes the side panel: **tools and settings always, view section
+conditional**. The top row is gone entirely, which gives the preview back ~34px
+of height.
+
+Two consequences worth stating:
+
+- **Tools are a two-column grid.** Nine stacked radios are ~190px of panel
+  height; two columns are ~105px, and that difference is what keeps the view
+  section fitting underneath at the default window size.
+- **The preview's width is now constant.** It no longer widens when you return
+  to fit. That is a deliberate trade: the canvas jumping 200px sideways every
+  time you crossed fit would be worse than the width it costs.
+
+### 23.5 The same failure, on the other axis
+
+Turning a row into a column turns "runs out of width" into "runs out of height",
+and at the 480x400 minimum that is not hypothetical: measured, the panel wanted
+412px and had 238. What `pack` did with it was instructive -- the map survived
+and the zoom row silently vanished. Half a navigator, no error.
+
+`_view_section_fits` makes that a decision instead. If the panel is too short
+for the whole view section, none of it is shown: half a navigator is worse than
+none, because the half that remains looks like it works. The tools above it are
+never at risk, both because they are packed first and because the smoke test
+asserts every palette entry is mapped at the minimum window size.

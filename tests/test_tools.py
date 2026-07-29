@@ -15,9 +15,14 @@ import pytest
 
 from giflite.ui.tk.tools import (
     CropTool,
+    EllipseTool,
     EraserTool,
     EyedropperTool,
+    FillTool,
+    LineTool,
     PencilTool,
+    RectTool,
+    ShapeTool,
     default_tools,
 )
 
@@ -26,10 +31,13 @@ class FakeContext:
     """Records what a tool asked for instead of doing it."""
 
     def __init__(self, frame_index: int = 2, brush_size: int = 3,
-                 fg_color=(255, 0, 0, 255)) -> None:
+                 fg_color=(255, 0, 0, 255), fill_shapes: bool = False,
+                 tolerance: int = 0) -> None:
         self._frame_index = frame_index
         self._brush_size = brush_size
         self._fg_color = fg_color
+        self._fill_shapes = fill_shapes
+        self._tolerance = tolerance
         self.commits: list[tuple[str, dict]] = []
         self.strokes: list[tuple[tuple, bool]] = []
         self.rects: list[tuple] = []
@@ -48,6 +56,14 @@ class FakeContext:
     @property
     def fg_color(self):
         return self._fg_color
+
+    @property
+    def fill_shapes(self) -> bool:
+        return self._fill_shapes
+
+    @property
+    def tolerance(self) -> int:
+        return self._tolerance
 
     def commit(self, op_id: str, **params) -> None:
         self.commits.append((op_id, params))
@@ -200,7 +216,8 @@ class TestEyedropper:
 class TestToolSet:
     def test_default_tools_are_keyed_by_id(self):
         tools = default_tools()
-        assert set(tools) == {"crop", "pencil", "eraser", "eyedropper"}
+        assert set(tools) == {"crop", "pencil", "eraser", "fill",
+                              "line", "rect", "ellipse", "eyedropper"}
         assert all(tool.id == key for key, tool in tools.items())
 
     def test_pixel_tools_want_pixels_and_crop_wants_edges(self):
@@ -208,11 +225,18 @@ class TestToolSet:
         boundaries *between* pixels. The canvas maps each differently (floor vs
         round), so a tool declaring the wrong one paints a pixel off -- invisible
         at 1:1 zoom, a whole pixel wrong on blown-up pixel art.
+
+        Derived from the palette rather than from a hardcoded list, because a
+        hardcoded list is a test that silently stops covering the thing it names.
+        This one did: adding fill and the three shape tools left it passing while
+        checking none of them.
         """
         tools = default_tools()
         assert tools["crop"].coords == "edge"
-        for tid in ("pencil", "eraser", "eyedropper"):
-            assert tools[tid].coords == "pixel", tid
+        for tid, tool in tools.items():
+            if tid == "crop":
+                continue
+            assert tool.coords == "pixel", tid
 
     def test_coords_is_always_a_known_mode(self):
         for tool in default_tools().values():
@@ -232,3 +256,117 @@ class TestToolSet:
             text = handle.read()
         for banned in ("import tkinter", "from tkinter", "from PIL"):
             assert banned not in text, banned
+
+
+# ---- the fill bucket -----------------------------------------------------
+
+
+class TestFillTool:
+    def test_it_commits_on_press_with_no_drag_needed(self):
+        """The one committing tool that isn't a drag. There is nothing to
+        preview -- the affected region depends on pixels the frontend would have
+        to reimplement the op to know -- so waiting for a release would add
+        latency and change nothing."""
+        tool, ctx = FillTool(), FakeContext(frame_index=4, fg_color=(0, 255, 0, 255))
+        tool.on_press(ctx, 7, 9)
+        assert ctx.commits == [("paint.fill", {
+            "index": 4, "x": 7, "y": 9, "color": (0, 255, 0, 255), "tolerance": 0,
+        })]
+
+    def test_it_passes_the_tolerance_from_the_context(self):
+        tool, ctx = FillTool(), FakeContext(tolerance=24)
+        tool.on_press(ctx, 1, 1)
+        assert ctx.commits[0][1]["tolerance"] == 24
+
+    def test_it_is_never_gesturing_so_esc_puts_it_away(self):
+        tool, ctx = FillTool(), FakeContext()
+        tool.on_press(ctx, 1, 1)
+        assert tool.is_gesturing is False
+
+    def test_a_drag_does_not_paint_a_trail_of_fills(self):
+        """Dragging with the bucket held down would otherwise commit one
+        undoable fill per pixel crossed."""
+        tool, ctx = FillTool(), FakeContext()
+        tool.on_press(ctx, 1, 1)
+        tool.on_drag(ctx, 2, 2)
+        tool.on_drag(ctx, 3, 3)
+        tool.on_release(ctx, 3, 3)
+        assert len(ctx.commits) == 1
+
+
+# ---- shapes --------------------------------------------------------------
+
+
+class TestShapeTools:
+    @pytest.mark.parametrize("cls,kind", [
+        (LineTool, "line"), (RectTool, "rect"), (EllipseTool, "ellipse"),
+    ])
+    def test_each_tool_commits_its_own_kind(self, cls, kind):
+        tool, ctx = cls(), FakeContext()
+        tool.on_press(ctx, 2, 3)
+        tool.on_release(ctx, 7, 9)
+        op_id, params = ctx.commits[0]
+        assert op_id == "paint.shape"
+        assert params["kind"] == kind
+        assert (params["x0"], params["y0"], params["x1"], params["y1"]) == (2, 3, 7, 9)
+
+    def test_it_carries_size_colour_and_fill_from_the_context(self):
+        tool = RectTool()
+        ctx = FakeContext(brush_size=5, fg_color=(1, 2, 3, 255), fill_shapes=True)
+        tool.on_press(ctx, 0, 0)
+        tool.on_release(ctx, 4, 4)
+        params = ctx.commits[0][1]
+        assert (params["size"], params["color"], params["filled"]) == (5, (1, 2, 3, 255), True)
+
+    def test_the_preview_encloses_the_last_pixel_rather_than_bisecting_it(self):
+        """A shape's coordinates are pixels; `preview_rect` draws through
+        pixel *corners*. So the far edge is pushed out by one, or the marquee is
+        a pixel short on each far side and the committed shape doesn't match the
+        box the user drew."""
+        assert ShapeTool.preview_box((2, 3), 7, 9) == (2, 3, 8, 10)
+
+    def test_the_preview_normalises_a_backwards_drag(self):
+        assert ShapeTool.preview_box((7, 9), 2, 3) == (2, 3, 8, 10)
+
+    def test_a_single_pixel_click_still_previews_one_whole_pixel(self):
+        assert ShapeTool.preview_box((4, 4), 4, 4) == (4, 4, 5, 5)
+
+    def test_it_previews_live_while_dragging(self):
+        tool, ctx = RectTool(), FakeContext()
+        tool.on_press(ctx, 1, 1)
+        tool.on_drag(ctx, 5, 5)
+        tool.on_drag(ctx, 6, 7)
+        assert ctx.rects == [(1, 1, 2, 2), (1, 1, 6, 6), (1, 1, 7, 8)]
+        assert ctx.commits == []          # nothing committed until release
+
+    def test_a_click_without_a_drag_still_marks(self):
+        """Unlike crop, where an empty box would mean "crop to nothing", a 1x1
+        rect is a legitimate mark -- and the op declines anyway if it changes
+        nothing."""
+        tool, ctx = RectTool(), FakeContext()
+        tool.on_press(ctx, 3, 3)
+        tool.on_release(ctx, 3, 3)
+        assert len(ctx.commits) == 1
+
+    def test_esc_mid_drag_commits_nothing_and_clears_the_marquee(self):
+        tool, ctx = EllipseTool(), FakeContext()
+        tool.on_press(ctx, 1, 1)
+        tool.on_drag(ctx, 8, 8)
+        assert tool.is_gesturing
+        tool.on_cancel(ctx)
+        assert not tool.is_gesturing
+        assert ctx.commits == []
+        assert ctx.clears >= 1
+
+    def test_a_release_with_no_press_does_nothing(self):
+        """Reachable: press on the timeline, release over the canvas."""
+        tool, ctx = LineTool(), FakeContext()
+        tool.on_release(ctx, 4, 4)
+        assert ctx.commits == []
+
+    def test_shapes_address_pixels_not_boundaries(self):
+        """The `coords` declaration is the one thing separating a shape from a
+        crop box, and it is a whole pixel at high zoom."""
+        for cls in (LineTool, RectTool, EllipseTool):
+            assert cls.coords == "pixel"
+        assert CropTool.coords == "edge"

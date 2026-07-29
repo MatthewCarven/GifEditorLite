@@ -37,13 +37,36 @@ from giflite.ui.tk.view import (
 APP_NAME = "GIF Editor Lite"
 EMPTY_TEXT = "No animation open\n\nCtrl+O to open a GIF"
 
-# The view panel: wide enough for a readable map and a "Fit (3200%)" readout,
-# narrow enough that losing it off the preview at a 480px window is bearable.
-PANEL_WIDTH = 168
+# The side panel: wide enough for two columns of tool radios and a readable map
+# with a "Fit (3200%)" readout, narrow enough to leave a usable preview at the
+# window's 480px minimum width.
+PANEL_WIDTH = 200
 MINIMAP_HEIGHT = 120
 
 # The palette's no-tool selection: plain viewing, no gesture armed.
 CURSOR_TOOL = "cursor"
+
+# Palette order, filling the two-column grid left-to-right. Cursor first because
+# it is the way *out* of a tool; the rest are grouped as marks (pencil, eraser,
+# fill), shapes (line, rect, ellipse), then the two that don't paint at all.
+TOOL_BUTTONS = (
+    ("cursor", "Cursor"), ("crop", "Crop"),
+    ("pencil", "Pencil"), ("eraser", "Eraser"),
+    ("fill", "Fill"), ("line", "Line"),
+    ("rect", "Rect"), ("ellipse", "Ellipse"),
+    ("eyedropper", "Picker"),
+)
+
+# Bare-key shortcuts for the palette. B/E/I/C are the inherited ones (b for
+# brush, i for the picker -- both borrowed from every other editor); F/L/R/O are
+# the new ones and were checked against the existing bare keys, which are space,
+# the arrows, Home/End and Delete/BackSpace. All of them yield to a focused text
+# field via `_bind_bare_key`, or typing "4" then "e" in the Size box would
+# quietly swap your tool.
+TOOL_KEYS = (
+    ("c", "crop"), ("b", "pencil"), ("e", "eraser"), ("f", "fill"),
+    ("l", "line"), ("r", "rect"), ("o", "ellipse"), ("i", "eyedropper"),
+)
 
 # Widget classes that own their keystrokes. Every bare-key shortcut below is
 # also an editing key inside a text field -- Left/Right/Home/End move the caret,
@@ -227,10 +250,8 @@ class MainWindow:
         # Tool shortcuts. Each selects a tool on the preview; the canvas owns Esc
         # while one is active, so the global Esc below still deselects the rest
         # of the time.
-        bind_key("<c>", lambda _e: self._select_tool("crop"))
-        bind_key("<b>", lambda _e: self._select_tool("pencil"))
-        bind_key("<e>", lambda _e: self._select_tool("eraser"))
-        bind_key("<i>", lambda _e: self._select_tool("eyedropper"))
+        for key, tool_id in TOOL_KEYS:
+            bind_key(f"<{key}>", lambda _e, t=tool_id: self._select_tool(t))
         bind_key("<Escape>", lambda _e: self._clear_selection())
         # Zoom. Ctrl-combinations, so no _bind_bare_key guard is needed -- they
         # don't collide with typing. Both <Control-plus> and <Control-equal> are
@@ -277,9 +298,6 @@ class MainWindow:
         self.root.bind_all(sequence, handler)
 
     def _build_body(self) -> None:
-        # Tool palette across the top; the preview canvas takes the slack below.
-        self._build_toolbar()
-
         # Packed bottom-up so the preview canvas takes all the slack.
         self.status = ttk.Label(self.root, text="Ready", anchor="w", padding=(8, 3))
         self.status.pack(side="bottom", fill="x")
@@ -296,11 +314,13 @@ class MainWindow:
 
         self._build_transport()
 
-        # The panel is packed before the canvas so the canvas takes what's left;
-        # it stays unpacked until there is something to navigate (see
-        # `_refresh_view_controls`).
-        self._build_view_panel()
+        # The side panel is packed before the canvas so the canvas takes what's
+        # left. Unlike the old view-only strip it is *always* shown, because it
+        # now carries the tool palette; only its view section comes and goes
+        # (see `_refresh_view_controls`).
+        self._build_side_panel()
         self._panel_shown = False
+        self.side_panel.pack(side="right", fill="y")
 
         self.canvas = PreviewCanvas(self.root)
         self.canvas.pack(side="top", fill="both", expand=True)
@@ -329,52 +349,97 @@ class MainWindow:
         self.speed.bind("<<ComboboxSelected>>", self._on_speed)
         self.speed.pack(side="right")
 
-    def _build_toolbar(self) -> None:
-        bar = ttk.Frame(self.root, padding=(8, 4))
-        bar.pack(side="top", fill="x")
+    def _build_side_panel(self) -> None:
+        """Everything that isn't the preview, the timeline or the transport.
 
-        ttk.Label(bar, text="Tools").pack(side="left", padx=(0, 6))
+        Three sections in one strip beside the canvas: the tool palette, the
+        settings those tools read, and the view controls. The first two are
+        always present; the third comes and goes with the zoom.
+
+        **Why it isn't a toolbar any more.** The palette used to be a row across
+        the top, and §21 records what that row did when it ran out of width: at
+        1087px wanted against 900 available, `pack` dropped three widgets off the
+        end with no error, and only a screenshot caught it. Adding fill and three
+        shape tools would have pushed a five-tool row to nine. A vertical strip
+        turns "runs out of width" -- which the window's 480px minimum makes
+        permanent -- into "runs out of height", which is bounded by the section
+        that is already conditional. Losing the top row also gives the preview
+        back ~34px of height.
+
+        **The tools are a two-column grid, not a stack.** Nine stacked radios are
+        ~190px of panel; two columns are ~105px, which is what keeps the view
+        section fitting underneath at the default window size. `_panel_fits`
+        turns that arithmetic into a check rather than a hope.
+        """
+        self.side_panel = ttk.Frame(self.root, padding=(6, 6))
+
+        # ---- tools ----
+        ttk.Label(self.side_panel, text="Tools").pack(side="top", anchor="w")
+        tools = ttk.Frame(self.side_panel)
+        tools.pack(side="top", fill="x", pady=(2, 0))
         self._tool_var = tk.StringVar(value=CURSOR_TOOL)
         # "cursor" is the no-tool default (plain viewing); the rest map to entries
         # in self._tools. Radiobuttons give a free single-selection UI, and
         # exactly one tool being active is the point -- that's what having folded
         # crop in here buys (it used to be a mode running alongside them).
-        for tid, text in (("cursor", "Cursor"), ("crop", "Crop"), ("pencil", "Pencil"),
-                          ("eraser", "Eraser"), ("eyedropper", "Eyedropper")):
-            ttk.Radiobutton(
-                bar, text=text, value=tid, variable=self._tool_var,
+        # Kept as an attribute so the smoke test can assert every one of them is
+        # actually mapped; a radio that pack silently dropped is a tool the user
+        # cannot reach, and that is the §21 failure exactly.
+        self._tool_buttons: dict[str, ttk.Radiobutton] = {}
+        for i, (tid, text) in enumerate(TOOL_BUTTONS):
+            button = ttk.Radiobutton(
+                tools, text=text, value=tid, variable=self._tool_var,
                 command=lambda t=tid: self._select_tool(t),
-            ).pack(side="left")
+            )
+            button.grid(row=i // 2, column=i % 2, sticky="w")
+            self._tool_buttons[tid] = button
 
-        ttk.Separator(bar, orient="vertical").pack(side="left", fill="y", padx=10)
+        ttk.Separator(self.side_panel, orient="horizontal").pack(
+            side="top", fill="x", pady=8)
 
-        ttk.Label(bar, text="Colour").pack(side="left", padx=(0, 4))
+        # ---- settings the tools read ----
+        # Two balanced rows rather than one long one. Colour+Size on a single row
+        # measured 216px, which pushed the whole panel to 228 and took that width
+        # off the preview for no reason -- the minimap only needs 188.
+        colour_row = ttk.Frame(self.side_panel)
+        colour_row.pack(side="top", fill="x")
+        ttk.Label(colour_row, text="Colour").pack(side="left")
         # Classic tk.Button so the swatch can carry the colour as its background.
-        self._swatch = tk.Button(bar, width=3, bg=_rgb_hex(self._fg_color),
+        self._swatch = tk.Button(colour_row, width=3, bg=_rgb_hex(self._fg_color),
                                  relief="sunken", command=self._choose_color)
-        self._swatch.pack(side="left")
+        self._swatch.pack(side="left", padx=(4, 0))
+        self._fill_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(colour_row, text="Fill", variable=self._fill_var).pack(
+            side="right")
 
-        ttk.Label(bar, text="Size").pack(side="left", padx=(10, 4))
+        size_row = ttk.Frame(self.side_panel)
+        size_row.pack(side="top", fill="x", pady=(6, 0))
+        ttk.Label(size_row, text="Size").pack(side="left", padx=(0, 4))
         self._size_var = tk.StringVar(value=str(self._brush_size))
         self._size_var.trace_add("write", lambda *_: self._on_size_change())
-        # Kept as an attribute so the smoke test can put focus in it: it's the
-        # window's one text field, and therefore the thing bare-key shortcuts
+        # Kept as an attribute so the smoke test can put focus in it: it's one of
+        # the window's two text fields, and therefore a thing bare-key shortcuts
         # have to yield to.
-        self._size_box = ttk.Spinbox(bar, from_=1, to=64, width=4,
+        self._size_box = ttk.Spinbox(size_row, from_=1, to=64, width=4,
                                      textvariable=self._size_var)
         self._size_box.pack(side="left")
+        ttk.Label(size_row, text="Tol.").pack(side="left", padx=(10, 4))
+        self._tolerance_var = tk.StringVar(value="0")
+        self._tolerance_box = ttk.Spinbox(size_row, from_=0, to=255, width=4,
+                                          textvariable=self._tolerance_var)
+        self._tolerance_box.pack(side="left")
 
-    def _build_view_panel(self) -> None:
-        """The navigator and the zoom controls, in a strip beside the preview.
+        self._build_view_section()
 
-        This started as a cluster on the right of the toolbar and did not fit:
-        that row needs 1087px and gets 900, so Tk silently dropped the last
-        three widgets off the end -- and the window's 480px minimum made the
-        idea hopeless rather than merely tight. Everything view-related moved
-        here instead, which leaves the toolbar exactly as it was and gives the
-        map somewhere to live (ARCHITECTURE.md §21).
+    def _build_view_section(self) -> None:
+        """The navigator and the zoom controls, at the bottom of the panel.
+
+        Packed last on purpose. `pack` starves whatever it allocates last, so if
+        the panel is ever too short for its contents this is what suffers --
+        which is the right order, because it is the section that is already
+        optional. The tools above it are not.
         """
-        self.view_panel = ttk.Frame(self.root, padding=(6, 6))
+        self.view_panel = ttk.Frame(self.side_panel)
 
         self.minimap = MiniMap(self.view_panel, on_center=self._center_view_on,
                                height=MINIMAP_HEIGHT, width=PANEL_WIDTH - 12)
@@ -619,9 +684,31 @@ class MainWindow:
             (self._actual_button, abs(view.scale - 1.0) > 1e-9),
         ):
             button.configure(state="normal" if (has_doc and enabled) else "disabled")
-        self._show_view_panel(has_doc and not view.is_fit)
+        self._show_view_panel(has_doc and not view.is_fit and self._view_section_fits())
         if self._panel_shown:
             self._update_minimap()
+
+    def _view_section_fits(self) -> bool:
+        """Whether the panel is tall enough for the view section as well.
+
+        Without this the section is shown regardless and `pack` amputates it:
+        measured at the 480x400 minimum window, the map survived and the zoom
+        row simply vanished -- no error, a control silently gone. That is §21's
+        failure repeated on the other axis, and the fix is the same shape as the
+        original one: decide it deliberately instead of letting the geometry
+        manager decide it quietly.
+
+        Whole section or none of it. Half a navigator is worse than no navigator,
+        because the half that remains looks like it works.
+        """
+        available = self.side_panel.winfo_height()
+        if available <= 1:
+            return True  # not laid out yet; the next <Configure> asks again
+        fixed = sum(child.winfo_reqheight() for child in self.side_panel.winfo_children()
+                    if child is not self.view_panel)
+        # 12 for the panel's own vertical padding, 10 for the gap above the
+        # section -- both are pack options above, not guesses.
+        return fixed + self.view_panel.winfo_reqheight() + 22 <= available
 
     def _show_view_panel(self, wanted: bool) -> None:
         """The panel earns its width only when there is something to navigate.
@@ -638,9 +725,9 @@ class MainWindow:
             return
         self._panel_shown = wanted
         if wanted:
-            # before=canvas so the panel takes its width off the right-hand side
-            # rather than appearing below.
-            self.view_panel.pack(side="right", fill="y", before=self.canvas)
+            # Inside the side panel now, below the palette, and packed last so it
+            # is what gets starved if the panel is ever too short.
+            self.view_panel.pack(side="top", fill="x", pady=(10, 0))
         else:
             self.view_panel.pack_forget()
 
@@ -706,6 +793,25 @@ class MainWindow:
     @property
     def fg_color(self):
         return self._fg_color
+
+    @property
+    def fill_shapes(self) -> bool:
+        return bool(self._fill_var.get())
+
+    @property
+    def tolerance(self) -> int:
+        """How near a colour has to be for the fill bucket to cross it.
+
+        Read live off the spinbox and clamped here rather than mirrored into an
+        attribute on every keystroke, because mid-edit the box legitimately holds
+        "" or "-" and neither is a tolerance. The brush size predates this and
+        does mirror; that one has a `trace_add` swallowing the same garbage, so
+        both are safe, but this is the shorter way to be safe.
+        """
+        try:
+            return max(0, min(int(float(self._tolerance_var.get())), 255))
+        except (TypeError, ValueError):
+            return 0
 
     def commit(self, op_id: str, **params) -> None:
         self.controller.run_op(op_id, **params)

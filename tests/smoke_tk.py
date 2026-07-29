@@ -792,23 +792,26 @@ def main() -> int:
     check("zoom: the status line reports the zoom", view.label in window.status["text"],
           window.status["text"])
 
-    # --- the view panel and the navigator ---------------------------------
+    # --- the side panel, the palette and the navigator ---------------------
     # The panel replaced a toolbar cluster that did not fit (1087px wanted,
-    # 900 available -- Tk silently dropped three widgets off the end). It
-    # carries the zoom controls and the map, and it is the only way to pan.
+    # 900 available -- Tk silently dropped three widgets off the end). It now
+    # carries the tool palette as well, which is *always* shown; only the view
+    # section comes and goes with the zoom.
     def state_of(button):
         return str(button["state"])
 
     window.zoom_fit()
     root.update()
-    check("panel: hidden at fit, where the map would say nothing",
+    check("panel: the palette is always present",
+          window.side_panel.winfo_ismapped())
+    check("panel: view section hidden at fit, where the map would say nothing",
           not window.view_panel.winfo_ismapped())
     check("panel: Fit is disabled when already fitted",
           state_of(window._fit_button) == "disabled")
 
     window.zoom_in()
     root.update()
-    check("panel: appears once there is something to navigate",
+    check("panel: view section appears once there is something to navigate",
           window.view_panel.winfo_ismapped())
     check("panel: readout agrees with the transform",
           window._zoom_label["text"] == view.label, window._zoom_label["text"])
@@ -879,11 +882,158 @@ def main() -> int:
     window._fit_button.invoke()
     root.update()
     check("panel: the Fit button returns to fit", view.is_fit, view.label)
-    check("panel: and hides itself again", not window.view_panel.winfo_ismapped())
-    check("panel: the preview got its width back",
-          window.canvas.winfo_width() > canvas_w_with_panel,
+    check("panel: the view section hides itself again",
+          not window.view_panel.winfo_ismapped())
+    # The preview does *not* get width back any more, and that is the point of
+    # the restructure: the palette lives here permanently, so the strip's width
+    # is a constant rather than something that jumps as you zoom. The canvas
+    # jumping 200px sideways every time you crossed fit would be worse than the
+    # width it costs.
+    check("panel: the preview width is now stable across a zoom change",
+          window.canvas.winfo_width() == canvas_w_with_panel,
           f"{canvas_w_with_panel} -> {window.canvas.winfo_width()}")
+
+    # --- the palette survives a cramped window ----------------------------
+    # §21's failure was pack silently dropping widgets off a row that didn't
+    # fit. The palette is a column now, so the same risk lives on the other
+    # axis -- and at the 480x400 minimum it is real: measured, the view section
+    # wanted 412px of a 238px panel. `_view_section_fits` hides the section
+    # deliberately instead of letting pack amputate half of it.
+    root.geometry("480x400")
+    root.update()
+    root.update()
+    unreachable = [tid for tid in window._tool_buttons
+                   if not window._tool_buttons[tid].winfo_ismapped()]
+    check("cramped: every tool is still reachable at the minimum window size",
+          unreachable == [], f"dropped: {unreachable}")
+    check("cramped: the view section stands down rather than being amputated",
+          not window.view_panel.winfo_ismapped())
+    window.zoom_in()
+    root.update()
+    check("cramped: and stays down even when zoomed, rather than half-drawn",
+          not window.view_panel.winfo_ismapped()
+          or window._zoom_in_button.winfo_ismapped(),
+          "half a navigator is worse than none")
+    root.geometry("900x680")
+    root.update()
+    root.update()
+    check("cramped: it comes back when there is room again",
+          window.view_panel.winfo_ismapped() and window._zoom_in_button.winfo_ismapped())
+    window.zoom_fit()
     window._select_tool("cursor")
+    root.update()
+
+    # --- fill and shapes through the real canvas dispatch ------------------
+    # The ops are covered headlessly. What only a display answers: does a click
+    # at a given screen point reach the pixel the user aimed at, and does the
+    # marquee a shape draws match the shape that lands?
+    window.zoom_fit()
+    root.update()
+    doc_w, doc_h = controller.doc.size
+
+    def click(tool_id, ix, iy):
+        window._select_tool(tool_id)
+        dx, dy = window.canvas._image_to_display(ix, iy, center=True)
+        window.canvas._on_press(_XY(int(dx), int(dy)))
+        window.canvas._on_release(_XY(int(dx), int(dy)))
+        root.update()
+
+    def drag(tool_id, box):
+        window._select_tool(tool_id)
+        x0, y0, x1, y1 = box
+        sx, sy = window.canvas._image_to_display(x0, y0, center=True)
+        ex, ey = window.canvas._image_to_display(x1, y1, center=True)
+        window.canvas._on_press(_XY(int(sx), int(sy)))
+        window.canvas._on_drag(_XY(int(ex), int(ey)))
+        window.canvas._on_release(_XY(int(ex), int(ey)))
+        root.update()
+
+    # Give the frame a known flat colour to fill into, via a filled rect over
+    # the whole canvas -- which also exercises the shape path first.
+    window._set_fg_color((10, 20, 30, 255))
+    window._fill_var.set(True)
+    edits_before = controller.can_undo
+    drag("rect", (0, 0, doc_w - 1, doc_h - 1))
+    frame = controller.frame_image()
+    check("shape: a filled rect drag covers the canvas it was dragged over",
+          frame.getpixel((0, 0)) == (10, 20, 30, 255)
+          and frame.getpixel((doc_w - 1, doc_h - 1)) == (10, 20, 30, 255),
+          f"{frame.getpixel((0, 0))} / {frame.getpixel((doc_w - 1, doc_h - 1))}")
+    check("shape: it landed as one undoable edit", controller.can_undo != edits_before)
+
+    window._set_fg_color((200, 100, 50, 255))
+    click("fill", doc_w // 2, doc_h // 2)
+    frame = controller.frame_image()
+    check("fill: clicking a flat region recolours all of it",
+          frame.getpixel((0, 0)) == (200, 100, 50, 255)
+          and frame.getpixel((doc_w - 1, doc_h - 1)) == (200, 100, 50, 255),
+          str(frame.getpixel((0, 0))))
+
+    # A shape's marquee has to enclose the pixels the shape will cover. The
+    # preview draws through pixel *corners*, so the far edge is pushed out by
+    # one -- get that wrong and the box you drew is a pixel short of the box you
+    # get, which is invisible at 1:1 and obvious at 30x.
+    # A colour that isn't already on the frame -- the previous fill made every
+    # pixel (200, 100, 50), and drawing a rect in that colour would have been
+    # invisible *and* declined by the op, which is how the first draft of this
+    # check managed to assert nothing at all.
+    window._set_fg_color((0, 255, 0, 255))
+    window._select_tool("rect")
+    sx, sy = window.canvas._image_to_display(2, 2, center=True)
+    ex, ey = window.canvas._image_to_display(6, 5, center=True)
+    window.canvas._on_press(_XY(int(sx), int(sy)))
+    window.canvas._on_drag(_XY(int(ex), int(ey)))
+    root.update()
+    marquee = [i for i in window.canvas._overlay_items
+               if window.canvas.type(i) == "rectangle"]
+    check("shape: a marquee is drawn while dragging", len(marquee) == 1,
+          f"{len(marquee)} rectangles")
+    if marquee:
+        mx0, my0, mx1, my1 = window.canvas.coords(marquee[0])
+        want_x0, want_y0 = window.canvas._image_to_display(2, 2)
+        want_x1, want_y1 = window.canvas._image_to_display(7, 6)  # far edge + 1
+        check("shape: the marquee encloses the last pixel rather than bisecting it",
+              abs(mx0 - want_x0) < 1.5 and abs(my0 - want_y0) < 1.5
+              and abs(mx1 - want_x1) < 1.5 and abs(my1 - want_y1) < 1.5,
+              f"drawn {(mx0, my0, mx1, my1)} want {(want_x0, want_y0, want_x1, want_y1)}")
+    window.canvas._on_release(_XY(int(ex), int(ey)))
+    root.update()
+    frame = controller.frame_image()
+    # Inclusive at both ends: the pixel you dragged to is inside the shape, and
+    # the next one along is not. One pixel of slack here is the whole §19.1
+    # class of bug.
+    check("shape: the committed rect matches the box that was drawn",
+          frame.getpixel((2, 2)) == (0, 255, 0, 255)
+          and frame.getpixel((6, 5)) == (0, 255, 0, 255)
+          and frame.getpixel((7, 6)) == (200, 100, 50, 255),
+          f"near {frame.getpixel((2, 2))}, far {frame.getpixel((6, 5))}, "
+          f"outside {frame.getpixel((7, 6))}")
+
+    # Esc mid-drag: same two-stage contract crop has.
+    window._select_tool("ellipse")
+    window.canvas._on_press(_XY(int(sx), int(sy)))
+    window.canvas._on_drag(_XY(int(ex), int(ey)))
+    edits_before = controller.can_undo
+    check("shape: a drag counts as a gesture in progress",
+          window.canvas.active_tool.is_gesturing)
+    window.canvas._on_escape()
+    check("shape: Esc abandons it", not window.canvas.active_tool.is_gesturing)
+    check("shape: and commits nothing", controller.can_undo == edits_before)
+    check("shape: the tool stays selected for a second attempt",
+          window._tool_var.get() == "ellipse", window._tool_var.get())
+
+    # The palette drives the tools, and every id in it has to resolve.
+    for tid in window._tool_buttons:
+        window._tool_buttons[tid].invoke()
+        root.update()
+        ok = (tid == "cursor") if not window.canvas.has_tool else \
+            window.canvas.active_tool.id == tid
+        check(f"palette: {tid} selects", ok, window._tool_var.get())
+    window._select_tool("cursor")
+    window._fill_var.set(False)
+    while controller.can_undo:
+        controller.undo()
+    root.update()
 
     # --- the pixel grid ---------------------------------------------------
     # The arithmetic is covered headlessly in tests/test_view.py. What only a

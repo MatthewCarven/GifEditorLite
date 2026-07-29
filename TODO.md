@@ -6,7 +6,10 @@
 - [x] M0 committed (`95cf542`), line endings pinned to LF (`92fd44e`)
 - [ ] Sweep `tmp_obj_*` cruft from `.git\objects` after a reboot frees the handles (harmless if left)
 - [x] Crop and both painting slices are committed (HEAD `01feb8a`) — that old "commit the crop feature" item was stale
-- [ ] Commit this session's work: `git add -A; git commit -F COMMIT_MSG.txt` (pixel grid)
+- [x] Pixel grid committed (`328ccd7`) — a stale `.git/index.lock` had to be deleted first, as usual
+- [ ] Commit fill + shapes + the palette move: `git add -A; git commit -F COMMIT_MSG.txt`
+- [ ] Eyeball the new side panel on Windows — the preview no longer widens when
+      you return to fit, which is deliberate but visible
 - [ ] Check the overwrite-warning wording reads right to you (`_confirm_overwrite_source` in `ui/tk/app.py`) — it's the one dialog standing between you and a lost original
 - [ ] Decide risk #2: identical-frame merging on export (accept / disable optimiser / project file) — **not urgent, first bites at M3**
 - [x] Run `python -m giflite` on Windows and confirm the window looks right
@@ -188,7 +191,7 @@ out to be worse than advertised. Design in ARCHITECTURE §19.2–19.3.
 
 **Later (additive):**
 
-- [ ] Fill bucket; line / rect / ellipse shape tools (cheap now — one op + one Tool)
+- [x] Fill bucket; line / rect / ellipse shape tools — done 2026-07-29, see below
 - [ ] Soft / anti-aliased brushes (a new mask generator; op + tool unchanged)
 - [x] Zoom / pan — done 2026-07-28, see below
 - [ ] **Memory-aware undo** — track the bytes `History` holds and warn + report when it climbs past ~128 MB, rather than silently trimming. The plain 64-snapshot cap is fine initially; this is the bespoke follow-up Matthew flagged (concrete form of risk 1's `FrameStore` note)
@@ -301,3 +304,42 @@ Matthew's choice. Design in ARCHITECTURE §22.
 - [ ] Decide whether `Auto` opening a small GIF with the grid already on is
       right. It is literally the rule asked for (552% *is* beyond 4x), but
       `GRID_AUTO_SCALE` is the one constant if it grates
+
+## Fill, shapes, and the palette moving house ✅
+
+Matthew's three calls: a Fill checkbox rather than separate filled/outline
+tools, a tolerance box on the bucket, palette into the view panel. Design in
+ARCHITECTURE §23.
+
+- [x] `_apply_mask` — one commit path for every painting op; `_apply_stroke` is
+      now a thin caller. Alpha compositing, immutability, fresh uids, the
+      decline convention and the playhead rule are stated once, inherited thrice
+- [x] `paint.fill` — `_match_mask` (Chebyshev tolerance, whole-image C ops) then
+      `ImageDraw.floodfill` for connectivity. Flood with 128 so the pixels left
+      at 255 are the matching-but-unreachable ones
+- [x] `paint.shape` — one op with a `kind` (line/rect/ellipse), outline at brush
+      width or filled. Unknown kind declines rather than defaulting
+- [x] `FillTool` (commits on press — nothing to preview), `ShapeTool` +
+      Line/Rect/Ellipse. `preview_box` undoes the pixel-inclusive/edge mismatch
+- [x] Toolbar retired; side panel carries tools + settings always, view section
+      conditionally. Two-column tool grid; preview gains ~34px of height
+- [x] `_view_section_fits` — at 480x400 the panel wanted 412px of 238 and pack
+      silently dropped the zoom row. Whole section or none of it
+- [x] Keys F/L/R/O added to C/B/E/I, all yielding to focused text fields
+- [x] **Two of my tests were wrong again**: the `coords` test hardcoded its tool
+      list (now derived from the palette), and the new smoke rect check drew in
+      the colour it had just flooded the frame with, so it asserted nothing
+- [x] 426 headless (was 376), Xvfb smoke 211 checks (was 187). Six mutations
+      confirmed to break the new checks
+
+**Later (additive):**
+
+- [ ] Shift-constrain: square/circle from a shape drag, 45° lines. Needs the
+      canvas to pass modifier state through `_dispatch`, which is an API change
+      to `Tool.on_press` — worth doing once, for all tools
+- [ ] Global fill (replace every matching pixel, not just the contiguous run) —
+      `_fill_mask` without the flood stage; a modifier or a fourth setting
+- [ ] Fill is ~1µs/pixel (PIL's Python flood walk): 1.1s for a whole-canvas fill
+      at 1000x1000, instant at GIF sizes. Only worth attacking if it bites
+- [ ] The panel measures ~211px against `PANEL_WIDTH` 200 — the Colour/Fill row
+      is what exceeds it. Cosmetic

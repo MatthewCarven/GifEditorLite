@@ -39,6 +39,17 @@ CASES = [
     ("canvas.crop", {"x": 1, "y": 1, "width": 4, "height": 4}),
     ("paint.stroke", {"index": 1, "points": ((2, 2), (5, 5)), "size": 2, "color": (255, 0, 0, 255)}),
     ("paint.erase", {"index": 2, "points": ((3, 3), (6, 6)), "size": 2}),
+    # Fill is the one op that builds its mask by *reading* the frame it is about
+    # to paint, so "did the source survive" is a sharper question here than for
+    # a stroke, which never looks at the pixels underneath.
+    ("paint.fill", {"index": 1, "x": 2, "y": 2, "color": (255, 0, 0, 255)}),
+    ("paint.fill", {"index": 1, "x": 2, "y": 2, "color": (255, 0, 0, 255), "tolerance": 32}),
+    ("paint.shape", {"index": 1, "kind": "rect", "x0": 1, "y0": 1, "x1": 5, "y1": 5,
+                     "size": 2, "color": (255, 0, 0, 255)}),
+    ("paint.shape", {"index": 2, "kind": "ellipse", "x0": 1, "y0": 1, "x1": 5, "y1": 5,
+                     "size": 1, "color": (0, 255, 0, 255), "filled": True}),
+    ("paint.shape", {"index": 2, "kind": "line", "x0": 0, "y0": 0, "x1": 6, "y1": 6,
+                     "size": 3, "color": (0, 0, 255, 255)}),
 ]
 
 
