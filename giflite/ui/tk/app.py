@@ -17,12 +17,12 @@ from tkinter import colorchooser, filedialog, messagebox, ttk
 from giflite.app import events as ev
 from giflite.app.cache import ThumbnailCache
 from giflite.app.controller import AppController
-from giflite.core.io import open_filter, save_filter
+from giflite.core.io import format_for, open_filter, save_filter
 from giflite.core.model import MIN_DURATION_MS, Selection
 from giflite.core.ops import get_op, menu_groups, op_params
 from giflite.ui.base import Frontend
 from giflite.ui.tk.canvas import PreviewCanvas
-from giflite.ui.tk.dialogs import ask_params
+from giflite.ui.tk.dialogs import ask_params, ask_values
 from giflite.ui.tk.minimap import MiniMap
 from giflite.ui.tk.timeline import Timeline
 from giflite.ui.tk.tools import default_tools
@@ -106,6 +106,17 @@ def _format_bytes(nbytes: int) -> str:
     return f"{nbytes / (1024 * 1024):.1f} MB"
 
 
+def _image_count(folder: Path) -> int:
+    """How many images a folder already holds, for the export warning. Zero for
+    a folder that doesn't exist yet, which is the tidy case."""
+    from giflite.core.io.sequence import SEQUENCE_SUFFIXES
+    try:
+        return sum(1 for p in folder.iterdir()
+                   if p.is_file() and p.suffix.lower() in SEQUENCE_SUFFIXES)
+    except (OSError, FileNotFoundError):
+        return 0
+
+
 def _rgb_hex(color) -> str:
     """(r, g, b, a) -> '#rrggbb' for Tk; alpha is ignored (Tk has no alpha)."""
     r, g, b = int(color[0]), int(color[1]), int(color[2])
@@ -146,7 +157,7 @@ class MainWindow:
         self._grid_var.set(self.canvas.view.grid_mode)
 
         self._render()
-        self._set_title(controller.path, controller.dirty)
+        self._set_title(controller.path, controller.dirty, controller.source_label)
         self._update_transport()
 
         self._last_tick = time.perf_counter()
@@ -159,6 +170,12 @@ class MainWindow:
 
         self.file_menu = tk.Menu(menubar, tearoff=False, postcommand=self._refresh_file_menu)
         self.file_menu.add_command(label="Open...", accelerator="Ctrl+O", command=self.open_file)
+        # Import/Export sit apart from Open/Save on purpose: an imported folder
+        # is a source, not a home, so the document it makes has no path to save
+        # back to (ARCHITECTURE.md 25.3). Folding them into Open would make
+        # Ctrl+S mean "write a GIF over those PNGs".
+        self.file_menu.add_command(label="Import Frames...", command=self.import_frames)
+        self.file_menu.add_command(label="Export Frames...", command=self.export_frames)
         self.file_menu.add_separator()
         self.file_menu.add_command(label="Save", accelerator="Ctrl+S", command=self.save_file)
         self.file_menu.add_command(label="Save As...", accelerator="Ctrl+Shift+S", command=self.save_file_as)
@@ -516,6 +533,54 @@ class MainWindow:
 
     def open_path(self, path: Path) -> None:
         self._with_busy_cursor(lambda: self.controller.open(path))
+
+    def import_frames(self) -> None:
+        """Pick a folder of stills, ask the reader's questions, import it.
+
+        The options dialog is generated from `Format.read_params` -- the format
+        declares what the source cannot tell it, and this knows nothing about
+        what those questions are. A video importer's fps arrives here for free.
+        """
+        folder = filedialog.askdirectory(title="Import frames from folder")
+        if not folder:
+            return
+        path = Path(folder)
+        fmt = format_for(path, readable=True)
+        if fmt is None or fmt.read is None:
+            messagebox.showerror("Import frames",
+                                 f"Nothing here can read {path.name}.",
+                                 parent=self.root)
+            return
+        values = ask_values(self.root, f"Import {path.name}", fmt.read_params)
+        if values is None:
+            return  # cancelled
+        self._with_busy_cursor(lambda: self.controller.import_frames(path, **values))
+
+    def export_frames(self) -> None:
+        """Write every frame into a chosen folder as numbered PNGs.
+
+        Warns before writing into a folder that already holds images. Export
+        does not merely add files -- same-named frames are overwritten -- and
+        the folder someone picks in a hurry is often one with something in it.
+        Consistent with the Save-safety rule (§19.2): the *frontend* owns the
+        warning, the controller owns the fact.
+        """
+        if self.controller.doc is None:
+            return
+        folder = filedialog.askdirectory(title="Export frames to folder")
+        if not folder:
+            return
+        path = Path(folder)
+        existing = _image_count(path)
+        if existing and not messagebox.askokcancel(
+            "Export frames",
+            f"{path.name} already contains {existing} image file"
+            f"{'s' if existing != 1 else ''}.",
+            detail="Frames with the same names will be overwritten.",
+            parent=self.root,
+        ):
+            return
+        self._with_busy_cursor(lambda: self.controller.export_frames(path))
 
     def save_file(self) -> None:
         # Save writes to the current path; with none yet, fall back to Save As.
@@ -940,11 +1005,24 @@ class MainWindow:
             )
 
     def _refresh_file_menu(self) -> None:
-        has_doc = self.controller.doc is not None
-        state = "normal" if has_doc else "disabled"
-        # Save (index 2), Save As (3), Close (5) all need a document.
-        for entry in (2, 3, 5):
-            self.file_menu.entryconfigure(entry, state=state)
+        """Everything here except Open and Import needs a document.
+
+        By *label*, not by index. This used to say `for entry in (2, 3, 5)` with
+        a comment naming Save, Save As and Close; inserting Import and Export
+        after Open repointed those numbers at Export, a *separator* and Save As.
+
+        I assumed that would fail silently -- wrong three items greyed out, no
+        error -- and wrote as much here until a mutation run disproved it: a
+        separator has no `-state`, so Tk raises `TclError` the moment the File
+        menu opens. Loud, then, not silent. Still worth fixing by label, because
+        the loudness was luck: had the insertion landed one entry earlier, all
+        three indices would have hit real entries and it *would* have been
+        silent. Tk accepts a label wherever it accepts an index, so not being
+        able to make the mistake costs nothing either way.
+        """
+        state = "normal" if self.controller.doc is not None else "disabled"
+        for label in ("Export Frames...", "Save", "Save As...", "Close"):
+            self.file_menu.entryconfigure(label, state=state)
 
     def _refresh_edit_menu(self) -> None:
         c = self.controller
@@ -1016,8 +1094,9 @@ class MainWindow:
     def _on_playback_state(self, playing: bool = False, **_) -> None:
         self.play_button.configure(text="Pause" if playing else "Play")
 
-    def _on_title_changed(self, path: Path | None = None, dirty: bool = False, **_) -> None:
-        self._set_title(path, dirty)
+    def _on_title_changed(self, path: Path | None = None, dirty: bool = False,
+                          name: str | None = None, **_) -> None:
+        self._set_title(path, dirty, name)
 
     def _on_status(self, message: str = "", **_) -> None:
         self.status.configure(text=message)
@@ -1081,12 +1160,17 @@ class MainWindow:
             f"{self.canvas.view.label}"
         )
 
-    def _set_title(self, path: Path | None, dirty: bool) -> None:
-        if path is None:
+    def _set_title(self, path: Path | None, dirty: bool,
+                   name: str | None = None) -> None:
+        """`name` covers the pathless case -- an imported folder still has a
+        name worth showing, and falling straight back to the bare app title
+        throws away the only context the user has about what is loaded."""
+        label = path.name if path is not None else name
+        if label is None:
             self.root.title(APP_NAME)
             return
         mark = "*" if dirty else ""
-        self.root.title(f"{mark}{path.name} - {APP_NAME}")
+        self.root.title(f"{mark}{label} - {APP_NAME}")
 
     def _with_busy_cursor(self, action) -> None:
         """Reads block the mainloop, so at least say so and look busy.

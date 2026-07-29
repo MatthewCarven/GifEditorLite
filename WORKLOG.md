@@ -1022,3 +1022,84 @@ teethless checks above, each re-verified after being rewritten.
 - Type 333 and you get 330; type 1 and you get 20. GIF quantises to 10ms with a
   20ms floor, and the box shows what landed rather than what you typed.
 - Timeline labels show ms under a second and seconds above it.
+
+## 2026-07-29 (evening) — Image-sequence IO, and the registry it forced
+
+The one Matthew flagged as "very bespoke". Design in ARCHITECTURE §25.
+
+**A folder is what broke the dict, and it isn't about there being more
+formats.** `.webp` and `.apng` would have been two more keys. A folder has no
+suffix, so `READERS[path.suffix]` has nothing to look up at all. The reader
+*signature* survives untouched — a directory is still a `Path` — so the change
+is narrower than "promote the dict to a registry" sounds: only dispatch moves,
+from indexing by extension to asking each format whether it claims the path.
+
+`available()` finally has a customer too, or nearly: it's still M5's video
+import that needs it, but the guarantee is now tested with a format that reports
+itself missing, rather than being a promise in a docstring.
+
+**The trap I went looking for first.** `frame1, frame10, frame2` is what plain
+sorting gives you, and it looks perfect on a nine-frame test folder. Natural
+sort on the way in; zero-padded names on the way out — the padding isn't for us
+(we natural-sort anyway) but for every file manager and shell that doesn't.
+Both have tests that fail on a reverted sort.
+
+**Padding, not scaling, for mismatched sizes.** Matthew picked union-and-pad.
+Top-left rather than centred, which is the detail worth recording: a mismatched
+sequence is nearly always one where something grew at the right or bottom, and
+centring would shift *every* frame including the ones that were already correct.
+
+**Import is not open; export is not save.** One field each. An opened file is a
+document's home and Save writes back to it; an imported folder is a source, and
+setting `_path` to it would aim Ctrl+S at writing a GIF over somebody's PNGs. So
+import leaves the path None and Save falls through to Save As. Export leaves
+path, dirty and history alone — writing a copy of your frames somewhere isn't
+the claim "this document now lives here".
+
+**The manifest is the deferred project format, unzipped.** §18 described
+`.gifproj` as PNGs plus a JSON manifest in a container; an exported folder is
+that minus the zip. Designed once, versioned from the first line of existing,
+and refusing an unknown version rather than guessing. It also gives folders the
+thing GIF can't: identical consecutive frames stay separate instead of being
+merged into one longer hold.
+
+**`ask_params` split into `ask_values`.** Operations had stopped being the only
+things with parameters — a format's reader declares what the source can't tell
+it. The `Param` schema was always general enough; only the function signature
+wasn't.
+
+**A bug I introduced and a correction to how I explained it.** Adding two File
+menu entries broke `_refresh_file_menu`, which configured `(2, 3, 5)` by index.
+I fixed it by label and wrote a confident comment saying the old code would have
+failed *silently*. The mutation run disproved my own comment: index 3 had become
+a separator, separators have no `-state`, and Tk raises `TclError` the moment the
+File menu opens. Loud, not silent. The fix still stands and the comment now says
+why — the loudness was luck, and one entry earlier it would have been exactly as
+quiet as I claimed.
+
+**Two smoke checks needed rewriting before they meant anything.** The first
+asserted Export was disabled while a document was open (it wasn't, and menu state
+is only recomputed by the postcommand anyway). The second checked one label, and
+the old hardcoded indices happen to include the one Export now sits at — so it
+passed against the broken build. Checking *all four* document-dependent entries
+is what bites, because Save and Close are the ones those indices stopped
+reaching.
+
+**And one check I had to delete.** A failing import emits ERROR, `_on_error`
+raises a modal messagebox, and a modal hangs a scripted run forever. It hung this
+one until I removed it. Covered headlessly instead, which is where it belonged.
+
+**Numbers:** 497 headless (was 452), Xvfb smoke 244 checks (was 224). Six
+mutations confirmed: lexicographic sort, canvas from the first frame instead of
+the union, unpadded export names, import setting a path, export clearing dirty,
+and the menu indices.
+
+**Handover**
+
+- File > Import Frames… asks for a delay and a loop count, then loads the
+  folder. File > Export Frames… writes `frame_0001.png` upward plus
+  `giflite.json`, and warns if the folder already holds images.
+- An imported document has no path on purpose — Ctrl+S will ask you where to
+  put it rather than writing over your PNGs.
+- A folder we exported re-imports with its exact timing; a folder from anywhere
+  else uses the delay you type.

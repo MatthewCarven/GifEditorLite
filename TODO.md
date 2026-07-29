@@ -6,9 +6,7 @@
 - [x] M0 committed (`95cf542`), line endings pinned to LF (`92fd44e`)
 - [ ] Sweep `tmp_obj_*` cruft from `.git\objects` after a reboot frees the handles (harmless if left)
 - [x] Crop and both painting slices are committed (HEAD `01feb8a`) — that old "commit the crop feature" item was stale
-- [ ] Renormalise `start.cmd` to CRLF after the `.gitattributes` fix:
-      `git add --renormalize . ; git commit -m "Keep batch files CRLF"`
-      (cmd.exe mis-parses labels/goto/blocks in LF-only .cmd files)
+- [x] Batch files pinned to CRLF in the working tree (`2b1d115`)
 - [x] Pixel grid committed (`328ccd7`) — a stale `.git/index.lock` had to be deleted first, as usual
 - [x] Fill + shapes + the palette move committed and pushed (`c0f18a4`)
 - [ ] Eyeball the new side panel on Windows — the preview no longer widens when
@@ -201,7 +199,7 @@ out to be worse than advertised. Design in ARCHITECTURE §19.2–19.3.
 
 ## Later
 
-- [ ] **Image-sequence IO** — import a folder of PNGs as frames / export frames out. Promotes the IO dict to a real registry (folder-based source is a new shape)
+- [x] **Image-sequence IO** — done 2026-07-29, see below
 - [ ] **Project / sidecar format** (`.gifproj`?) — lossless zip of PNG frames + JSON manifest, so authored frames/timing survive a round-trip GIF can't represent. One `read_x`/`write_x` pair; see ARCHITECTURE §18. Matthew wants this eventually
 - [ ] M5 video import (`imageio-ffmpeg`, try/except registration), WebP/APNG export
 - [ ] Second frontend to actually prove the seam (Qt or Dear PyGui)
@@ -385,3 +383,37 @@ path to it. Design in ARCHITECTURE §24.
       in-place ones
 - [ ] Nudging delay from the keyboard (up/down on the selected frame) without
       focusing the box
+
+## Image-sequence IO ✅
+
+The bespoke one. Import a folder of stills; export frames back out. Design in
+ARCHITECTURE §25.
+
+- [x] `core/io/sequence.py` — natural-sorted import, union canvas with top-left
+      padding (never scaling), zero-padded export
+- [x] `core/io/manifest.py` — versioned schema, **shared with the deferred
+      `.gifproj`** (§18): an exported folder is the project format minus the zip
+- [x] IO dict promoted to a `Format` registry: `matches()` dispatch, `is_folder`
+      as a real field, `available()` tested with an unavailable format,
+      `read_params` so a frontend can generate an options dialog for a format it
+      knows nothing about
+- [x] `import_frames` / `export_frames` on the controller. **Import is not open**
+      (no path, so Ctrl+S goes to Save As rather than writing a GIF over the
+      PNGs); **export is not save** (path, dirty and history untouched)
+- [x] `_source_label` so the title shows the imported folder's name
+- [x] `ask_values` split out of `ask_params` — ops are no longer the only things
+      with parameters
+- [x] **Fixed a bug I introduced:** two new File menu entries broke
+      `_refresh_file_menu`'s hardcoded indices; now by label. The comment
+      explaining it was also wrong, and the mutation run said so — see §25.5
+- [x] 497 headless (was 452), Xvfb smoke 244 checks (was 224). Six mutations
+      confirmed
+
+**Later (additive):**
+
+- [ ] `.gifproj` is now mostly a zip of what `write_sequence` already produces —
+      one reader/writer pair over the existing manifest (§18, §25.4)
+- [ ] Import currently ignores subfolders by design. A "recurse" option would be
+      easy if a real folder layout ever wants it
+- [ ] Export always writes PNG. A format choice (or reusing the writable formats
+      list) would be the natural extension

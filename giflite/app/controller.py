@@ -26,7 +26,7 @@ from PIL import Image
 from giflite.app import events as ev
 from giflite.app.events import EventBus
 from giflite.core.history import History, Snapshot
-from giflite.core.io import reader_for, writer_for
+from giflite.core.io import format_for, reader_for, writer_for
 from giflite.core.io.gif_read import probe_gif
 from giflite.core.io.gif_write import count_merges
 from giflite.core.model import Document, Selection
@@ -59,6 +59,11 @@ class AppController:
         # in place, which for GIF is lossy and irreversible, so the frontend gets
         # to warn once. Cleared by the first successful write to any path.
         self._path_is_source = False
+        # Where this came from when it has no file of its own -- an imported
+        # folder's name. The title bar has nothing else to show for a document
+        # that was never opened from a path, and "Untitled" throws away the one
+        # piece of context the user has.
+        self._source_label: str | None = None
         self._clock = PlaybackClock()
         self._playing = False
         self._history = History()
@@ -91,6 +96,12 @@ class AppController:
     def path(self) -> Path | None:
         """Single source of truth for where this came from (not on Document)."""
         return self._path
+
+    @property
+    def source_label(self) -> str | None:
+        """A display name for a document with no path (an imported folder), or
+        None. The frontend prefers `path.name` when there is a path."""
+        return self._source_label
 
     @property
     def dirty(self) -> bool:
@@ -172,6 +183,7 @@ class AppController:
         self._doc = doc
         self._path = path
         self._path_is_source = True  # untouched original until something writes
+        self._source_label = None    # it has a real path now
         self._index = 0
         self._selection = Selection.single(0)
         self._clock.loop = doc.loop
@@ -186,11 +198,90 @@ class AppController:
         # from state.
         return True
 
+    def import_frames(self, folder: Path, **options) -> bool:
+        """Load a folder of stills as a new document.
+
+        **Import is not open, and the difference is one field.** An opened file
+        is a document's home: Save writes back to it. An imported folder is a
+        *source* -- the document it produces is a GIF-shaped thing that has
+        never been saved anywhere, and pointing `_path` at the folder would aim
+        Ctrl+S at writing a GIF over somebody's PNGs. So `_path` stays None and
+        Save falls through to Save As, which is exactly what "this has no file
+        yet" already means everywhere else in here.
+
+        `_source_label` carries the folder's name for the title bar, because
+        "Untitled" after importing a named folder throws away the one piece of
+        context the user has.
+        """
+        folder = Path(folder)
+        fmt = format_for(folder, readable=True)
+        if fmt is None or fmt.read is None:
+            self.events.emit(
+                ev.ERROR,
+                exception=ValueError(f"Nothing here can read {folder.name}"),
+                context=str(folder),
+            )
+            return False
+        try:
+            self.events.emit(ev.STATUS, message=f"Importing {folder.name}...")
+            doc = fmt.read(folder, **options)
+        except Exception as exc:  # noqa: BLE001 -- surfaced to the user verbatim
+            self.events.emit(ev.ERROR, exception=exc, context=str(folder))
+            return False
+
+        self._stop_playback()
+        self._doc = doc
+        self._path = None                # no file to save back to -- see above
+        self._path_is_source = False
+        self._source_label = folder.name
+        self._index = 0
+        self._selection = Selection.single(0)
+        self._clock.loop = doc.loop
+        self._history.reset(Snapshot(doc, self._selection, 0, "Import"))
+        self._emit_doc_changed("open")   # same shape of change as opening a file
+        self.events.emit(ev.TITLE_CHANGED, path=None, dirty=self.dirty,
+                         name=self._source_label)
+        self.events.emit(
+            ev.STATUS,
+            message=f"Imported {len(doc)} frames from {folder.name}",
+        )
+        return True
+
+    def export_frames(self, folder: Path) -> bool:
+        """Write every frame into `folder` as a numbered PNG, plus a manifest.
+
+        Export is not save: it leaves `_path`, the dirty flag and the history
+        alone. Writing a copy of your frames somewhere is not the same claim as
+        "this document now lives here", and conflating them would clear the
+        unsaved marker on a document that still has no file.
+        """
+        if self._doc is None:
+            return False
+        folder = Path(folder)
+        fmt = format_for(folder, writable=True)
+        if fmt is None or fmt.write is None:
+            self.events.emit(
+                ev.ERROR,
+                exception=ValueError(f"Nothing here can write to {folder.name}"),
+                context=str(folder),
+            )
+            return False
+        try:
+            written = fmt.write(self._doc, folder)
+        except Exception as exc:  # noqa: BLE001
+            self.events.emit(ev.ERROR, exception=exc, context=str(folder))
+            return False
+        count = len(written) if written is not None else len(self._doc)
+        self.events.emit(
+            ev.STATUS, message=f"Exported {count} frames to {folder.name}")
+        return True
+
     def close(self) -> None:
         self._stop_playback()
         self._doc = None
         self._path = None
         self._path_is_source = False
+        self._source_label = None
         self._index = 0
         self._selection = Selection.empty()
         self._history.clear()

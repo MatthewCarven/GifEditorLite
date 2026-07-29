@@ -86,16 +86,28 @@ class ParamDialog(tk.Toplevel):
         self.destroy()
 
 
-def ask_params(parent: tk.Misc, op: Operation,
-               doc: Document, sel: Selection) -> dict[str, Any] | None:
-    """Prompt for an op's params. Returns coerced values, {} if the op has
-    none, or None if the user cancels."""
-    params = op_params(op)
+def ask_values(parent: tk.Misc, title: str, params: tuple[Param, ...],
+               defaults: dict[str, Any] | None = None) -> dict[str, Any] | None:
+    """Prompt for any `Param` list. Returns coerced values, `{}` when there are
+    no params, or None if the user cancels.
+
+    Decoupled from operations because operations stopped being the only thing
+    with parameters: a format's reader declares what the source can't tell it
+    (a delay for a folder of stills, an fps for a video later). The schema was
+    always general; only this function's signature was not.
+    """
     if not params:
         return {}
-    dialog = ParamDialog(parent, op.label, params, op_defaults(op, doc, sel))
+    dialog = ParamDialog(parent, title, params, defaults or {})
     dialog.transient(parent)
     dialog.deiconify()
     dialog.grab_set()
     dialog.wait_window()
     return dialog.result
+
+
+def ask_params(parent: tk.Misc, op: Operation,
+               doc: Document, sel: Selection) -> dict[str, Any] | None:
+    """Prompt for an op's params -- `ask_values` with the op's own defaults,
+    which may be seeded from the document (`default_params`)."""
+    return ask_values(parent, op.label, op_params(op), op_defaults(op, doc, sel))

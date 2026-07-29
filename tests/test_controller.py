@@ -314,3 +314,101 @@ class TestFrameDelay:
         controller, _ = wired
         controller.set_frame_delay(100)      # must not raise
         assert controller.doc is None
+
+
+class TestImportExport:
+    """Import is not open and export is not save. Both distinctions are one
+    field wide and both matter -- see ARCHITECTURE 25.3.
+    """
+
+    @staticmethod
+    def _folder(tmp_path, count=4):
+        from PIL import Image
+        folder = tmp_path / "frames"
+        folder.mkdir()
+        for i in range(1, count + 1):
+            Image.new("RGBA", (12, 9), (i * 30 % 256, 0, 0, 255)).save(
+                folder / f"f{i}.png")
+        return folder
+
+    def test_importing_loads_the_frames(self, wired, tmp_path):
+        controller, _ = wired
+        assert controller.import_frames(self._folder(tmp_path), delay_ms=120)
+        assert controller.frame_count == 4
+        assert controller.doc.frames[0].duration_ms == 120
+
+    def test_an_imported_document_has_no_path_to_save_back_to(self, wired, tmp_path):
+        """The whole point of import not being open: with a path set, Ctrl+S
+        would aim a GIF writer at the user's folder of PNGs."""
+        controller, _ = wired
+        controller.import_frames(self._folder(tmp_path))
+        assert controller.path is None
+        assert not controller.has_path
+
+    def test_it_carries_the_folder_name_for_the_title(self, wired, tmp_path):
+        controller, _ = wired
+        controller.import_frames(self._folder(tmp_path))
+        assert controller.source_label == "frames"
+
+    def test_opening_a_file_afterwards_clears_the_import_label(self, wired, tmp_path):
+        controller, _ = wired
+        controller.import_frames(self._folder(tmp_path))
+        from tests.conftest import make_gif
+        controller.open(make_gif(tmp_path / "real.gif", frames=2))
+        assert controller.source_label is None
+        assert controller.path is not None
+
+    def test_closing_clears_it_too(self, wired, tmp_path):
+        controller, _ = wired
+        controller.import_frames(self._folder(tmp_path))
+        controller.close()
+        assert controller.source_label is None
+
+    def test_an_import_is_the_baseline_not_an_unsaved_edit(self, wired, tmp_path):
+        controller, _ = wired
+        controller.import_frames(self._folder(tmp_path))
+        assert not controller.dirty
+        assert not controller.can_undo
+
+    def test_a_failed_import_leaves_the_current_document_alone(self, wired, tmp_path):
+        controller, frontend = wired
+        from tests.conftest import make_gif
+        controller.open(make_gif(tmp_path / "keep.gif", frames=3))
+        empty = tmp_path / "empty"
+        empty.mkdir()
+        assert not controller.import_frames(empty)
+        assert controller.frame_count == 3            # untouched
+        assert controller.path is not None
+        assert frontend.count(ev.ERROR) == 1           # and it said so
+
+    def test_exporting_writes_a_file_per_frame(self, wired, tmp_path):
+        controller, _ = wired
+        controller.import_frames(self._folder(tmp_path, count=3))
+        out = tmp_path / "out"
+        assert controller.export_frames(out)
+        assert len(list(out.glob("*.png"))) == 3
+
+    def test_exporting_does_not_claim_the_document_now_lives_there(self, wired, tmp_path):
+        """Export is not save: writing a copy of your frames somewhere is a
+        different claim from "this is where this document is kept"."""
+        controller, _ = wired
+        from tests.conftest import make_gif
+        controller.open(make_gif(tmp_path / "a.gif", frames=2))
+        before = controller.path
+        controller.run_op("frames.duplicate")          # make it dirty
+        assert controller.dirty
+        controller.export_frames(tmp_path / "out")
+        assert controller.path == before               # path untouched
+        assert controller.dirty                        # still unsaved
+
+    def test_exporting_with_no_document_does_nothing(self, wired, tmp_path):
+        controller, _ = wired
+        assert not controller.export_frames(tmp_path / "out")
+
+    def test_import_then_export_round_trips_through_the_controller(self, wired, tmp_path):
+        controller, _ = wired
+        controller.import_frames(self._folder(tmp_path, count=5), delay_ms=250)
+        controller.export_frames(tmp_path / "out")
+        controller.import_frames(tmp_path / "out")
+        assert controller.frame_count == 5
+        assert controller.doc.frames[0].duration_ms == 250

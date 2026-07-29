@@ -997,3 +997,111 @@ every number were the same magnitude.
 
 This is the surface that makes uneven timing *findable*. A number in a box tells
 you about one frame; a row of numbers tells you which frame is wrong.
+
+## 25. Image-sequence IO, and the registry it forced
+
+Import a folder of stills as frames; export frames back out as numbered PNGs.
+
+### 25.1 Why a folder is what broke the dict
+
+`READERS = {".gif": read_gif}` was always going to become a registry "when the
+second and third formats arrive" (§8). But more *file* formats would never have
+forced it -- `.webp` and `.apng` are two more keys. A folder is different in
+kind: it has no suffix, so `READERS[path.suffix]` has nothing to look up, and no
+number of extra keys fixes that.
+
+What survives untouched is the reader *signature*. A directory is still a
+`Path`, so `Path -> Document` holds. Only **dispatch** changes, from "index by
+extension" to "ask each format whether it claims this path".
+
+A `Format` is a record: id, label, extensions, `is_folder`, read, write,
+`read_params`, `available`. Two details are deliberate:
+
+- **`is_folder` is a field, not an inference from empty extensions.** Inferring
+  it would make "a format with no extensions" mean "folder" by accident, and the
+  next unusually-shaped format would inherit that meaning by surprise.
+- **`available` is a callable, not a bool.** The guarantee carried over from the
+  dict -- a format whose optional dependency is missing must not break startup --
+  requires checking when it matters, not at import time. M5's video import is the
+  first real customer; the filters already honour it and it is tested with a
+  format that reports itself unavailable.
+
+`format_for` asks file formats first, so a not-yet-existing `out.gif` is a file
+while a not-yet-existing `frames` is a folder. Without that ordering the suffix
+someone typed would mean nothing.
+
+### 25.2 The three questions a single-file reader never asks
+
+**Order.** A directory listing has none worth trusting, and lexicographic order
+puts `frame10.png` between `frame1.png` and `frame2.png`. This is not a corner
+case: it is every sequence longer than nine frames, and it looks perfect on a
+small test folder. `_natural_key` reads digit runs as numbers. Export writes
+zero-padded names so that *other* tools -- file managers, shells, scripts, all
+of which sort naively -- agree with us on the way back.
+
+**Size.** Stills need not agree; a `Document` has exactly one canvas. Frames are
+padded onto the union of their sizes, placed top-left, never scaled. Scaling
+would silently resample the user's pixels to make an import succeed, which is
+the wrong trade for an editor aimed at pixel art. Top-left rather than centred
+because a mismatched sequence is nearly always one where something grew at the
+right or bottom, and centring would shift *every* frame -- including the ones
+that were already the right size.
+
+**Timing.** Stills carry none. The manifest supplies it if there is one;
+otherwise the reader is told, via `Format.read_params`.
+
+### 25.3 Import is not open; export is not save
+
+Each distinction is one field wide and both matter.
+
+An opened file is a document's *home*: Save writes back to it. An imported
+folder is a *source* -- the document it produces has never been saved anywhere,
+and pointing `_path` at the folder would aim Ctrl+S at writing a GIF over
+somebody's PNGs. So import leaves `_path` as None and Save falls through to Save
+As, which is what "no file yet" already means everywhere else.
+
+`_source_label` carries the folder name for the title bar, because "Untitled"
+after importing a named folder throws away the only context the user has.
+
+Export leaves `_path`, the dirty flag and the history alone. Writing a copy of
+your frames somewhere is not the claim "this document now lives here", and
+conflating them would clear the unsaved marker on a document that still has no
+file.
+
+### 25.4 The manifest is the project format, unzipped
+
+§18 deferred a `.gifproj`: "each frame as a lossless PNG plus a JSON manifest,
+in a container". An exported folder is exactly that minus the zip, so the
+manifest schema is designed once, here, and versioned from the first line of it
+existing. A reader must refuse a version it doesn't know rather than guess --
+half-understanding a manifest produces a document with the wrong timing, which
+is the sort of thing noticed three edits later.
+
+Filenames are stored per frame rather than implied by position, so a container
+can name its members however it likes and a hand-edited folder can reorder
+frames without renaming files.
+
+This also delivers, for folders, the property GIF cannot offer: identical
+consecutive frames stay separate rather than being merged into one longer hold
+(§12.4, risk 2), and durations round-trip exactly as authored.
+
+`Format.read_params` is what lets the frontend generate the import options
+dialog without knowing what format it is talking to. `ask_values` was split out
+of `ask_params` for it: operations had stopped being the only things with
+parameters, and the `Param` schema was always general enough -- only the
+function's signature was not.
+
+### 25.5 A correction worth keeping
+
+Adding Import and Export to the File menu broke `_refresh_file_menu`, which
+configured entries by hardcoded index `(2, 3, 5)`. It is now by label.
+
+The comment justifying that fix originally claimed the old code would fail
+*silently* -- the wrong three items greying out with no error. A mutation run
+disproved it: index 3 had become a separator, and a separator has no `-state`,
+so Tk raises `TclError` the moment the File menu opens. Loud, not silent.
+
+Kept as written-down history because the reasoning still lands, just
+differently: the loudness was luck. Had the insertion landed one entry earlier,
+all three indices would have hit real entries and it would have been exactly as
+silent as first claimed.

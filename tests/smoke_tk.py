@@ -1259,6 +1259,95 @@ def main() -> int:
         except Exception as exc:  # noqa: BLE001
             print(f"screenshot unavailable: {exc}")
 
+    # --- import / export frames -------------------------------------------
+    # The pickers are modal, so the menu commands themselves can't be driven in
+    # a scripted run; what is checked here is everything either side of them --
+    # the menu state, the controller calls they make, and the title.
+    from PIL import Image as _Image
+
+    src = tmp / "seq_in"
+    src.mkdir()
+    for i in range(1, 13):        # >9 on purpose: the natural-sort case
+        _Image.new("RGBA", (24, 16), (i * 20 % 256, 60, 90, 255)).save(src / f"f{i}.png")
+
+    # Menu state is only recomputed by the postcommand, so drive that
+    # explicitly -- `entrycget` otherwise reports whatever was last configured,
+    # which made the first version of this check read a stale "normal" and look
+    # like a failure of the wrong thing.
+    controller.close()
+    root.update()
+    window._refresh_file_menu()
+    # *Every* document-dependent entry, not just one. Checking a single label
+    # proved worthless: the old hardcoded `(2, 3, 5)` happens to include the
+    # index Export now sits at, so a one-label check passed against the broken
+    # version too. Save and Close are the entries those indices stopped
+    # reaching, so they are the ones that make this bite.
+    still_enabled = [label for label in
+                     ("Export Frames...", "Save", "Save As...", "Close")
+                     if str(window.file_menu.entrycget(label, "state")) != "disabled"]
+    check("menu: every document-dependent entry disables with no document",
+          still_enabled == [], f"still enabled: {still_enabled}")
+
+    window._with_busy_cursor(lambda: controller.import_frames(src, delay_ms=120))
+    root.update()
+    check("import: frames loaded in natural order", controller.frame_count == 12,
+          str(controller.frame_count))
+    check("import: the delay from the dialog was applied",
+          controller.doc[0].duration_ms == 120, str(controller.doc[0].duration_ms))
+    check("import: the canvas followed", window.canvas._photo is not None)
+    check("import: the timeline redrew",
+          len([i for i in window.timeline.canvas.find_all()
+               if window.timeline.canvas.type(i) == "image"]) == 12)
+    check("import: the title shows the folder, not just the app name",
+          root.title().endswith("seq_in - GIF Editor Lite"), root.title())
+    check("import: no path, so Save falls through to Save As",
+          not controller.has_path)
+
+    # The menu-state check that matters: entries are configured by *label* now.
+    # They used to be indices, and inserting Import/Export after Open silently
+    # repointed (2, 3, 5) at Export, a separator and Save As -- no error, just
+    # the wrong three items greying out.
+    window._refresh_file_menu()
+    for label in ("Export Frames...", "Save", "Save As...", "Close"):
+        check(f"menu: {label} is enabled with a document",
+              str(window.file_menu.entrycget(label, "state")) == "normal",
+              str(window.file_menu.entrycget(label, "state")))
+    check("menu: Open stays enabled regardless",
+          str(window.file_menu.entrycget("Open...", "state")) == "normal")
+
+    out = tmp / "seq_out"
+    window._with_busy_cursor(lambda: controller.export_frames(out))
+    root.update()
+    exported = sorted(p.name for p in out.glob("*.png"))
+    check("export: one PNG per frame", len(exported) == 12, str(len(exported)))
+    check("export: zero-padded so naive sorts agree",
+          exported[0] == "frame_0001.png" and exported[-1] == "frame_0012.png",
+          f"{exported[0]} .. {exported[-1]}")
+    check("export: a manifest went with them", (out / "giflite.json").exists())
+    check("export: it did not claim the document now lives there",
+          not controller.has_path)
+
+    # Round trip through the UI's own calls.
+    window._with_busy_cursor(lambda: controller.import_frames(out))
+    root.update()
+    check("round trip: frame count survives", controller.frame_count == 12)
+    check("round trip: timing survives the folder rather than resetting",
+          controller.doc[0].duration_ms == 120, str(controller.doc[0].duration_ms))
+
+    # NOT checked here: a failing import. It emits ERROR, `_on_error` raises a
+    # modal messagebox, and a modal hangs a scripted run forever -- the same
+    # trap the param dialogs set, and it hung this run until it was removed.
+    # Covered headlessly instead, in test_controller.py::TestImportExport.
+
+    controller.close()
+    root.update()
+    check("import: closing clears the folder name from the title",
+          root.title() == "GIF Editor Lite", root.title())
+    window.open_path(gif)
+    root.update()
+    check("import: opening a real file afterwards restores a path",
+          controller.has_path and root.title().startswith("smoke.gif"), root.title())
+
     # --- close ----------------------------------------------------------
     controller.close()
     root.update()
