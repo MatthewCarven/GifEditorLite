@@ -885,6 +885,121 @@ def main() -> int:
           f"{canvas_w_with_panel} -> {window.canvas.winfo_width()}")
     window._select_tool("cursor")
 
+    # --- the pixel grid ---------------------------------------------------
+    # The arithmetic is covered headlessly in tests/test_view.py. What only a
+    # display can answer: are the rules actually *drawn*, do they land on the
+    # boundaries the mapping names, and does the menu report the mode.
+    def grid_items():
+        """Canvas lines that are grid rules. The frame border is a rectangle and
+        a tool overlay is tagged, so a line item here is a rule."""
+        return [i for i in window.canvas.find_all() if window.canvas.type(i) == "line"]
+
+    # Note for anyone reading the numbers below: this 160x80 GIF *fits* at 552%
+    # in a 900px window, so fit is already past auto's threshold and the grid is
+    # on the moment the file opens. That is the rule working as specified rather
+    # than a bug -- but it is why these checks drive the scale explicitly
+    # instead of assuming fit means "zoomed out". The first draft assumed it and
+    # failed here, which is the cheapest place to find that out.
+    window.set_grid_mode("off")
+    window.zoom_fit()
+    while view.scale > 2.0 and view.can_zoom_out:
+        window.zoom_out()
+    root.update()
+    check("grid: nothing drawn when off", len(grid_items()) == 0,
+          f"at {view.label}: {len(grid_items())} lines")
+
+    window.set_grid_mode("auto")
+    root.update()
+    check("grid: auto draws nothing below its threshold", len(grid_items()) == 0,
+          f"at {view.label}: {len(grid_items())} lines")
+    check("grid: and says so rather than silently doing nothing",
+          "not shown" in window.status["text"], window.status["text"])
+
+    while view.scale < 8.0:
+        window.zoom_in()
+    root.update()
+    rules = grid_items()
+    check("grid: auto draws rules once past the threshold", len(rules) > 0,
+          f"at {view.label}: {len(rules)} lines")
+
+    # Ground truth: a drawn rule must sit exactly where the mapping puts the
+    # boundary it claims to be. This is the check that would have caught 19.1
+    # if the grid had existed then -- a grid half a pixel off from the pixels it
+    # divides is worse than no grid, because you would trust it.
+    lines = view.grid_lines()
+    drawn_x = sorted({window.canvas.coords(i)[0] for i in rules
+                      if window.canvas.coords(i)[0] == window.canvas.coords(i)[2]})
+    check("grid: every vertical rule is drawn where the transform says",
+          len(drawn_x) == len(lines.xs)
+          and all(abs(a - b) < 0.01 for a, b in zip(drawn_x, sorted(lines.xs))),
+          f"{len(drawn_x)} drawn vs {len(lines.xs)} expected")
+
+    # And that the boundary is the real one: the pixels either side of a drawn
+    # rule are the two the mapping names, through the same dispatch a click uses.
+    mid = drawn_x[len(drawn_x) // 2]
+    left_px, _ = window.canvas._display_to_image(mid - 0.25, lines.top + 1)
+    right_px, _ = window.canvas._display_to_image(mid + 0.25, lines.top + 1)
+    check("grid: a rule separates exactly the two pixels it sits between",
+          right_px == left_px + 1, f"{left_px} | {right_px} at x={mid}")
+
+    check("grid: the rule count is viewport-bounded, not image-bounded",
+          len(rules) < window.canvas.winfo_width() // 8 + window.canvas.winfo_height() // 8 + 8,
+          f"{len(rules)} lines at {view.label}")
+
+    # The count has to stay bounded across a redraw, not grow: `_draw` clears
+    # everything first, and a grid appended without that would accumulate.
+    controller.seek(controller.index + 1)
+    root.update()
+    check("grid: a frame change redraws the rules rather than stacking them",
+          len(grid_items()) == len(rules), f"{len(grid_items())} vs {len(rules)}")
+
+    # Always reaches below auto's threshold; both stop before the rules touch.
+    while view.scale > 2.0 and view.can_zoom_out:
+        window.zoom_out()
+    root.update()
+    check("grid: auto is still quiet at 200%", len(grid_items()) == 0, view.label)
+    window.set_grid_mode("always")
+    root.update()
+    check("grid: always draws there instead", len(grid_items()) > 0,
+          f"at {view.label}: {len(grid_items())} lines")
+
+    window.zoom_actual()
+    root.update()
+    check("grid: even always stops at 1:1, where the rules would touch",
+          len(grid_items()) == 0, view.label)
+
+    # The menu is driven by the variable, so it reports the mode for free -- as
+    # long as every path writes it. The keyboard shortcut is the path that
+    # would forget.
+    window.cycle_grid_mode()
+    check("grid: the shortcut cycles always -> off",
+          view.grid_mode == "off" and window._grid_var.get() == "off",
+          f"{view.grid_mode} / {window._grid_var.get()}")
+    window.cycle_grid_mode()
+    check("grid: and on round to auto",
+          view.grid_mode == "auto" and window._grid_var.get() == "auto",
+          f"{view.grid_mode} / {window._grid_var.get()}")
+
+    # A view change mid-gesture abandons it, and the grid goes through the same
+    # funnel -- because `_draw` deletes the overlay whether or not the image
+    # moved, so a gesture surviving a grid toggle is a gesture whose preview has
+    # silently vanished.
+    window._select_tool("pencil")
+    window.canvas._on_press(_XY(*[int(c) for c in window.canvas._image_to_display(4, 4)]))
+    window.canvas._on_drag(_XY(*[int(c) for c in window.canvas._image_to_display(9, 9)]))
+    check("grid: a stroke is in progress", window.canvas.active_tool.is_gesturing)
+    edits_before = controller.can_undo
+    window.set_grid_mode("always")
+    check("grid: toggling it abandons the gesture rather than orphaning the overlay",
+          not window.canvas.active_tool.is_gesturing)
+    check("grid: and commits nothing", controller.can_undo == edits_before)
+    check("grid: overlay cleared with it", len(window.canvas._overlay_items) == 0)
+    window._select_tool("cursor")
+
+    window.set_grid_mode("auto")
+    window.zoom_fit()
+    root.update()
+
     if args.shot:
         try:
             from PIL import ImageGrab

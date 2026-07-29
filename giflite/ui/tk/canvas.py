@@ -41,6 +41,13 @@ CHECKER_DARK = (48, 48, 54, 255)
 CHECKER_SQUARE = 8          # displayed pixels per square
 CANVAS_BORDER = "#55555c"
 MARQUEE = "#4a9eff"         # accent for provisional overlays (crop box, erase)
+# The pixel grid. Stippled rather than solid: Tk canvas items have no alpha, and
+# a 50% dither is the only way to get a rule that reads as a guide over both a
+# dark sprite and a light one without picking a colour that vanishes into one of
+# them. A mid grey at full strength was legible over the artwork and *louder*
+# than the artwork, which is the wrong way round for a guide.
+GRID_COLOR = "#c8c8d0"
+GRID_STIPPLE = "gray50"
 
 # How many composed frames to keep. During playback each frame is drawn once at
 # the current window size, so a GIF-sized cache lets a second viewing (or a
@@ -155,6 +162,21 @@ class PreviewCanvas(tk.Canvas):
 
     def pan(self, dx: float, dy: float) -> bool:
         return self._apply_view(self.view.nudge(dx, dy))
+
+    # The grid changes nothing about where the image sits, so cancelling a
+    # gesture for it looks like overkill. It isn't: `_draw` starts with
+    # `delete("all")`, which takes the overlay items with it while
+    # `_overlay_items` goes on holding their ids -- a gesture that survives a
+    # redraw is a gesture whose preview has silently disappeared. Same funnel,
+    # same guarantee.
+
+    def set_grid_mode(self, mode: str) -> bool:
+        return self._apply_view(self.view.set_grid_mode(mode))
+
+    def cycle_grid_mode(self) -> str:
+        mode = self.view.cycle_grid_mode()
+        self._apply_view(True)
+        return mode
 
     def center_view_on(self, ix: float, iy: float) -> bool:
         """Centre on an image coordinate. What the navigator drags against."""
@@ -323,6 +345,7 @@ class PreviewCanvas(tk.Canvas):
         py = int(round(top + y0 * scale_y))
         self._photo = self._compose(rect, (out_w, out_h), (px - left, py - top))
         self.create_image(px, py, image=self._photo, anchor="nw")
+        self._draw_grid()
         # A crisp edge so the canvas bounds read even where the frame's own
         # pixels reach the border. Drawn at the *whole* image's bounds, which
         # when zoomed in are mostly off-screen; Tk clips it for free.
@@ -335,6 +358,37 @@ class PreviewCanvas(tk.Canvas):
         # entire image, not the visible slice -- a stroke that runs off the edge
         # has to keep making sense.
         self._image_geom = (left, top, fw, fh)
+
+    def _draw_grid(self) -> None:
+        """Rule every source-pixel boundary on screen.
+
+        Canvas items, not pixels baked into the composed bitmap. Three reasons,
+        in order of how much they would have cost to learn the hard way:
+
+        1. The bitmap cache stays pure. Toggling the grid invalidates no frame,
+           and nothing that reads pixels can ever read a grid line -- the
+           eyedropper samples the source, but the invariant is worth having
+           unconditionally rather than per-caller.
+        2. The rules come from `image_to_display`, the same mapping every tool
+           uses. Baking them would mean deriving their positions a second way,
+           from the crop rectangle and the resample, and 19.1 is the record of
+           what two derivations of the same coordinate cost.
+        3. The count is bounded by the viewport, not the image: `grid_lines`
+           walks the *visible* source rect, so 32x on a 2000px image is the
+           same few dozen items as 32x on a 40px one.
+
+        `_apply_view` -> `_redraw` is the only way the grid changes, so there is
+        no separate invalidation path to get wrong.
+        """
+        lines = self.view.grid_lines()
+        if lines is None:
+            return
+        for x in lines.xs:
+            self.create_line(x, lines.top, x, lines.bottom,
+                             fill=GRID_COLOR, stipple=GRID_STIPPLE, width=1)
+        for y in lines.ys:
+            self.create_line(lines.left, y, lines.right, y,
+                             fill=GRID_COLOR, stipple=GRID_STIPPLE, width=1)
 
     # ---- mouse dispatch: one path, straight to the active tool ------------
     #

@@ -14,7 +14,15 @@ from __future__ import annotations
 
 import pytest
 
-from giflite.ui.tk.view import LADDER, ViewTransform
+from giflite.ui.tk.view import (
+    GRID_ALWAYS,
+    GRID_AUTO,
+    GRID_AUTO_SCALE,
+    GRID_MIN_SCALE,
+    GRID_OFF,
+    LADDER,
+    ViewTransform,
+)
 
 
 def make_view(viewport=(400, 300), source=(100, 80)) -> ViewTransform:
@@ -447,3 +455,196 @@ def test_a_second_transform_can_use_a_smaller_pad():
     assert tight.fit_scale > wide.fit_scale
     assert tight.fit_scale == pytest.approx(156 / 100)
     assert wide.fit_scale == pytest.approx(144 / 100)
+
+
+# ---- the pixel grid ------------------------------------------------------
+#
+# The grid divides pixels, so the one thing it must never do is disagree with
+# the mapping that decides which pixel you clicked. These tests hold the rules
+# against `image_to_display`/`display_to_image` rather than against a formula of
+# their own -- a grid checked by its own arithmetic is the ARCHITECTURE 19.1
+# mistake with a fresh coat of paint.
+
+
+def test_grid_defaults_to_auto():
+    assert make_view().grid_mode == GRID_AUTO
+
+
+def test_grid_mode_rejects_an_unknown_value():
+    with pytest.raises(ValueError):
+        make_view().set_grid_mode("sometimes")
+
+
+def test_grid_mode_reports_whether_it_changed():
+    view = make_view()
+    assert view.set_grid_mode(GRID_ALWAYS) is True
+    assert view.set_grid_mode(GRID_ALWAYS) is False
+
+
+def test_grid_mode_cycles_off_auto_always():
+    view = make_view()
+    view.set_grid_mode(GRID_OFF)
+    assert [view.cycle_grid_mode() for _ in range(4)] == [
+        GRID_AUTO, GRID_ALWAYS, GRID_OFF, GRID_AUTO,
+    ]
+
+
+def test_off_hides_the_grid_at_every_rung():
+    view = make_view(viewport=(400, 300), source=(20, 20))
+    view.set_grid_mode(GRID_OFF)
+    for rung in LADDER:
+        view.set_scale(rung)
+        assert view.grid_visible is False
+        assert view.grid_lines() is None
+
+
+def test_auto_shows_the_grid_from_four_times_and_no_earlier():
+    view = make_view(viewport=(400, 300), source=(20, 20))
+    view.set_grid_mode(GRID_AUTO)
+    for rung in LADDER:
+        view.set_scale(rung)
+        assert view.grid_visible is (rung >= GRID_AUTO_SCALE), f"at {rung}x"
+
+
+def test_always_reaches_further_down_than_auto_but_stops_at_the_floor():
+    """`Always` has to mean something `Auto` doesn't, or the third state is
+    decoration -- and it still has a floor, because at 1:1 the rules touch and
+    the grid is a flat fill costing one canvas item per source pixel."""
+    view = make_view(viewport=(400, 300), source=(20, 20))
+    view.set_grid_mode(GRID_ALWAYS)
+    for rung in LADDER:
+        view.set_scale(rung)
+        assert view.grid_visible is (rung >= GRID_MIN_SCALE), f"at {rung}x"
+    assert GRID_MIN_SCALE < GRID_AUTO_SCALE
+
+
+def test_a_mode_that_is_on_but_invisible_reports_itself():
+    """The frontend says so in the status line. Two of the three modes can be
+    switched on and change nothing you can see."""
+    view = make_view(viewport=(400, 300), source=(20, 20))
+    view.set_scale(1.0)
+    view.set_grid_mode(GRID_AUTO)
+    assert view.grid_suppressed is True
+    view.set_scale(8.0)
+    assert view.grid_suppressed is False
+    view.set_grid_mode(GRID_OFF)
+    assert view.grid_suppressed is False   # off is not "suppressed", it is off
+
+
+def test_grid_survives_a_reset():
+    """Scale and pan describe this document; whether you like a grid is about
+    you. Resetting it on every open is the mistake resetting the active tool
+    would be."""
+    view = make_view()
+    view.set_grid_mode(GRID_ALWAYS)
+    view.reset()
+    assert view.grid_mode == GRID_ALWAYS
+
+
+def test_grid_rules_land_exactly_where_the_mapping_puts_pixel_boundaries():
+    view = make_view(viewport=(400, 300), source=(20, 20))
+    view.set_scale(8.0)
+    lines = view.grid_lines()
+    x0, y0, x1, y1 = view.visible_source_rect()
+    assert lines.xs == tuple(view.image_to_display(ix, y0)[0] for ix in range(x0, x1 + 1))
+    assert lines.ys == tuple(view.image_to_display(x0, iy)[1] for iy in range(y0, y1 + 1))
+
+
+def test_a_rule_is_the_boundary_between_the_pixels_either_side_of_it():
+    """The check that actually matters. Land a point a hair left of a rule and a
+    hair right of it, and `display_to_image` must name the two pixels the rule
+    claims to separate. If this fails the grid is lying about the pixels."""
+    view = make_view(viewport=(400, 300), source=(20, 20))
+    view.set_scale(8.0)
+    lines = view.grid_lines()
+    x0, _, _, _ = view.visible_source_rect()
+    for offset, x in enumerate(lines.xs[1:-1], start=1):   # skip the outer edges
+        left_px, _ = view.display_to_image(x - 0.25, lines.top + 0.5)
+        right_px, _ = view.display_to_image(x + 0.25, lines.top + 0.5)
+        assert (left_px, right_px) == (x0 + offset - 1, x0 + offset), f"rule at {x}"
+
+
+def test_grid_rules_only_ever_fall_on_whole_display_pixels():
+    """Every rung at or above the floor is an integer and `geometry()` quantises
+    the origin, so a rule can never land on a genuine half-pixel and blur.
+
+    The tolerance is not slack. `image_to_display` computes `ix / sw * fw`, and
+    that division leaves float dust: panned onto pixel 287 of a 400px source at
+    8x, the boundary comes back as -3.999999999999993 rather than -4.0. It is
+    ~1e-14 of a screen pixel and Tk rounds it away, so it is invisible -- but
+    asserting `is_integer()` here would be asserting something that is false for
+    a reason that does not matter, and the assertion would then be "fixed" by
+    rounding in `grid_lines`, which is how a grid stops agreeing with the
+    mapping. Dust is fine; a real half-pixel is not, and 0.01 tells them apart.
+    """
+    view = make_view(viewport=(400, 300), source=(400, 400))
+    view.set_grid_mode(GRID_ALWAYS)
+    for rung in (r for r in LADDER if r >= GRID_MIN_SCALE):
+        view.set_scale(rung)
+        view.center_on(287, 287)
+        lines = view.grid_lines()
+        assert all(abs(v - round(v)) < 0.01 for v in lines.xs), f"at {rung}x"
+        assert all(abs(v - round(v)) < 0.01 for v in lines.ys), f"at {rung}x"
+
+
+def test_the_grid_stops_at_the_image_and_does_not_cross_the_pasteboard():
+    """A small image at high zoom does not fill the viewport; the rules have to
+    stop at the artwork, not run out over the background."""
+    view = make_view(viewport=(400, 400), source=(10, 10))
+    view.set_grid_mode(GRID_ALWAYS)
+    view.set_scale(4.0)
+    left, top, fw, fh = view.geometry()
+    lines = view.grid_lines()
+    assert (lines.left, lines.top) == (left, top)
+    assert (lines.right, lines.bottom) == (left + fw, top + fh)
+    assert len(lines.xs) == 11 and len(lines.ys) == 11   # 10 pixels, 11 boundaries
+
+
+def test_the_rule_count_is_bounded_by_the_viewport_not_by_the_image():
+    """Why high zoom is affordable at all: the same reason `visible_source_rect`
+    exists. 32x on a 4000px image is the same handful of rules as 32x on a 40px
+    one."""
+    small = make_view(viewport=(320, 320), source=(40, 40))
+    huge = make_view(viewport=(320, 320), source=(4000, 4000))
+    for view in (small, huge):
+        view.set_grid_mode(GRID_ALWAYS)
+        view.set_scale(32.0)
+    assert len(huge.grid_lines().xs) == len(small.grid_lines().xs)
+    assert len(huge.grid_lines().xs) <= 320 // 32 + 2
+
+
+def test_grid_follows_a_pan_rather_than_starting_at_the_image_origin():
+    view = make_view(viewport=(200, 200), source=(400, 400))
+    view.set_grid_mode(GRID_ALWAYS)
+    view.set_scale(8.0)
+    def snapshot():
+        """Read the rules and what they should be *at this pan*. Both halves
+        have to be sampled together: the first draft of this test read them back
+        through the final geometry, so it compared a value with itself and
+        passed for the wrong reason."""
+        first = view.visible_source_rect()[0]
+        return first, view.image_to_display(first, 0)[0], view.grid_lines()
+
+    view.center_on(20, 20)
+    near_first, near_expected, near = snapshot()
+    view.center_on(300, 300)
+    far_first, far_expected, far = snapshot()
+    # Same count of rules, but over different source pixels: the grid is
+    # anchored to the image, not to the viewport. Each side is checked against
+    # the mapping *at the time*, which the first draft of this test got wrong --
+    # it read both back through the final geometry and so compared a value with
+    # itself, and passed for the wrong reason.
+    assert len(near.xs) == len(far.xs)
+    assert near_first != far_first
+    assert near.xs[0] == pytest.approx(near_expected, abs=0.01)
+    assert far.xs[0] == pytest.approx(far_expected, abs=0.01)
+
+
+def test_an_absurd_rule_count_declines_rather_than_freezing_the_window():
+    """Unreachable through the ladder -- the floor bounds a 4K viewport well
+    inside the cap -- so this pins the guard rather than the policy."""
+    view = make_view(viewport=(100_000, 100_000), source=(100_000, 100_000))
+    view.set_grid_mode(GRID_ALWAYS)
+    view.set_scale(2.0)
+    assert view.grid_visible is True
+    assert view.grid_lines() is None

@@ -787,3 +787,80 @@ removing both clamps. Screenshotted with the panel open at 1600%.
   jumpy in real use, `_show_view_panel` is the one place to change it.
 - Panel width is 168px, minimap height 120px, both constants at the top of
   `app.py` if they feel wrong.
+
+## 2026-07-29 — The pixel grid
+
+Matthew, after confirming zoom worked: "I'd like to have an option to display
+gridlines if zoomed in beyond 4x like?" Design in ARCHITECTURE §22.
+
+**Three states rather than a checkbox, at Matthew's choice.** Off / Auto (from
+400%) / Always (from 200%). The interesting part is that `Always` still has a
+floor. At 1:1 the rules touch, so the grid becomes a flat fill that says nothing
+while costing one canvas item per source pixel on every redraw — during
+playback, at 60fps. Calling that "always" would have been honest about the label
+and dishonest about the result. 2x is the last rung where cells are still cells,
+and the floor is documented rather than hidden.
+
+**The grid asks the same function the tools ask.** `grid_lines()` generates rules
+by calling `image_to_display`, not by walking `left + i * scale`. That is the
+whole reason it went in `view.py`: §19.1 is the record of what two derivations
+of one coordinate cost, and a grid half a pixel off from the pixels it claims to
+divide is worse than no grid, because you'd trust it. Same call the crop marquee
+makes, `center=False`, so the two agree about where a pixel ends by construction
+rather than by coincidence.
+
+**Canvas items, not baked pixels.** Drawing the rules into the composed bitmap
+would have kept the cache doing the work — but it would also have meant deriving
+their positions a second time, from the crop rect and the resample placement.
+And the thing baking would have bought was never at risk: `visible_source_rect`
+already bounds the count by the viewport, so 32x on a 4000px image is the same
+few dozen items as 32x on a 40px one. Checked in the smoke rather than assumed.
+
+**Float dust I chose not to round away.** `image_to_display` computes
+`ix / sw * fw`, and panned onto pixel 287 of a 400px source at 8x a boundary
+comes back as -3.999999999999993 instead of -4.0. It is 1e-14 of a screen pixel
+and Tk rounds it off. The tempting fix is to round in `grid_lines`, and that is
+exactly how the grid would stop agreeing *exactly* with the mapping. So the
+floats stay and the test asserts `abs(v - round(v)) < 0.01`, with the reasoning
+written into the test — dust and a genuine half-pixel are different failures and
+the assertion has to be able to tell them apart.
+
+**Two tests were wrong before the code was.** The pan test read both grid
+snapshots back through the *final* geometry, so it compared a value with itself
+and passed for the wrong reason — the same shape of hole as the one §19.1 closed
+(click points derived through the function they were meant to check). It now
+samples the rules and their expected positions together, via a local helper that
+makes doing it wrong awkward. And the smoke assumed fit meant "zoomed out": this
+160x80 GIF fits at 552%, comfortably past the 4x threshold, so `Auto` correctly
+drew a grid the check had declared impossible. Both were mine, both surfaced
+before anything shipped, and the second is a real consequence worth knowing —
+with `Auto`, a small GIF opens with the grid already on.
+
+**The gesture funnel, again.** The grid moves nothing, so cancelling a stroke for
+it reads as overkill. It isn't: `_draw` starts with `delete("all")`, which takes
+the overlay with it while `_overlay_items` keeps holding the ids. A gesture that
+survives a redraw is a gesture whose preview has vanished. Through `_apply_view`
+it goes, like every other view change.
+
+**A setting that does nothing says so.** Two of the three modes can be switched
+on with no visible effect. The status line reports "Auto (from 400%) - not shown
+at 200%". Written straight to the label rather than through the controller's
+STATUS bus, because the grid never reaches the controller (§9) and borrowing the
+bus for a frontend-only setting would be the first crack in that.
+
+**Numbers:** 376 headless (was 360), Xvfb smoke 187 checks (was 170). Five
+mutations confirmed to break the new checks: rules on pixel centres instead of
+boundaries (3 headless + 1 smoke), `Always` losing its floor, the grid spanning
+the viewport instead of the image, the toggle skipping `_apply_view` (2 smoke),
+and the shortcut path not writing the menu variable. Screenshotted at 2013% on
+`Claude_Mad.gif`.
+
+**Handover**
+
+- `GRID_COLOR` / `GRID_STIPPLE` at the top of `canvas.py` if the rules are too
+  faint or too loud — over the orange body they read well, over the red they are
+  subtle. That is a matter of taste and it is two constants.
+- `GRID_AUTO_SCALE` (4.0) is the "beyond 4x" you asked for. If a small GIF
+  opening with the grid already on annoys you, that is the constant.
+- Ctrl+' cycles Off -> Auto -> Always. The View > Pixel Grid submenu sets it
+  directly and reports the current mode.

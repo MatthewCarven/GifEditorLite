@@ -26,7 +26,13 @@ from giflite.ui.tk.dialogs import ask_params
 from giflite.ui.tk.minimap import MiniMap
 from giflite.ui.tk.timeline import Timeline
 from giflite.ui.tk.tools import default_tools
-from giflite.ui.tk.view import PAN_STEP
+from giflite.ui.tk.view import (
+    GRID_ALWAYS,
+    GRID_AUTO,
+    GRID_AUTO_SCALE,
+    GRID_OFF,
+    PAN_STEP,
+)
 
 APP_NAME = "GIF Editor Lite"
 EMPTY_TEXT = "No animation open\n\nCtrl+O to open a GIF"
@@ -57,6 +63,15 @@ OP_MENUS = (("frames", "Frames"), ("timing", "Timing"), ("canvas", "Image"))
 TIMER_MS = 16
 
 SPEEDS = (("0.25x", 0.25), ("0.5x", 0.5), ("1x", 1.0), ("2x", 2.0), ("4x", 4.0))
+
+# Pixel-grid modes as the menu presents them. Auto names its own threshold in
+# the label: a menu item whose effect depends on a number the user cannot see is
+# an item they will toggle twice and then distrust.
+GRID_CHOICES = (
+    (GRID_OFF, "Off"),
+    (GRID_AUTO, f"Auto (from {int(GRID_AUTO_SCALE * 100)}%)"),
+    (GRID_ALWAYS, "Always"),
+)
 
 
 def _format_bytes(nbytes: int) -> str:
@@ -102,6 +117,7 @@ class MainWindow:
         # it, so the status line kept a percentage the readout had already moved
         # past. Both are derived from the same state, so both refresh together.
         self.canvas.on_view_change = self._update_status
+        self._grid_var.set(self.canvas.view.grid_mode)
 
         self._render()
         self._set_title(controller.path, controller.dirty)
@@ -150,6 +166,23 @@ class MainWindow:
                               command=self.zoom_fit)
         view_menu.add_command(label="Actual Size", accelerator="Ctrl+1",
                               command=self.zoom_actual)
+        view_menu.add_separator()
+        # Radiobuttons in a submenu rather than a checkbox, because the mode is
+        # genuinely three-valued and the variable makes the menu report the
+        # current state for free -- no postcommand refresh to forget.
+        # Left empty here and seeded from the transform in __init__ once the
+        # canvas exists: the default grid mode lives in view.py, and a second
+        # copy of it in the menu is how the two drift apart.
+        self._grid_var = tk.StringVar()
+        grid_menu = tk.Menu(view_menu, tearoff=False)
+        for mode, label in GRID_CHOICES:
+            grid_menu.add_radiobutton(
+                label=label, value=mode, variable=self._grid_var,
+                command=lambda m=mode: self.set_grid_mode(m),
+            )
+        view_menu.add_cascade(label="Pixel Grid", menu=grid_menu)
+        view_menu.add_command(label="Cycle Pixel Grid", accelerator="Ctrl+'",
+                              command=self.cycle_grid_mode)
         menubar.add_cascade(label="View", menu=view_menu)
 
         # One menu per op group, built entirely from the registry. Adding an op
@@ -208,6 +241,9 @@ class MainWindow:
         self.root.bind_all("<Control-minus>", lambda _e: self.zoom_out())
         self.root.bind_all("<Control-Key-0>", lambda _e: self.zoom_fit())
         self.root.bind_all("<Control-Key-1>", lambda _e: self.zoom_actual())
+        # Ctrl-modified, so it needs no `_bind_bare_key` guard: an apostrophe
+        # typed into the Size box arrives without Control.
+        self.root.bind_all("<Control-apostrophe>", lambda _e: self.cycle_grid_mode())
 
     # ---- keyboard routing ------------------------------------------------
 
@@ -527,6 +563,39 @@ class MainWindow:
         """The navigator pointed at an image coordinate."""
         if self.canvas.center_view_on(ix, iy):
             self._update_status()
+
+    def set_grid_mode(self, mode: str) -> None:
+        self.canvas.set_grid_mode(mode)
+        self._after_grid_change()
+
+    def cycle_grid_mode(self) -> None:
+        self.canvas.cycle_grid_mode()
+        self._after_grid_change()
+
+    def _after_grid_change(self) -> None:
+        """Keep the menu in step and say what just happened.
+
+        The announcement is not decoration. Two of the three modes can be
+        switched on and change nothing you can see -- Auto below 400%, Always
+        below 200% -- and a setting that silently does nothing is the failure
+        this project has now hit from three directions (a toolbar row that
+        dropped its widgets, a stale zoom readout, a Save that re-encoded for no
+        gain). Saying "on, but not at this zoom" costs one line.
+
+        Written straight to the label rather than through the controller's
+        STATUS event, because the grid never reaches the controller (§9) and
+        borrowing its bus to announce a frontend-only setting would be the first
+        crack in that. The next view change overwrites it, exactly as it does
+        for the controller's own messages.
+        """
+        view = self.canvas.view
+        self._grid_var.set(view.grid_mode)
+        label = dict(GRID_CHOICES)[view.grid_mode]
+        if view.grid_suppressed:
+            self.status.configure(
+                text=f"Pixel grid: {label} - not shown at {view.label}")
+        else:
+            self.status.configure(text=f"Pixel grid: {label}")
 
     def _update_status(self) -> None:
         self.status.configure(text=self._summary())

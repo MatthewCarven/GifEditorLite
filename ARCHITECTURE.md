@@ -685,3 +685,103 @@ levels: headlessly for the stored centre, in the smoke for the geometry.
   re-fits the canvas, and the status line kept a percentage the readout had
   already moved past. Both are derived from the same state, so both refresh
   together.
+
+## 22. The pixel grid
+
+A rule on every source-pixel boundary once you are zoomed in far enough for a
+pixel to be a block rather than a dot. Asked for as "gridlines beyond 4x", which
+is exactly what `Auto` means.
+
+### 22.1 Three states, not a checkbox
+
+"Should the grid be on" and "is the grid useful at this zoom" are different
+questions, and answering both with one boolean makes the control lie in one
+direction or the other — either it does nothing at fit and you assume it is
+broken, or it fills the window with mush at 25% and you assume it is broken.
+
+- **Off** — never.
+- **Auto** (default) — from `GRID_AUTO_SCALE` (4x). The first rung at which a
+  1px rule is a quarter of a cell rather than most of it.
+- **Always** — from `GRID_MIN_SCALE` (2x).
+
+`Always` still has a floor, and the floor is not a second opinion about what the
+user asked for: at 1:1 adjacent rules touch, so the "grid" is a flat fill that
+conveys nothing while costing one canvas item per source pixel on every redraw,
+during playback, at 60fps. 2x is the last rung where cells are still cells.
+`GRID_MAX_LINES` sits above both as a guard for a future non-ladder scale — it
+is unreachable through the ladder today.
+
+Two of the three modes can therefore be switched on and change nothing visible.
+The frontend says so in the status line ("Auto (from 400%) - not shown at 200%").
+That is not politeness: a setting that silently does nothing is the failure this
+project has now hit from three directions (§21's dropped toolbar widgets, §21's
+stale zoom readout, §19.2's Save that re-encoded for no gain).
+
+The mode survives `reset()`. Scale and pan describe *this* document; whether you
+like a grid is a fact about you, and clearing it on every open would be the same
+mistake as clearing the active tool.
+
+### 22.2 Where the rules come from
+
+`ViewTransform.grid_lines()` generates them by calling `image_to_display`, the
+same mapping every tool reads through — not by walking `left + i * scale`.
+
+This is the entire reason the grid lives in `view.py` rather than in the canvas.
+A grid derived from its own copy of the arithmetic can disagree with the mapping
+that decides which pixel you clicked, and §19.1 is the record of what two
+derivations of one coordinate cost: two half-pixel errors, invisible at 1:1 and
+15 screen pixels wrong at 30x. A grid half a pixel off from the pixels it claims
+to divide is worse than no grid, because you would trust it.
+
+`center=False`, so the rules are pixel *boundaries* — the same coordinates the
+crop marquee snaps to (`snap="edge"`). The grid and the crop box agree about
+where a pixel ends because they ask the same function the same question.
+
+The spans come from `visible_source_rect()`, which gives two properties for
+free: the rules stop at the artwork instead of running out over the pasteboard,
+and the count is bounded by the viewport rather than by the image — 32x on a
+4000px image is the same handful of rules as 32x on a 40px one.
+
+**Float dust, deliberately not rounded away.** `image_to_display` computes
+`ix / sw * fw`, and that division leaves ~1e-14 of a screen pixel of error:
+panned onto pixel 287 of a 400px source at 8x, a boundary comes back as
+-3.999999999999993. Tk rounds it away when drawing. `grid_lines` does *not*
+round, because rounding is how the grid would stop agreeing exactly with the
+mapping; the test asserts `abs(v - round(v)) < 0.01`, which tells dust apart
+from a genuine half-pixel.
+
+### 22.3 Canvas items, not baked pixels
+
+`PreviewCanvas._draw_grid` strokes plain line items after the bitmap. The
+alternative — drawing the rules into the composed bitmap in `_compose` — was
+rejected for three reasons, in ascending order of what they would have cost to
+learn the hard way:
+
+1. The bitmap cache stays pure, so toggling the grid invalidates no frame and
+   nothing that reads pixels can read a grid line.
+2. Baking would mean deriving the rule positions a *second* way, from the crop
+   rectangle and the resample placement. See §22.2.
+3. The item count is already viewport-bounded, so the thing baking would have
+   bought (cheap redraws at high zoom) was never actually at risk.
+
+Stippled (`gray50`) rather than solid: Tk canvas items have no alpha, and a 50%
+dither is the only way to get a rule that reads as a guide over both a dark
+sprite and a light one. A mid grey at full strength was legible *and louder than
+the artwork*, which is the wrong way round for a guide. `GRID_COLOR` and
+`GRID_STIPPLE` are two constants at the top of `canvas.py`.
+
+### 22.4 It goes through the gesture funnel
+
+A grid toggle changes nothing about where the image sits, so cancelling an
+in-progress stroke for it looks like overkill. It isn't: `_draw` opens with
+`delete("all")`, which takes the overlay items with it while `_overlay_items`
+goes on holding their ids. A gesture that survives a redraw is a gesture whose
+preview has silently disappeared — so the grid uses `_apply_view` like every
+other view change, and gets §20's staleness guarantee unchanged.
+
+### 22.5 Consequence worth knowing
+
+Fit is not a synonym for "zoomed out". A 160x80 GIF fits at 552% in a 900px
+window, so with `Auto` the grid is on the moment the file opens. That is the
+rule working as specified — you are, in fact, past 4x — but it is a surprise
+worth naming, and `GRID_AUTO_SCALE` is the one constant that changes it.
