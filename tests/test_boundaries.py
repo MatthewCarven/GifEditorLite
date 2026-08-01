@@ -62,3 +62,52 @@ def test_importing_the_core_does_not_pull_in_tkinter():
         text=True,
     )
     assert result.returncode == 0, result.stderr
+
+
+def test_no_frozen_dataclass_carries_an_unhashable_default():
+    """`pyproject` says >=3.10, and 3.11 changed what a legal default is.
+
+    Until 3.11, dataclasses rejected a mutable default by asking "is it a list,
+    dict or set". 3.11 replaced that with "is its type unhashable", which is a
+    better question and a wider net: `MappingProxyType({})` is *immutable* and
+    perfectly safe to share, and it is caught anyway. `Document.meta` used one,
+    so the class body raised ValueError at import and the entire package failed
+    to import on 3.11, 3.12 and 3.13 -- not a subtle degradation, a hard stop
+    for anyone whose `python` was newer than the box it was written on.
+
+    A test that just imports giflite would catch it on a new interpreter and be
+    silent on an old one, which is backwards: the developer on 3.10 is the one
+    who needs telling. So the rule is restated here, where it fails everywhere.
+    """
+    import dataclasses
+    import importlib
+    import pkgutil
+
+    import giflite
+
+    offenders = []
+    for info in pkgutil.walk_packages(giflite.__path__, "giflite."):
+        # ui.tk is the one place allowed to import a toolkit, and importing it
+        # here would need a display. The rule still holds there; nothing in it
+        # is a dataclass, and the check above already fences that package off.
+        if info.name.startswith("giflite.ui.tk"):
+            continue
+        module = importlib.import_module(info.name)
+        for name, obj in vars(module).items():
+            if not dataclasses.is_dataclass(obj) or not isinstance(obj, type):
+                continue
+            # Report each class once, where it is defined -- `Document` is
+            # imported into a dozen modules and would otherwise fill the
+            # failure message with the same line a dozen times.
+            if obj.__module__ != info.name:
+                continue
+            for field in dataclasses.fields(obj):
+                default = field.default
+                if default is dataclasses.MISSING:
+                    continue
+                if type(default).__hash__ is None:
+                    offenders.append(
+                        f"{info.name}.{name}.{field.name} = {type(default).__name__}")
+    assert not offenders, (
+        "unhashable dataclass defaults (illegal on Python 3.11+; use "
+        "field(default_factory=...)): " + "; ".join(offenders))

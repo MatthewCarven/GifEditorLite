@@ -20,7 +20,11 @@
       Windows rather than the smoother wash Tk gives under X11; still
       reads as a guide, but that is the platform difference to know if
       `GRID_COLOR` ever gets retuned
-- [ ] Confirm Python version on the Windows box (targeting 3.10+)
+- [ ] Confirm Python version on the Windows box. **This stopped being
+      cosmetic on 2026-08-01**: the package did not import *at all* on 3.11,
+      3.12 or 3.13 until that day — `Document.meta`'s mappingproxy default
+      became illegal in 3.11 (ARCHITECTURE §31). Fixed, and guarded by a test
+      that fails on 3.10 too, but worth knowing which one you are on
 
 ## M0 — skeleton ✅
 
@@ -498,11 +502,12 @@ Follow-ups, none load-bearing:
       "float it here, then step and drop it there" is a plausible want
 - [ ] No handles on the marquee, so no scale or rotate of a selection. That is a
       transform mode rather than a placement one and would want its own slice
-- [ ] `test_controller_region.py`'s `painted()` helper swaps `_doc` without
-      re-baselining history, so undo in those tests walks back to the *opened*
-      GIF. It passes because the pixels happen to agree — which is precisely the
-      trap `test_controller_float`'s fixture hit and fixed with a
-      `_history.reset`. Worth doing there too before it costs someone an hour
+- [x] `test_controller_region.py`'s `painted()` — fixed 2026-08-01, and worse
+      than recorded: the substituted document is 20x20 and the opened GIF
+      40x20, so undo was handing back a *differently sized* document and every
+      "undo put it back" assertion in the file was sampling the wrong one.
+      Pinned by a test asserting on the size, which is the one property no
+      flat-colour pixel comparison can satisfy by accident
 
 ### Known, deliberately deferred
 
@@ -510,8 +515,15 @@ Follow-ups, none load-bearing:
       pixels. Arguably a footgun — but changing what an existing destructive
       shortcut does is not a change to make while adding a feature. Cut is the
       supported way to clear a region
-- [ ] **Crop to Selection** is nearly free now: `Region` and `canvas.crop` take
-      the same four numbers on purpose
+- [x] **Crop to Selection** — done 2026-08-01 (ARCHITECTURE §30).
+      `controller.crop_to_region()`, reachable at Image -> Crop to Selection.
+      The marquee is dropped afterwards, but only if the crop actually
+      happened: a full-canvas region is the identity, the op declines, and
+      taking the selection away as a consolation prize would change the one
+      thing you didn't ask it to
+- [ ] It has no keyboard shortcut. C is the crop tool and S is Select, so a
+      binding is a decision to take on purpose rather than smuggle in with the
+      feature — available if you want one
 - [ ] No system clipboard integration — the clipboard is internal only. Copying
       a region out to another application is a separate piece of work and would
       want a format decision (PNG bytes, probably)
@@ -547,7 +559,7 @@ Small things noticed and deliberately left alone:
       itself (`x`, `t`, `d`) is unclaimed, so this is available if it turns out
       to be worth one
 
-## The Frame delay section is amputated at the minimum window size
+## The panel decides which sections fit — done 2026-08-01 ✅
 
 Found while screenshotting slice 1; **pre-existing, and not caused by it** —
 measured at both nine and ten palette tools and identical, since nine and ten
@@ -558,13 +570,45 @@ stands the view section down deliberately (§23.5), but nothing does the same fo
 the Frame delay section, so `pack` simply drops it: no error, a control silently
 gone. Exactly §21/§23.5 again, on a section that was added after both.
 
-- [ ] The narrow fix is a second `_fits`-style guard. The better one is to make
-      "sections stand down whole, in priority order" a property of the panel
-      rather than a check per section — there are now three candidates for it
-      (tools, delay, view) and the next one added will get it wrong too
-- [ ] The smoke test currently asserts only that the *tools* stay mapped at the
-      minimum size. Whatever the fix is, it needs a check that names every
-      section, or this recurs a fourth time
+- [x] **Done 2026-08-01** (ARCHITECTURE §29). `PANEL_SECTIONS` in priority
+      order, one frame per section, `_relayout_panel` the single writer of what
+      is packed. A new section joins the rule by being named in the tuple;
+      there is no longer a way to add one *without* it
+- [x] The smoke test names every section now — and the measuring found a
+      *fourth* instance before the fix landed: at the 900x680 default the four
+      sections wanted 516px of a 505px panel, `_view_section_fits`
+      under-counted padding by ~45px, and the Fit/1:1 row had been clipped to
+      9px of its 28 for the whole life of the guard meant to protect it
+- [x] Default window 900x680 -> 900x720 (Matthew's call, asked with the
+      measurements in hand): ~29px of slack, and Windows font metrics are not
+      X11's, so an exact fit here is a coin toss there
+- [ ] At the 480x400 minimum only the tool palette fits, so the colour swatch,
+      brush size and delay box all stand down. That is the rule applied
+      honestly rather than a bug — but the answer *if* it ever matters is a
+      scrolling panel, not a fourth special case
+- [ ] The padding constants are only tested by the height sweep (400-780 in the
+      smoke). Three mutations of them survived every fixed-size check: a
+      constant 24px light only changes the outcome inside a 24px band
+
+## Python 3.11+ could not import the package — fixed 2026-08-01 ✅
+
+Found the hard way: the sandbox moved to 3.11 and `import giflite` raised before
+a single test ran. `Document.meta` defaulted to `MappingProxyType({})`, chosen
+*because* it is read-only and therefore safe to share between frozen instances.
+3.11 replaced dataclasses' "is it a list, dict or set" check with "is its type
+unhashable", and a mappingproxy is unhashable. Illegal on 3.11, 3.12 and 3.13;
+`pyproject.toml` says `>=3.10`. See ARCHITECTURE §31.
+
+- [x] `field(default_factory=lambda: EMPTY_MAP)` — same singleton, new spelling
+- [x] `test_boundaries.py` restates 3.11's rule over every dataclass in the
+      package, so it fails on 3.10 too. Importing the package would catch this
+      on a new interpreter and stay silent on an old one, which is backwards:
+      the person who needs telling is the one who can't hit it
+- [x] Verified by reintroducing the bad default under 3.10 and watching the new
+      check fail there; suite green on 3.10, 3.11 and 3.12
+- [ ] Nothing else in the package was 3.11-sensitive, but nothing checks that
+      either — running the suite on more than one interpreter is currently a
+      thing someone remembers to do, not a thing CI does (there is no CI)
 
 ## Eraser opacity — investigated, declined ❌
 

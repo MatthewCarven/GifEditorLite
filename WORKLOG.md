@@ -1368,3 +1368,84 @@ confirmed after the two misses were closed.
 **Where this leaves it:** select, copy, cut, paste, move, erase-anything. That
 is a usable little editor. Remaining wants are in TODO and none of them are
 load-bearing.
+
+## 2026-08-01 — The panel decides; crop to selection; a Python 3.11 stop
+
+A tidy-up slice, picked from TODO's leftovers: make "sections stand down whole,
+in priority order" a property of the side panel rather than a check per section;
+add Crop to Selection; fix the `test_controller_region` fixture that was
+asserting nothing. Design in ARCHITECTURE §29–31.
+
+**It started with the package not importing.** The sandbox is on Python 3.11 now
+and `import giflite` raised before a single test ran: `Document.meta` defaulted
+to a `MappingProxyType`, and 3.11 changed dataclasses' mutable-default check
+from "is it a list, dict or set" to "is its type unhashable". A mappingproxy is
+immutable *and* unhashable, so a default chosen for safety became illegal. Dead
+on 3.11, 3.12 and 3.13; `pyproject` claims >=3.10. One-line fix, and a
+`test_boundaries` check that restates 3.11's rule so it fails on 3.10 too —
+because the developer who needs telling is the one who *can't* hit it. Verified
+by reintroducing the bad default under 3.10 and watching the check fail there.
+
+**Then measuring the panel found the guard had never worked.** §23.5 wrote
+`_view_section_fits` to stop `pack` amputating the view section. Measured at the
+900x680 default: four sections want 516px, the panel has 505, and the guard
+under-counted padding by ~45px — so it said "fits", `pack` showed the section,
+and the **Fit/1:1 button row has been clipped to 9px of its 28 for the whole
+life of the guard.** The one section anybody had guarded, broken at the default
+window size. That is the fourth instance of the same failure (§21, §23.5, the
+delay section, this) and the argument for the rewrite writes itself: a check
+that belongs to a section only protects the sections someone remembered.
+
+So: `PANEL_SECTIONS` in priority order, one frame per section (loose siblings
+can only be amputated — "whole" is not expressible without the frame), and
+`_relayout_panel` as the single writer of what is packed. Matthew's calls, both
+asked with the measurements in hand: grow the default window to 900x720 rather
+than shave the minimap, and apply "whole section or none" strictly at the
+480x400 minimum, where it means the palette and nothing else.
+
+**Two things the mutation run taught, one of them a deletion.** `_show_section`
+had a `pack(before=...)` to put a returning section back in the right place.
+Mutating it changed nothing, and the reason is structural: sections stand down
+monotonically, so what is on screen is always a *prefix* of PANEL_SECTIONS, so a
+returning section is always the last one showing and `before` had nothing to
+point at. Third guard in three sessions standing in front of something that
+already decides (§27.4, §28.6). Deleted; the claim is now pinned by a check on
+the drawn order instead.
+
+And three mutations of the padding constants survived every fixed-size check.
+Of course they did — a constant 24px light only changes the outcome inside a
+24px band of window heights. A sweep from 400 to 780 kills all three, and it
+keeps working when a section is added and every threshold moves. The sweep also
+had to be pointed at the right thing: `_sections_shown` is the panel's own
+account of itself and `pack` disagreeing with that account *is* the bug, while
+`pack_slaves` is blind to a `side="bottom"` mutation that turns the panel upside
+down. It asks `winfo_ismapped`, `winfo_height` vs `winfo_reqheight`, `winfo_y`.
+
+**Crop to Selection was the easy one, as advertised.** `Region` is in edge
+coordinates so that it *is* `canvas.crop`'s argument list, and the command is
+that correspondence written out. Two decisions worth recording: no
+`can_crop_to_region`, because it would be `can_copy` under a second name — the
+menu entry asks the two questions it can already ask, which is what pushed
+op-menu entries from an op id to a predicate. And the marquee is dropped after
+the crop but *only if the crop happened*: a full-canvas region makes it the
+identity, the op declines, and taking the selection away as a consolation prize
+would be the one case where the command changes nothing except something you
+didn't ask for.
+
+**The fixture fix had more in it than expected.** TODO recorded that
+`test_controller_region.painted()` swaps `_doc` without re-baselining history
+and "passes because the pixels happen to agree". True, and the size disagrees:
+without the reset, undo hands back the *opened GIF* at 40x20 in place of the
+substituted 20x20 document. Every "undo put it back" assertion in that file was
+sampling a pixel on the wrong document. Fixed, and pinned by a test that asserts
+on the size — the one property no flat-colour pixel comparison can satisfy by
+accident.
+
+**Numbers:** 670 headless (was 659), 322 smoke checks (was 307), 12 mutations
+confirmed. Suite green on 3.10, 3.11 and 3.12.
+
+**Left alone deliberately:** Crop to Selection has no keyboard shortcut (C is
+the crop tool, S is Select, and inventing a binding is a decision to take on
+purpose rather than smuggle in with a feature). At 480x400 the colour swatch and
+delay box are gone entirely — the honest consequence of the rule, and the answer
+if it ever matters is a scrolling panel, not a fourth special case.

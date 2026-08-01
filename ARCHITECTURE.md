@@ -1478,3 +1478,131 @@ than merely plausible.
 `commit_float` keeps its own unplaced-move check, for a different reason: to
 keep "nothing to do" off the status line when you pick a selection up and put
 it straight back down. That one is caught by a mutation, so it earns its place.
+
+## 29. The panel decides, not `pack`
+
+Three sections of the side panel had, between them, one hand-written fit check.
+This replaces it with a rule that covers all of them and any that come later,
+and the measuring done to write it found the guarded section had been broken the
+whole time.
+
+### 29.1 A per-section guard only protects the sections someone remembered
+
+The history is four instances of one failure. §21: a toolbar row wanted 1087px,
+got 900, and `pack` dropped three widgets off the end with no error. §23.5: the
+palette became a column, so the same risk moved to the vertical axis, and
+`_view_section_fits` was written to stand the view section down whole. Then the
+frame-delay section arrived with no guard of its own and was silently amputated
+at the 480x400 minimum. And measuring for *this* section found the fourth: at
+the 900x680 default, four sections wanted 516px of a 505px panel,
+`_view_section_fits` under-counted the padding by ~45px and said "fits", and
+`pack` clipped the Fit/1:1 row to 9px of the 28 it asks for. The one section
+with a guard, broken at the default window size, for the whole life of it.
+
+So the check does not belong to a section. `PANEL_SECTIONS` names them in
+priority order, `_relayout_panel` walks that order accumulating heights, and a
+new section joins the rule by being added to the tuple. There is no place left
+to add a section *without* the rule, which is the property the previous three
+fixes lacked.
+
+### 29.2 One frame per section, or "whole" is not expressible
+
+A section built as loose siblings — a label, two rows, a separator — can only be
+amputated: `pack` drops whichever child it reaches with no room left. Wrapping
+each section in its own frame is what makes "show it whole or not at all" a
+thing the code can say. The separator moved *inside* the section it heads for
+the same reason: a divider that outlived its section would be the layout
+pointing at something that isn't there.
+
+### 29.3 Stop at the first section that doesn't fit
+
+Not "skip it and try the next", which is the tempting greedy variant. Sections
+are in priority order, so showing a later one where an earlier one didn't fit
+says both "there is no room" and "the missing one ranks below what replaced it".
+It also flickers: the delay box is 59px and the view section 196, so at the
+sizes where the delay box doesn't fit, *shrinking* the window would make it
+appear. Monotonic is simpler to explain and steadier to use.
+
+Two consequences fall out and are worth stating because tests depend on them:
+the sections on screen are always a prefix of `PANEL_SECTIONS`, and a section
+coming back is therefore always the last one showing — which is why
+`_show_section` needs no `pack(before=...)`. That started life as one, and is
+recorded here as the third guard standing in front of something that already
+decides (§27.4, §28.6). The claim is pinned by a smoke check on the drawn order
+rather than by the guard, because a guard cannot be watched working.
+
+### 29.4 The default window grew, because the panel outgrew it
+
+516px of sections against 505 of panel is not a bug in the arithmetic, it is a
+window that was sized when the panel had two sections. 900x720 leaves ~29px of
+slack, which matters more than it looks: these numbers come from X11 font
+metrics and Windows' are not the same, so a fit that is exact on the test
+machine is a coin toss on the real one. The 480x400 minimum is unchanged, and
+there the rule bites hard — the palette, and nothing else.
+
+### 29.5 Threshold arithmetic needs a sweep, not a size
+
+Three mutations of the padding constants survived every fixed-size check and
+died on a sweep of window heights. The reason generalises: a constant that is
+24px light only changes the outcome inside a ~24px band, and outside that band
+the wrong number and the right one agree. Any test pinned to one window size is
+testing the constant only if it happens to sit in the band — and every threshold
+moves the moment a section is added.
+
+The sweep also had to be told what to look at. Asserting on `_sections_shown`
+checks the panel's own account of itself, and `pack` disagreeing with that
+account *is* the bug; asserting on `pack_slaves` checks the order things were
+packed in, which a `side="bottom"` mutation leaves untouched while turning the
+panel upside down. So the checks read `winfo_ismapped`, `winfo_height` against
+`winfo_reqheight`, and `winfo_y` — three questions Tk answers about what it
+actually did. Same shape as "we disabled the swatch" not being "the swatch looks
+disabled" (§27.5).
+
+## 30. Crop to Selection
+
+Nearly free, and deliberately so: `Region` is held in edge coordinates
+*because* that makes it `canvas.crop`'s argument list (§26.1). The command is
+that correspondence spelled out — four attributes into four params — and it
+lives on the controller rather than in the frontend because the controller owns
+the region and a second frontend should not have to learn the correspondence
+too.
+
+No new op, and no `can_crop_to_region` either: the menu entry asks the two
+questions it can already ask, because a `can_crop_to_region` would be `can_copy`
+under a second name, and two names for one predicate is duplication no test can
+catch. What it did force is that op-menu entries now carry a *predicate* instead
+of an op id — the appended non-registry items are no longer all "can this op
+run", and encoding that as a special case in the generic refresh would have put
+frontend knowledge in the half that has none.
+
+The region is dropped afterwards, because the rectangle it named has become the
+whole canvas: keeping it would leave either a marquee around everything, which
+says nothing, or — since `_emit_doc_changed` re-clamps a region when the canvas
+changes shape — a smaller rectangle trimmed against an origin that just moved.
+But *only* if the crop actually happened. A full-canvas region makes this the
+identity, the op declines rather than stacking a no-op undo entry, and taking
+the marquee away as a consolation prize would be the one case where the command
+changes nothing except something you didn't ask it to change.
+
+Undo restores the pixels and not the marquee. That is not an oversight: the
+region is session state and session state is not on the undo stack (§26.3), and
+a marquee resurrected onto the pre-crop canvas would be worse than none.
+
+## 31. Python 3.11 broke the package, and nothing said so
+
+`Document.meta` defaulted to `MappingProxyType({})` — a *read-only* mapping,
+chosen precisely so a frozen dataclass could share one instance safely. Until
+3.11, dataclasses rejected mutable defaults by asking "is it a list, dict or
+set". 3.11 replaced that with "is its type unhashable", which is a better
+question with a wider net: `mappingproxy` is unhashable, so the class body
+raised `ValueError` at import and `import giflite` failed outright on 3.11,
+3.12 and 3.13. `pyproject.toml` says `>=3.10`.
+
+The fix is `field(default_factory=lambda: EMPTY_MAP)` — the same singleton, a
+different spelling. The interesting half is the test. Importing the package
+catches this on a new interpreter and is silent on an old one, which is exactly
+backwards: the person who needs telling is the one on 3.10, writing the next
+one. So `test_boundaries.py` restates 3.11's rule directly — walk every
+dataclass in the package, fail on any default whose type is unhashable — where
+it fails on every version. Verified by reintroducing the bad default under 3.10
+and watching it fail there.

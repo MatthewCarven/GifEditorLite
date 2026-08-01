@@ -111,7 +111,14 @@ class Document:
     frames: tuple[Frame, ...]
     size: tuple[int, int]
     loop: int = 0  # 0 == forever; 1 == play once
-    meta: Mapping[str, Any] = EMPTY_MAP
+    # A bare `= EMPTY_MAP` is what this wants to say, and it is what it said
+    # until Python 3.11: the default is a *read-only* proxy, so sharing it
+    # between instances is safe. But 3.11 replaced dataclasses' "is it a list,
+    # dict or set" check with "is its type unhashable", and `mappingproxy` is
+    # unhashable -- so the class body itself raised, and the whole package
+    # failed to import on 3.11+. The factory hands back the same singleton;
+    # only the spelling changed.
+    meta: Mapping[str, Any] = field(default_factory=lambda: EMPTY_MAP)
 
     def __post_init__(self) -> None:
         # A plain dict handed in by a caller would be a mutable hole in an

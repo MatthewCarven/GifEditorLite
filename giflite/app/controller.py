@@ -614,6 +614,40 @@ class AppController:
                     width=region.width, height=region.height)
         return True
 
+    def crop_to_region(self) -> bool:
+        """Shrink the canvas to the selected rectangle.
+
+        The whole of it is `run_op("canvas.crop", **the region's four numbers)`,
+        and that is not a coincidence: `Region` is held in edge coordinates
+        precisely so it *is* `canvas.crop`'s argument list (ARCHITECTURE.md 26).
+        Written out here rather than in a frontend because a second frontend
+        would otherwise have to know that correspondence too, and it is the
+        controller that owns the region.
+
+        The region is dropped afterwards, not kept. The rectangle you named has
+        become the whole canvas, so a marquee is either the entire image -- which
+        says nothing -- or, if left where it was, a smaller rectangle in the
+        wrong place: `_emit_doc_changed` re-clamps a region to the new canvas
+        size, which for this edit means trimming it against a canvas whose origin
+        just moved. Neither is what anyone meant, and neither is worth keeping.
+
+        Undo restores the pixels but not the marquee, because the region is
+        session state and session state is not on the undo stack (26.3).
+        """
+        if self._doc is None or self._region is None:
+            return False
+        region = self._region
+        before = self._doc
+        self.run_op("canvas.crop", x=region.x, y=region.y,
+                    width=region.width, height=region.height)
+        # A region covering the whole canvas makes this the identity, and the op
+        # declines rather than stacking a no-op undo entry. Taking the marquee
+        # away as a reward for that would be the one case where the command
+        # changes nothing *except* something you didn't ask it to change.
+        if self._doc is not before:
+            self.set_region(None)
+        return True
+
     def paste(self) -> bool:
         """Paste the clipboard where it was copied from, into `frame_targets`.
 

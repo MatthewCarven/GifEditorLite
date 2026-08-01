@@ -25,7 +25,9 @@ dialog generated from the operation itself.
 
 **Cropping** is a gesture rather than a dialog (typing four numbers is poor UX):
 press **C** or pick Image → Crop, drag a rectangle on the preview — a live box
-shows the pixel size — and release to crop every frame to it. Esc cancels.
+shows the pixel size — and release to crop every frame to it. Esc cancels. If
+you have already selected an area (below), **Image → Crop to Selection** crops
+straight to it with no second drag.
 
 **Painting** uses the tool palette in the panel beside the preview: pick
 **Pencil** (B), **Eraser** (E), **Fill** (F), **Line** (L), **Rect** (R),

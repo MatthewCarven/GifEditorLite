@@ -13,6 +13,7 @@ import time
 import tkinter as tk
 from pathlib import Path
 from tkinter import colorchooser, filedialog, messagebox, ttk
+from typing import Callable
 
 from giflite.app import events as ev
 from giflite.app.cache import ThumbnailCache
@@ -42,6 +43,20 @@ EMPTY_TEXT = "No animation open\n\nCtrl+O to open a GIF"
 # window's 480px minimum width.
 PANEL_WIDTH = 200
 MINIMAP_HEIGHT = 120
+
+# The side panel's sections, most important first. `_relayout_panel` walks this
+# order and stands a section down *whole* when the panel runs out of height --
+# see `_build_side_panel` for why the order is this one, and 23.6 for why the
+# priority list exists at all rather than a `_fits` check per section.
+PANEL_SECTIONS = ("tools", "paint", "delay", "view")
+
+# Vertical space a packed section costs beyond its own requested height: the
+# panel's 6px top and bottom padding, plus an 8px gap above every section but
+# the first. Both are pack options set below, not guesses -- and getting them
+# wrong is the whole of §23.6, so they are named here rather than added as a
+# magic number inside the check.
+PANEL_PADDING_V = 12
+SECTION_GAP = 8
 
 # The palette's no-tool selection: plain viewing, no gesture armed.
 CURSOR_TOOL = "cursor"
@@ -133,7 +148,14 @@ class MainWindow:
         self.thumbnails = ThumbnailCache()
 
         root.title(APP_NAME)
-        root.geometry("900x680")
+        # 720 rather than the original 680 because the side panel outgrew it:
+        # four sections at their natural heights want 516px of panel and 680
+        # gives 505. That was true before this was measured -- the old fit check
+        # under-counted padding by ~45px, so it showed the view section anyway
+        # and `pack` clipped the Fit/1:1 row to 9px of the 28 it wants (§23.6).
+        # Growing the default costs nothing and leaves ~29px of slack, which
+        # matters because Windows' font metrics are not X11's.
+        root.geometry("900x720")
         root.minsize(480, 400)
 
         # Tool state (frontend-owned; ARCHITECTURE.md 19). The active tool --
@@ -244,17 +266,30 @@ class MainWindow:
 
         # One menu per op group, built entirely from the registry. Adding an op
         # (even a whole new group) needs no change here beyond OP_MENUS.
+        self.op_menus: dict[str, tuple[tk.Menu, list]] = {}
         for group_key, title in OP_MENUS:
             menu, entries = self._build_op_menu(menubar, group_key, title)
             if group_key == "canvas":
                 # Crop is a canvas op but gesture-driven (in_menu=False), so it
                 # isn't in menu_groups(). The menu item just selects the crop
-                # tool; it rides the group's existing enable/disable refresh via
-                # can_run("canvas.crop").
+                # tool; it rides the group's existing enable/disable refresh by
+                # bringing its own predicate.
                 menu.add_separator()
                 menu.add_command(label="Crop", accelerator="C",
                                  command=lambda: self._select_tool("crop"))
-                entries.append((menu.index("end"), "canvas.crop"))
+                entries.append((menu.index("end"),
+                                lambda: self.controller.can_run("canvas.crop")))
+                # The other way to reach the same op: a marquee is already the
+                # four numbers it wants (§26), so this needs no gesture at all.
+                # Two questions rather than a new controller predicate -- "can
+                # this op run" and "is there a region" are both already askable,
+                # and a `can_crop_to_region` would be `can_copy` under a second
+                # name, which is the kind of duplication no test can catch.
+                menu.add_command(label="Crop to Selection",
+                                 command=self.crop_to_region)
+                entries.append((menu.index("end"),
+                                lambda: self.controller.can_run("canvas.crop")
+                                and self.controller.region is not None))
 
         self.root.config(menu=menubar)
 
@@ -378,11 +413,16 @@ class MainWindow:
         # now carries the tool palette; only its view section comes and goes
         # (see `_refresh_view_controls`).
         self._build_side_panel()
-        self._panel_shown = False
         self.side_panel.pack(side="right", fill="y")
 
         self.canvas = PreviewCanvas(self.root)
         self.canvas.pack(side="top", fill="both", expand=True)
+
+        # The sections themselves are packed by `_relayout_panel` and nowhere
+        # else, which is why this call has to exist: built is not shown. It runs
+        # after the canvas because deciding whether the view section is wanted
+        # asks the canvas what the zoom is.
+        self._relayout_panel()
 
     def _build_transport(self) -> None:
         bar = ttk.Frame(self.root, padding=(8, 4))
@@ -411,9 +451,8 @@ class MainWindow:
     def _build_side_panel(self) -> None:
         """Everything that isn't the preview, the timeline or the transport.
 
-        Three sections in one strip beside the canvas: the tool palette, the
-        settings those tools read, and the view controls. The first two are
-        always present; the third comes and goes with the zoom.
+        Four sections in one strip beside the canvas: the tool palette, the
+        settings those tools read, the frame delay, and the view controls.
 
         **Why it isn't a toolbar any more.** The palette used to be a row across
         the top, and §21 records what that row did when it ran out of width: at
@@ -421,20 +460,32 @@ class MainWindow:
         end with no error, and only a screenshot caught it. Adding fill and three
         shape tools would have pushed a five-tool row to nine. A vertical strip
         turns "runs out of width" -- which the window's 480px minimum makes
-        permanent -- into "runs out of height", which is bounded by the section
-        that is already conditional. Losing the top row also gives the preview
-        back ~34px of height.
+        permanent -- into "runs out of height", which is bounded and orderable.
 
         **The tools are a two-column grid, not a stack.** Nine stacked radios are
         ~190px of panel; two columns are ~105px, which is what keeps the view
-        section fitting underneath at the default window size. `_panel_fits`
-        turns that arithmetic into a check rather than a hope.
+        section fitting underneath at the default window size.
+
+        **Every section is one frame, and that is load-bearing** (§23.6). A
+        section built as loose siblings can only be amputated -- `pack` drops
+        whichever child it reaches with no room left, silently, leaving the rest
+        looking fine. One frame per section is what makes "show it whole or not
+        at all" expressible, and `_relayout_panel` is what decides which.
         """
         self.side_panel = ttk.Frame(self.root, padding=(6, 6))
+        # Built once, in PANEL_SECTIONS order; packed and unpacked from then on
+        # by `_relayout_panel` alone. Nothing else in the frontend may pack a
+        # direct child of the panel, or the height arithmetic stops describing
+        # the panel it is measuring.
+        self._sections: dict[str, ttk.Frame] = {
+            name: ttk.Frame(self.side_panel) for name in PANEL_SECTIONS
+        }
+        self._sections_shown: set[str] = set()
 
         # ---- tools ----
-        ttk.Label(self.side_panel, text="Tools").pack(side="top", anchor="w")
-        tools = ttk.Frame(self.side_panel)
+        tools_section = self._sections["tools"]
+        ttk.Label(tools_section, text="Tools").pack(side="top", anchor="w")
+        tools = ttk.Frame(tools_section)
         tools.pack(side="top", fill="x", pady=(2, 0))
         self._tool_var = tk.StringVar(value=CURSOR_TOOL)
         # "cursor" is the no-tool default (plain viewing); the rest map to entries
@@ -453,14 +504,20 @@ class MainWindow:
             button.grid(row=i // 2, column=i % 2, sticky="w")
             self._tool_buttons[tid] = button
 
-        ttk.Separator(self.side_panel, orient="horizontal").pack(
-            side="top", fill="x", pady=8)
-
         # ---- settings the tools read ----
+        # The separator lives *inside* the section it heads rather than beside
+        # it, so a section that stands down takes its rule with it. A dangling
+        # divider under the last visible section is the same class of bug as the
+        # amputation itself: the layout telling you about something that isn't
+        # there.
+        paint_section = self._sections["paint"]
+        ttk.Separator(paint_section, orient="horizontal").pack(
+            side="top", fill="x", pady=(0, 8))
+
         # Two balanced rows rather than one long one. Colour+Size on a single row
         # measured 216px, which pushed the whole panel to 228 and took that width
         # off the preview for no reason -- the minimap only needs 188.
-        colour_row = ttk.Frame(self.side_panel)
+        colour_row = ttk.Frame(paint_section)
         colour_row.pack(side="top", fill="x")
         # Kept as an attribute so erase mode can grey it: a `tk.Button` whose
         # background *is* the colour does not visibly change when disabled --
@@ -479,7 +536,7 @@ class MainWindow:
         # the colour row would widen the panel, which comes straight off the
         # preview and is the one axis with no guard on it (§21). Height is
         # guarded; width is not, so height is the cheaper thing to spend.
-        mode_row = ttk.Frame(self.side_panel)
+        mode_row = ttk.Frame(paint_section)
         mode_row.pack(side="top", fill="x", pady=(6, 0))
         self._fill_var = tk.BooleanVar(value=False)
         ttk.Checkbutton(mode_row, text="Fill", variable=self._fill_var).pack(
@@ -492,7 +549,7 @@ class MainWindow:
         ttk.Checkbutton(mode_row, text="Erase", variable=self._erase_var,
                         command=self._on_erase_toggle).pack(side="right")
 
-        size_row = ttk.Frame(self.side_panel)
+        size_row = ttk.Frame(paint_section)
         size_row.pack(side="top", fill="x", pady=(6, 0))
         ttk.Label(size_row, text="Size").pack(side="left", padx=(0, 4))
         self._size_var = tk.StringVar(value=str(self._brush_size))
@@ -509,18 +566,18 @@ class MainWindow:
                                           textvariable=self._tolerance_var)
         self._tolerance_box.pack(side="left")
 
-        ttk.Separator(self.side_panel, orient="horizontal").pack(
-            side="top", fill="x", pady=8)
-
         # ---- per-frame timing ----
         # The fast path to `timing.set_delay`, which until now was a menu item
         # and a dialog. Retiming a frame is the correct way to hold a pose;
         # duplicating frames to do it bloats the file and multiplies the work of
         # every later edit, so the control for it should be at least as reachable
         # as the duplicate button.
-        self._delay_label = ttk.Label(self.side_panel, text="Frame delay")
+        delay_section = self._sections["delay"]
+        ttk.Separator(delay_section, orient="horizontal").pack(
+            side="top", fill="x", pady=(0, 8))
+        self._delay_label = ttk.Label(delay_section, text="Frame delay")
         self._delay_label.pack(side="top", anchor="w")
-        delay_row = ttk.Frame(self.side_panel)
+        delay_row = ttk.Frame(delay_section)
         delay_row.pack(side="top", fill="x", pady=(2, 0))
         self._delay_var = tk.StringVar(value="")
         self._delay_box = ttk.Spinbox(delay_row, from_=MIN_DURATION_MS, to=60000,
@@ -540,12 +597,13 @@ class MainWindow:
     def _build_view_section(self) -> None:
         """The navigator and the zoom controls, at the bottom of the panel.
 
-        Packed last on purpose. `pack` starves whatever it allocates last, so if
-        the panel is ever too short for its contents this is what suffers --
-        which is the right order, because it is the section that is already
-        optional. The tools above it are not.
+        Last in PANEL_SECTIONS on purpose, which now means "first to stand down"
+        rather than "first to be starved". It is the section that is already
+        optional -- at fit it says nothing anyone needs -- and it is by far the
+        tallest, so a panel short of room buys the most by dropping it. The
+        tools above it are not optional at all.
         """
-        self.view_panel = ttk.Frame(self.side_panel)
+        self.view_panel = self._sections["view"]
 
         self.minimap = MiniMap(self.view_panel, on_center=self._center_view_on,
                                height=MINIMAP_HEIGHT, width=PANEL_WIDTH - 12)
@@ -792,6 +850,19 @@ class MainWindow:
         if self.controller.begin_paste():
             self._select_tool("move")
 
+    def crop_to_region(self) -> None:
+        """Image -> Crop to Selection: the marquee becomes the whole canvas.
+
+        Menu-only for now. Every editor spells this differently and none of the
+        obvious keys are free here -- C is the crop tool and S is Select -- so
+        the shortcut is a decision to take on purpose rather than one to smuggle
+        in with the feature.
+        """
+        if self.controller.region is None:
+            self.status.configure(text="Select an area first (S, then drag)")
+            return
+        self.controller.crop_to_region()
+
     def set_region(self, region) -> None:
         """ToolContext hook: SelectTool finished a drag (or a click)."""
         self.controller.set_region(None if region is None else Region(*region))
@@ -948,52 +1019,113 @@ class MainWindow:
             (self._actual_button, abs(view.scale - 1.0) > 1e-9),
         ):
             button.configure(state="normal" if (has_doc and enabled) else "disabled")
-        self._show_view_panel(has_doc and not view.is_fit and self._view_section_fits())
+        self._relayout_panel()
         if self._panel_shown:
             self._update_minimap()
 
-    def _view_section_fits(self) -> bool:
-        """Whether the panel is tall enough for the view section as well.
+    @property
+    def _panel_shown(self) -> bool:
+        """Whether the view section is up. Kept because the minimap costs work.
 
-        Without this the section is shown regardless and `pack` amputates it:
-        measured at the 480x400 minimum window, the map survived and the zoom
-        row simply vanished -- no error, a control silently gone. That is §21's
-        failure repeated on the other axis, and the fix is the same shape as the
-        original one: decide it deliberately instead of letting the geometry
-        manager decide it quietly.
+        Derived rather than stored: `_relayout_panel` is the single writer of
+        panel visibility now, and a second copy of "is the view section
+        showing" would be a thing to forget to update.
+        """
+        return "view" in self._sections_shown
 
-        Whole section or none of it. Half a navigator is worse than no navigator,
-        because the half that remains looks like it works.
+    def _section_wanted(self, name: str) -> bool:
+        """Whether a section has anything to say, before height is considered.
+
+        Only the view section has an answer other than yes: at fit the map's
+        rectangle covers the whole image, which is to say it tells you nothing,
+        so the section is pure cost.
+        """
+        if name == "view":
+            view = self.canvas.view
+            return self.controller.doc is not None and not view.is_fit
+        return True
+
+    def _relayout_panel(self) -> None:
+        """Show as many sections as fit, in priority order, whole ones only.
+
+        **Why this is a panel-level rule and not a check per section** (§23.6).
+        It used to be one guard, `_view_section_fits`, standing in front of the
+        one section anybody had watched `pack` amputate. Then the frame-delay
+        section arrived with no guard of its own and was silently dropped at the
+        480x400 minimum -- the same failure, third time, on a section added
+        after both of the previous fixes. A per-section check only ever protects
+        the sections someone remembered to check, and the section nobody thought
+        about is exactly the one that breaks. So the panel decides for all of
+        them, and a new section joins by being named in PANEL_SECTIONS.
+
+        **Stop at the first section that doesn't fit**, rather than skipping it
+        and trying the next. Sections are in priority order, so a later one
+        appearing where an earlier one couldn't would say the panel is short of
+        room *and* rank the missing one below what replaced it -- and because
+        the later sections here are the taller ones, it would also flicker: drop
+        the delay box, gain room, show the map, which needs more room than the
+        box did. Greedy and monotonic is both simpler and steadier.
+
+        Re-entrancy: packing changes the panel's width, which resizes the canvas,
+        which fires `<Configure>` -> redraw -> back in here. Nothing below
+        depends on the *width*, so the second pass computes the same answer and
+        the no-op guard on each section stops the bouncing there.
         """
         available = self.side_panel.winfo_height()
-        if available <= 1:
-            return True  # not laid out yet; the next <Configure> asks again
-        fixed = sum(child.winfo_reqheight() for child in self.side_panel.winfo_children()
-                    if child is not self.view_panel)
-        # 12 for the panel's own vertical padding, 10 for the gap above the
-        # section -- both are pack options above, not guesses.
-        return fixed + self.view_panel.winfo_reqheight() + 22 <= available
+        # Before the first layout Tk reports 1. Assume everything fits rather
+        # than hiding it all on the way up; the next <Configure> asks again with
+        # a real number.
+        room = available - PANEL_PADDING_V if available > 1 else None
 
-    def _show_view_panel(self, wanted: bool) -> None:
-        """The panel earns its width only when there is something to navigate.
+        for i, name in enumerate(PANEL_SECTIONS):
+            section = self._sections[name]
+            show = self._section_wanted(name)
+            # The top section is never stood down. If the panel is too short
+            # even for that, an empty strip helps nobody, and the window's
+            # 480x400 minimum leaves 225px against the palette's 159 -- so this
+            # is a floor under the arithmetic, not a case anyone should reach.
+            if show and room is not None and i > 0:
+                needed = section.winfo_reqheight() + SECTION_GAP
+                if needed <= room:
+                    room -= needed
+                else:
+                    # This section didn't fit, so nothing below it is offered
+                    # the leftovers either -- see the docstring.
+                    show = False
+                    room = 0
+            elif show and room is not None:
+                room -= section.winfo_reqheight()
+            self._show_section(name, show)
 
-        At fit the map's rectangle covers the whole image, which is to say it
-        tells you nothing, so the strip is pure cost. Guarded against
-        re-entrancy: packing changes the canvas's width, which fires
-        `<Configure>` -> redraw -> back into `_refresh_view_controls`, and
-        re-packing an already-packed frame there would fight the geometry
-        manager. Visibility depends only on `is_fit`, which does not depend on
-        the width, so the state settles after one bounce.
+    def _show_section(self, name: str, wanted: bool) -> None:
+        """Pack or unpack one section, whole. No-op when already in that state.
+
+        Whole section or none of it: half a navigator is worse than no
+        navigator, because the half that remains looks like it works.
         """
-        if wanted == self._panel_shown:
+        if wanted == (name in self._sections_shown):
             return
-        self._panel_shown = wanted
+        section = self._sections[name]
         if wanted:
-            # Inside the side panel now, below the palette, and packed last so it
-            # is what gets starved if the panel is ever too short.
-            self.view_panel.pack(side="top", fill="x", pady=(10, 0))
+            # A returning section re-packs at the *bottom*, and that is correct
+            # here without a `pack(before=...)`, which is what this first said.
+            # Sections stand down monotonically from the end of PANEL_SECTIONS,
+            # so a later section is never up while an earlier one is down --
+            # which means a section coming back is always the last one showing,
+            # and `before` had nothing to point at. A guard in front of
+            # something that already decides (§27.4, §28.3, and now this).
+            # The claim is pinned by the smoke check on `pack_slaves` order
+            # rather than by the guard, because a guard cannot be seen to work.
+            #
+            # The gap goes *above* each section rather than below, so the last
+            # one visible doesn't leave 8px of dead panel under it -- which the
+            # arithmetic would then have to charge for.
+            gap = 0 if name == PANEL_SECTIONS[0] else SECTION_GAP
+            section.pack(side="top", fill="x", pady=(gap, 0))
+            self._sections_shown.add(name)
         else:
-            self.view_panel.pack_forget()
+            section.pack_forget()
+            self._sections_shown.discard(name)
 
     def _update_minimap(self) -> None:
         image = self.controller.frame_image()
@@ -1212,26 +1344,40 @@ class MainWindow:
     # ---- menu construction / state ---------------------------------------
 
     def _build_op_menu(self, menubar: tk.Menu, group_key: str, title: str):
+        """One menu for one op group. Kept in `self.op_menus` under its group key.
+
+        Held rather than dropped because a menu you cannot name is a menu no
+        test can open: `entrycget` reports whatever was last configured, so
+        checking that an entry greys out means running its postcommand first,
+        and that means having the menu. `file_menu` has been an attribute for
+        the same reason since M3.
+        """
         menu = tk.Menu(menubar, tearoff=False)
-        entries: list[tuple[int, str]] = []
+        # (index, "should this be enabled?"). A predicate rather than an op id
+        # because the appended non-registry items are not all "can this op run":
+        # Crop to Selection also wants a region, and encoding that as a special
+        # case in the refresh would put frontend knowledge in the generic half.
+        entries: list[tuple[int, Callable[[], bool]]] = []
         for op in menu_groups().get(group_key, []):
             # "..." signals a dialog; it's a UI convention, so it lives here
             # rather than in the op's label (which feeds "Undo <label>").
             label = op.label + ("..." if op_params(op) else "")
             menu.add_command(label=label, accelerator=op.accel,
                              command=lambda oid=op.id: self._invoke_op(oid))
-            entries.append((menu.index("end"), op.id))
-        menu.configure(postcommand=lambda m=menu, e=entries: self._refresh_op_menu(m, e))
+            entries.append((menu.index("end"),
+                            lambda oid=op.id: self.controller.can_run(oid)))
+        self.op_menus[group_key] = (menu, entries)
+        menu.configure(postcommand=lambda k=group_key: self.refresh_op_menu(k))
         menubar.add_cascade(label=title, menu=menu)
         # Returned so callers can append non-registry items (e.g. gesture-driven
         # Crop) that still share the group's enable/disable refresh.
         return menu, entries
 
-    def _refresh_op_menu(self, menu: tk.Menu, entries: list[tuple[int, str]]) -> None:
-        for index, op_id in entries:
-            menu.entryconfigure(
-                index, state="normal" if self.controller.can_run(op_id) else "disabled"
-            )
+    def refresh_op_menu(self, group_key: str) -> None:
+        """Ask each entry's own predicate whether it should be live."""
+        menu, entries = self.op_menus[group_key]
+        for index, enabled in entries:
+            menu.entryconfigure(index, state="normal" if enabled() else "disabled")
 
     def _refresh_file_menu(self) -> None:
         """Everything here except Open and Import needs a document.

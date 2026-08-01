@@ -23,7 +23,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from giflite.app.controller import AppController  # noqa: E402
 from giflite.core.model import Region, Selection  # noqa: E402
 from giflite.ui.tk import canvas as canvas_module  # noqa: E402
-from giflite.ui.tk.app import MainWindow  # noqa: E402
+from giflite.ui.tk.app import PANEL_SECTIONS, MainWindow  # noqa: E402
 from tests.conftest import make_gif  # noqa: E402
 
 
@@ -40,6 +40,13 @@ def main() -> int:
     controller = AppController()
     window = MainWindow(root, controller)
     root.update()
+
+    # The app's own default size, read back rather than repeated. The side
+    # panel's fit arithmetic is measured against this number (ARCHITECTURE 23.6),
+    # so a test that pinned its own copy would quietly stop testing the default
+    # the first time the default moved -- which is exactly how the clipped
+    # Fit/1:1 row survived three fixes to the same bug.
+    DEFAULT_GEOMETRY = f"{root.winfo_width()}x{root.winfo_height()}"
 
     checks: list[tuple[str, bool, str]] = []
 
@@ -446,7 +453,7 @@ def main() -> int:
     check("resize-guard: the stale release committed nothing",
           controller.undo_label == undo_before_stale, str(controller.undo_label))
     window._select_tool("cursor")
-    root.geometry("900x680")
+    root.geometry(DEFAULT_GEOMETRY)
     root.update()
 
     # --- M-paint: pencil / eraser / eyedropper via the canvas dispatch ---
@@ -677,7 +684,7 @@ def main() -> int:
     check("resize: image refit", window.canvas._photo.width() != before,
           f"{before}px -> {window.canvas._photo.width()}px")
 
-    root.geometry("900x680")
+    root.geometry(DEFAULT_GEOMETRY)
     root.update()
 
     # --- zoom and pan ----------------------------------------------------
@@ -875,7 +882,7 @@ def main() -> int:
     check("panel: a resize refreshes the readout with no command behind it",
           window._zoom_label["text"] != label_before,
           f"{label_before} -> {window._zoom_label['text']}")
-    root.geometry("900x680")
+    root.geometry(DEFAULT_GEOMETRY)
     root.update()
 
     window._actual_button.invoke()
@@ -895,12 +902,55 @@ def main() -> int:
           window.canvas.winfo_width() == canvas_w_with_panel,
           f"{canvas_w_with_panel} -> {window.canvas.winfo_width()}")
 
+    # --- no section is ever amputated -------------------------------------
+    # The check that names *every* section rather than the one someone
+    # remembered to guard. §21 dropped widgets off a toolbar row; §23.5 guarded
+    # the view section by hand; the frame-delay section then arrived with no
+    # guard and was silently dropped; and measuring for §23.6 found the guarded
+    # section had been clipped at the default window size the whole time -- the
+    # map survived, the Fit/1:1 row got 9px of the 28 it wants. Every one of
+    # those is invisible to a test that asserts on a named widget, and all four
+    # are caught by this loop.
+    def section_order():
+        """Which sections are on screen, top to bottom.
+
+        By `winfo_y`, not by `pack_slaves`: pack order is the panel's own
+        account of itself and the thing under test is where the sections
+        actually landed. `pack(side="bottom")` leaves the pack order identical
+        and turns the panel upside down.
+        """
+        on_screen = [(window._sections[n].winfo_y(), n) for n in PANEL_SECTIONS
+                     if window._sections[n].winfo_ismapped()]
+        return [n for _, n in sorted(on_screen)]
+
+    def clipped_sections():
+        # Asserted against what *Tk* did, not against the panel's own
+        # bookkeeping -- "we packed it" is the same kind of claim as "we
+        # disabled the swatch", and pack disagreeing with it is the entire bug.
+        # Two ways to disagree: a section we think is up that never got mapped,
+        # and one that got mapped shorter than it asked to be.
+        bad = []
+        for name in PANEL_SECTIONS:
+            frame = window._sections[name]
+            if name in window._sections_shown and not frame.winfo_ismapped():
+                bad.append(f"{name} claimed but unmapped")
+            elif frame.winfo_ismapped() and frame.winfo_height() < frame.winfo_reqheight():
+                bad.append(f"{name} {frame.winfo_height()}<{frame.winfo_reqheight()}")
+        return bad
+
+    window.zoom_in()
+    root.update()
+    root.update()
+    check("panel: every section is shown at the default window size",
+          set(window._sections_shown) == set(PANEL_SECTIONS),
+          f"missing: {sorted(set(PANEL_SECTIONS) - set(window._sections_shown))}")
+    check("panel: and not one of them is clipped to fit",
+          clipped_sections() == [], f"{clipped_sections()}")
+
     # --- the palette survives a cramped window ----------------------------
-    # §21's failure was pack silently dropping widgets off a row that didn't
-    # fit. The palette is a column now, so the same risk lives on the other
-    # axis -- and at the 480x400 minimum it is real: measured, the view section
-    # wanted 412px of a 238px panel. `_view_section_fits` hides the section
-    # deliberately instead of letting pack amputate half of it.
+    # At the 480x400 minimum the panel has 225px against 516 of content, so
+    # most of it stands down -- deliberately, whole sections at a time, in
+    # PANEL_SECTIONS order. What must never happen is a half-drawn one.
     root.geometry("480x400")
     root.update()
     root.update()
@@ -908,6 +958,14 @@ def main() -> int:
                    if not window._tool_buttons[tid].winfo_ismapped()]
     check("cramped: every tool is still reachable at the minimum window size",
           unreachable == [], f"dropped: {unreachable}")
+    check("cramped: the top section is never stood down",
+          window._sections[PANEL_SECTIONS[0]].winfo_ismapped())
+    check("cramped: whatever is left is whole, not amputated",
+          clipped_sections() == [], f"{clipped_sections()}")
+    check("cramped: sections stand down from the bottom of the priority list",
+          [n for n in PANEL_SECTIONS if n in window._sections_shown]
+          == list(PANEL_SECTIONS[:len(window._sections_shown)]),
+          f"shown: {sorted(window._sections_shown)}")
     check("cramped: the view section stands down rather than being amputated",
           not window.view_panel.winfo_ismapped())
     window.zoom_in()
@@ -916,11 +974,46 @@ def main() -> int:
           not window.view_panel.winfo_ismapped()
           or window._zoom_in_button.winfo_ismapped(),
           "half a navigator is worse than none")
-    root.geometry("900x680")
+    root.geometry(DEFAULT_GEOMETRY)
     root.update()
     root.update()
     check("cramped: it comes back when there is room again",
           window.view_panel.winfo_ismapped() and window._zoom_in_button.winfo_ismapped())
+    check("cramped: and comes back in the right place, not appended at the end",
+          section_order() == [n for n in PANEL_SECTIONS
+                              if n in window._sections_shown],
+          f"top to bottom: {section_order()}")
+    check("cramped: nothing was clipped on the way back either",
+          clipped_sections() == [], f"{clipped_sections()}")
+
+    # --- the sweep --------------------------------------------------------
+    # Every check above lands on one window size, and the panel's arithmetic is
+    # a threshold: a padding constant that is 24px light only shows up in a
+    # ~24px band of window heights, and outside it the wrong number and the
+    # right one agree. Three mutations of the constants survived the fixed-size
+    # checks and died here. Sweeping is also the only form of this test that
+    # keeps working when a section is added and every threshold moves.
+    window.zoom_in()
+    root.update()
+    bad_heights = []
+    for height in range(400, 780, 6):
+        root.geometry(f"900x{height}")
+        root.update()
+        root.update()
+        problems = clipped_sections()
+        shown = [n for n in PANEL_SECTIONS if n in window._sections_shown]
+        if shown != list(PANEL_SECTIONS[:len(shown)]):
+            problems.append(f"out of priority order: {shown}")
+        if section_order() != shown:
+            problems.append(f"drawn out of order: {section_order()}")
+        if problems:
+            bad_heights.append(f"{height}: {'; '.join(problems)}")
+    check("sweep: no window height between 400 and 780 amputates a section",
+          bad_heights == [], f"{bad_heights[:4]} ({len(bad_heights)} heights)")
+
+    root.geometry(DEFAULT_GEOMETRY)
+    root.update()
+    root.update()
     window.zoom_fit()
     window._select_tool("cursor")
     root.update()
@@ -1378,6 +1471,51 @@ def main() -> int:
     check("select: a crop that excludes the region clears it and its marquee",
           controller.region is None and len(region_items()) == 0,
           f"region={controller.region} items={len(region_items())}")
+
+    # --- crop to selection, through the real menu -------------------------
+    # The command itself is covered headlessly. What only a display answers is
+    # whether the Image menu reaches it and greys it correctly -- and that entry
+    # is the reason menu entries carry a predicate instead of an op id now:
+    # `can_run("canvas.crop")` is true whenever a document is open, and this
+    # also wants a region. Menu state only updates in the postcommand, so drive
+    # that rather than trusting whatever `entrycget` last saw.
+    while controller.can_undo:
+        controller.undo()
+    controller.set_region(None)
+    root.update()
+    image_menu, _ = window.op_menus["canvas"]
+    window.refresh_op_menu("canvas")
+    check("crop-to-selection: greyed out with no region",
+          str(image_menu.entrycget("Crop to Selection", "state")) == "disabled",
+          str(image_menu.entrycget("Crop to Selection", "state")))
+    check("crop-to-selection: plain Crop stays live -- it only needs a document",
+          str(image_menu.entrycget("Crop", "state")) == "normal",
+          str(image_menu.entrycget("Crop", "state")))
+
+    before_size = controller.doc.size
+    controller.set_region(Region(3, 2, 9, 7))
+    root.update()
+    window.refresh_op_menu("canvas")
+    check("crop-to-selection: live once there is a region",
+          str(image_menu.entrycget("Crop to Selection", "state")) == "normal",
+          str(image_menu.entrycget("Crop to Selection", "state")))
+
+    image_menu.invoke(image_menu.index("Crop to Selection"))
+    root.update()
+    check("crop-to-selection: the canvas became the marquee",
+          controller.doc.size == (9, 7),
+          f"{before_size} -> {controller.doc.size}")
+    check("crop-to-selection: and the marquee went with it",
+          controller.region is None and len(region_items()) == 0,
+          f"region={controller.region} items={len(region_items())}")
+    check("crop-to-selection: the preview followed the smaller canvas",
+          window.canvas._photo is not None
+          and window.canvas.view.visible_source_rect()[2] <= 9,
+          str(window.canvas.view.visible_source_rect()))
+    controller.undo()
+    root.update()
+    check("crop-to-selection: one undo puts the whole canvas back",
+          controller.doc.size == before_size, str(controller.doc.size))
 
     while controller.can_undo:
         controller.undo()

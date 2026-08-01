@@ -15,6 +15,7 @@ from PIL import Image
 
 from giflite.app import events as ev
 from giflite.app.controller import AppController
+from giflite.core.history import Snapshot
 from giflite.core.model import Document, Frame, Region, Selection
 from tests.conftest import make_gif
 from tests.fake_frontend import FakeFrontend
@@ -31,11 +32,44 @@ def loaded(tmp_path: Path):
 
 
 def painted(controller, color=(9, 9, 9, 255)):
-    """Put a known solid document in place, so pixel assertions are readable."""
+    """Put a known solid document in place, so pixel assertions are readable.
+
+    Substituting `_doc` behind the controller's back means history is still
+    baselined on the *opened GIF*, so undo would walk back to those frames
+    rather than to this one -- and every "undo put it back" check whose pixel
+    happened to agree would pass while asserting nothing. `test_controller_float`
+    hit exactly that and fixed it here; this had the same shape and got away
+    with it, which is worse, because nothing was failing to prompt the fix.
+    """
     frames = tuple(Frame.new(Image.new("RGBA", (20, 20), color), 100)
                    for _ in range(5))
     controller._doc = Document(frames, (20, 20))
+    controller._history.reset(
+        Snapshot(controller._doc, controller._selection, controller.index, "Open"))
     return controller
+
+
+class TestTheHelperAbove:
+    """A test on `painted`, because it is the thing every undo check here rests on.
+
+    The trap it fell into is invisible by construction: substituting `_doc`
+    without re-baselining history leaves undo walking back to the *opened GIF*,
+    and since both documents are flat colour, any "undo put it back" assertion
+    whose sample pixel happens to agree passes without touching the document it
+    claims to be about. The two differ in *size*, which is the one property no
+    pixel comparison can accidentally satisfy -- so that is what to assert on.
+    """
+
+    def test_undo_returns_the_substituted_document_not_the_opened_file(self, loaded):
+        controller, _ = loaded
+        painted(controller)
+        controller.set_region(Region(2, 2, 6, 6))
+        controller.copy_region()
+        controller.run_op("paint.cut", index=0, x=2, y=2, width=6, height=6)
+        controller.undo()
+        assert controller.doc.size == (20, 20), (
+            "history is baselined on the opened GIF, so every undo check in "
+            "this file is asserting against the wrong document")
 
 
 class TestSettingTheRegion:
@@ -376,3 +410,94 @@ class TestPaste:
         controller.undo()
         for i in range(5):
             assert controller.doc[i].image.getpixel((3, 3))[3] == 0
+
+
+class TestCropToRegion:
+    """The command that exists because Region and canvas.crop are the same four
+    numbers (§26). Almost all of what is worth testing is the *region's* fate
+    afterwards, not the pixels' -- `canvas.crop` is covered in test_canvas_ops.
+    """
+
+    def test_it_crops_the_canvas_to_the_marquee(self, loaded):
+        controller, _ = loaded
+        controller.set_region(Region(5, 4, 12, 9))
+        assert controller.crop_to_region()
+        assert controller.doc.size == (12, 9)
+
+    def test_it_takes_the_right_pixels_not_just_the_right_size(self, loaded):
+        """A crop that lands on the wrong origin still passes a size check, so
+        the assertion has to be about content."""
+        controller, _ = loaded
+        painted(controller, (0, 0, 0, 255))
+        mark = controller.doc[0].image.copy()
+        mark.putpixel((7, 6), (200, 30, 40, 255))
+        controller._doc = Document(
+            (Frame.new(mark, 100),) + controller.doc.frames[1:], (20, 20))
+        controller.set_region(Region(5, 4, 6, 6))
+        controller.crop_to_region()
+        assert controller.doc[0].image.getpixel((2, 2)) == (200, 30, 40, 255)
+
+    def test_it_crops_every_frame(self, loaded):
+        """Canvas ops are global by nature -- a document whose frames disagreed
+        about their size is not a document."""
+        controller, _ = loaded
+        controller.set_region(Region(2, 2, 8, 8))
+        controller.crop_to_region()
+        assert {f.image.size for f in controller.doc} == {(8, 8)}
+
+    def test_the_marquee_is_dropped_afterwards(self, loaded):
+        """It named a rectangle that is now the whole canvas. Keeping it would
+        leave a marquee re-clamped against an origin that just moved."""
+        controller, _ = loaded
+        controller.set_region(Region(5, 4, 12, 9))
+        controller.crop_to_region()
+        assert controller.region is None
+
+    def test_it_declines_with_no_region(self, loaded):
+        controller, _ = loaded
+        size_before = controller.doc.size
+        assert not controller.crop_to_region()
+        assert controller.doc.size == size_before
+
+    def test_a_full_canvas_marquee_changes_nothing_and_keeps_the_marquee(self, loaded):
+        """The op declines an identity crop rather than stacking a no-op undo
+        entry -- so this must not take the selection away as a consolation
+        prize. Doing nothing means doing nothing."""
+        controller, _ = loaded
+        whole = Region(0, 0, *controller.doc.size)
+        controller.set_region(whole)
+        controller.crop_to_region()
+        assert controller.region == whole
+        assert not controller.can_undo
+
+    def test_it_is_one_undoable_edit(self, loaded):
+        controller, _ = loaded
+        controller.set_region(Region(5, 4, 12, 9))
+        controller.crop_to_region()
+        assert controller.undo_label == "Crop"
+        controller.undo()
+        assert controller.doc.size == (40, 20)
+
+    def test_undo_gives_back_the_pixels_but_not_the_marquee(self, loaded):
+        """Session state is not on the undo stack, and a region that came back
+        from the dead pointing at the pre-crop canvas would be worse than none.
+        """
+        controller, _ = loaded
+        controller.set_region(Region(5, 4, 12, 9))
+        controller.crop_to_region()
+        controller.undo()
+        assert controller.region is None
+
+    def test_it_settles_a_float_first_like_every_other_edit(self, loaded):
+        """`run_op` commits an outstanding float before it does anything, and
+        this reaching the op through `run_op` is what buys that for free."""
+        controller, _ = loaded
+        painted(controller)
+        controller.set_region(Region(2, 2, 6, 6))
+        assert controller.begin_move()
+        assert controller.nudge_float(3, 0)
+        assert controller.floating is not None  # or the check below is vacuous
+        controller.set_region(Region(1, 1, 10, 10))
+        controller.crop_to_region()
+        assert controller.floating is None
+        assert controller.doc.size == (10, 10)
