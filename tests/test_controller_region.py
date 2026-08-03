@@ -14,6 +14,7 @@ import pytest
 from PIL import Image
 
 from giflite.app import events as ev
+from giflite.app import sysclip
 from giflite.app.controller import AppController
 from giflite.core.history import Snapshot
 from giflite.core.model import Document, Frame, Region, Selection
@@ -501,3 +502,212 @@ class TestCropToRegion:
         controller.crop_to_region()
         assert controller.floating is None
         assert controller.doc.size == (10, 10)
+
+
+class TestCopyFrame:
+    """One clipboard, two ways to fill it (Matthew's call). Copying a frame is
+    copying an area whose area is everything, so the interesting assertions are
+    about the *slot* they share and about reaching the OS."""
+
+    def test_it_copies_the_playhead_frame(self, loaded):
+        controller, _ = loaded
+        painted(controller, (4, 5, 6, 255))
+        controller.seek(2)
+        assert controller.copy_frame()
+        assert controller.clipboard_size == (20, 20)
+        assert controller._clipboard.getpixel((0, 0)) == (4, 5, 6, 255)
+
+    def test_the_origin_is_the_corner_so_paste_lands_in_place(self, loaded):
+        """A whole frame *is* the canvas, so paste-in-place of one needs no
+        special case -- it lands at (0, 0) because that is where it came from."""
+        controller, _ = loaded
+        controller.copy_frame()
+        assert controller._clipboard_origin == (0, 0)
+
+    def test_it_replaces_a_copied_area(self, loaded):
+        """One clipboard: the last thing you copied is the thing you have."""
+        controller, _ = loaded
+        controller.set_region(Region(2, 2, 4, 4))
+        controller.copy_region()
+        assert controller.clipboard_size == (4, 4)
+        controller.copy_frame()
+        assert controller.clipboard_size == (40, 20)
+
+    def test_the_clipboard_is_detached_from_the_document(self, loaded):
+        controller, _ = loaded
+        painted(controller)
+        controller.copy_frame()
+        before = controller._clipboard.tobytes()
+        controller.run_op("paint.fill", index=0, x=0, y=0, color=(1, 2, 3, 255))
+        assert controller._clipboard.tobytes() == before
+
+    def test_it_needs_a_document(self, loaded):
+        controller, _ = loaded
+        controller.close()
+        assert not controller.copy_frame()
+        assert not controller.can_copy_frame
+
+    def test_it_is_not_an_edit(self, loaded):
+        controller, _ = loaded
+        controller.copy_frame()
+        assert not controller.can_undo
+        assert not controller.dirty
+
+    def test_it_offers_the_pixels_to_the_system_clipboard(self, loaded, monkeypatch):
+        sent = []
+        monkeypatch.setattr(sysclip, "can_copy", lambda: True)
+        monkeypatch.setattr(sysclip, "put_image", lambda im: sent.append(im))
+        controller, _ = loaded
+        painted(controller, (8, 8, 8, 255))
+        controller.copy_frame()
+        assert len(sent) == 1
+        assert sent[0].getpixel((0, 0)) == (8, 8, 8, 255)
+
+    def test_copying_an_area_goes_out_too(self, loaded, monkeypatch):
+        """Every copy leaves the app, not just Copy Frame: there is one
+        clipboard, so the last thing copied is what another program should get."""
+        sent = []
+        monkeypatch.setattr(sysclip, "can_copy", lambda: True)
+        monkeypatch.setattr(sysclip, "put_image", lambda im: sent.append(im))
+        controller, _ = loaded
+        controller.set_region(Region(0, 0, 5, 5))
+        controller.copy_region()
+        assert [im.size for im in sent] == [(5, 5)]
+
+    def test_a_refusing_system_clipboard_does_not_fail_the_copy(self, loaded, monkeypatch):
+        """The pixels are in hand either way. Another application holding the
+        clipboard open for a moment must not turn into a copy that didn't
+        happen -- it turns into a sentence in the status line."""
+        def refuse(_image):
+            raise sysclip.ClipboardError("someone else has it")
+
+        monkeypatch.setattr(sysclip, "can_copy", lambda: True)
+        monkeypatch.setattr(sysclip, "put_image", refuse)
+        controller, frontend = loaded
+        assert controller.copy_frame()
+        assert controller.clipboard_size == (40, 20)
+        assert "someone else has it" in frontend.last(ev.STATUS).payload["message"]
+
+    def test_nothing_is_attempted_where_it_cannot_work(self, loaded, monkeypatch):
+        called = []
+        monkeypatch.setattr(sysclip, "can_copy", lambda: False)
+        monkeypatch.setattr(sysclip, "put_image", lambda im: called.append(im))
+        controller, _ = loaded
+        assert controller.copy_frame()
+        assert called == []
+
+
+class TestPasteFrame:
+    """The door *into* the editor: whatever the OS clipboard holds becomes this
+    frame. Reads the system clipboard rather than the internal one on purpose --
+    that asymmetry is the feature, since Ctrl+V already covers the inside."""
+
+    def clipboard(self, monkeypatch, value, why=""):
+        image = value if value is None else value.convert("RGBA")
+        monkeypatch.setattr(sysclip, "grab_image", lambda: (image, why))
+
+    def test_it_replaces_the_playhead_frame(self, loaded, monkeypatch):
+        controller, _ = loaded
+        controller.seek(3)
+        self.clipboard(monkeypatch, Image.new("RGBA", (40, 20), (7, 8, 9, 255)))
+        assert controller.paste_frame()
+        assert controller.doc[3].image.getpixel((0, 0)) == (7, 8, 9, 255)
+
+    def test_it_leaves_every_other_frame_alone(self, loaded, monkeypatch):
+        controller, _ = loaded
+        before = [f.image.tobytes() for f in controller.doc]
+        controller.seek(1)
+        self.clipboard(monkeypatch, Image.new("RGBA", (40, 20), (7, 8, 9, 255)))
+        controller.paste_frame()
+        after = [f.image.tobytes() for f in controller.doc]
+        assert [i for i, (a, b) in enumerate(zip(before, after)) if a != b] == [1]
+
+    def test_it_replaces_rather_than_composites(self, loaded, monkeypatch):
+        """The difference from Ctrl+V, and the reason this is its own op: a
+        frame with transparent corners must arrive with transparent corners,
+        not with the old frame showing through them."""
+        controller, _ = loaded
+        painted(controller, (200, 100, 50, 255))
+        transparent = Image.new("RGBA", (20, 20), (0, 0, 0, 0))
+        transparent.putpixel((5, 5), (1, 2, 3, 255))
+        self.clipboard(monkeypatch, transparent)
+        controller.paste_frame()
+        assert controller.doc[0].image.getpixel((0, 0))[3] == 0
+        assert controller.doc[0].image.getpixel((5, 5)) == (1, 2, 3, 255)
+
+    def test_the_frame_keeps_its_own_duration(self, loaded, monkeypatch):
+        """You replaced the picture, not the timing."""
+        controller, _ = loaded
+        controller.seek(2)
+        controller.run_op("timing.set_delay", delay_ms=430)
+        was = controller.doc[2].duration_ms
+        self.clipboard(monkeypatch, Image.new("RGBA", (40, 20), (7, 8, 9, 255)))
+        controller.paste_frame()
+        assert controller.doc[2].duration_ms == was
+
+    def test_a_wrong_size_refuses_and_names_both(self, loaded, monkeypatch):
+        controller, frontend = loaded
+        before = controller.doc[0].image.tobytes()
+        self.clipboard(monkeypatch, Image.new("RGBA", (60, 60)))
+        assert not controller.paste_frame()
+        assert controller.doc[0].image.tobytes() == before
+        message = frontend.last(ev.STATUS).payload["message"]
+        assert "60x60" in message and "40x20" in message
+
+    def test_a_refusal_leaves_nothing_on_the_undo_stack(self, loaded, monkeypatch):
+        """Refusing is not an edit, so there must be nothing to undo afterwards
+        -- an undo entry for a thing that didn't happen is worse than no
+        message at all."""
+        controller, _ = loaded
+        self.clipboard(monkeypatch, Image.new("RGBA", (60, 60)))
+        controller.paste_frame()
+        assert not controller.can_undo
+        assert not controller.dirty
+
+    def test_an_empty_clipboard_says_so_and_changes_nothing(self, loaded, monkeypatch):
+        controller, frontend = loaded
+        self.clipboard(monkeypatch, None, "Nothing on the clipboard")
+        assert not controller.paste_frame()
+        assert not controller.can_undo
+        assert frontend.last(ev.STATUS).payload["message"] == "Nothing on the clipboard"
+
+    def test_the_reason_the_clipboard_gave_is_the_one_reported(self, loaded, monkeypatch):
+        """A file on the clipboard and an empty clipboard want different things
+        from the user, so the controller must not flatten them into one line."""
+        controller, frontend = loaded
+        self.clipboard(monkeypatch, None, "That's a file on the clipboard, not an image")
+        controller.paste_frame()
+        assert "file" in frontend.last(ev.STATUS).payload["message"]
+
+    def test_it_is_one_undoable_edit(self, loaded, monkeypatch):
+        controller, _ = loaded
+        before = controller.doc[0].image.tobytes()
+        self.clipboard(monkeypatch, Image.new("RGBA", (40, 20), (7, 8, 9, 255)))
+        controller.paste_frame()
+        assert controller.undo_label == "Paste Frame"
+        controller.undo()
+        assert controller.doc[0].image.tobytes() == before
+
+    def test_pasting_the_same_pixels_again_is_not_an_edit(self, loaded, monkeypatch):
+        """`_apply_frames` declines a transform that changed nothing, so this
+        gets "nothing to do" rather than an identity snapshot on the stack."""
+        controller, _ = loaded
+        self.clipboard(monkeypatch, controller.doc[0].image)
+        controller.paste_frame()
+        assert not controller.can_undo
+
+    def test_it_needs_a_document(self, loaded, monkeypatch):
+        controller, _ = loaded
+        controller.close()
+        self.clipboard(monkeypatch, Image.new("RGBA", (40, 20)))
+        assert not controller.paste_frame()
+
+    def test_it_settles_a_float_first_like_every_other_edit(self, loaded, monkeypatch):
+        controller, _ = loaded
+        painted(controller)
+        controller.set_region(Region(2, 2, 6, 6))
+        assert controller.begin_move()
+        assert controller.nudge_float(3, 0)
+        self.clipboard(monkeypatch, Image.new("RGBA", (20, 20), (7, 8, 9, 255)))
+        controller.paste_frame()
+        assert controller.floating is None

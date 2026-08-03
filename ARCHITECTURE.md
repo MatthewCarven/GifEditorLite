@@ -1606,3 +1606,123 @@ one. So `test_boundaries.py` restates 3.11's rule directly — walk every
 dataclass in the package, fail on any default whose type is unhashable — where
 it fails on every version. Verified by reintroducing the bad default under 3.10
 and watching it fail there.
+
+## 32. The system clipboard
+
+Whole frames, in and out, through the operating system. The internal clipboard
+from §26 stays exactly as it was; this is a second door, and most of the design
+is about which door does what.
+
+### 32.1 It lives in `app/`, not in `ui/tk/`
+
+The opposite call from the one §19 makes about Tools, and for the opposite
+reason. A Tool is about mouse gestures, which every toolkit spells differently,
+so it belongs to the frontend. "Put these pixels on the Windows clipboard" is
+the same three Win32 calls no matter what drew the window, so a second frontend
+should inherit it rather than reimplement it. `sysclip.py` imports Pillow and
+`ctypes` and nothing else — the boundary test is unmoved.
+
+### 32.2 Reading is easy, writing is not, and that shapes the file
+
+Pillow ships `ImageGrab.grabclipboard()` and it works on Windows, macOS and
+X11/Wayland with a helper installed. Pillow ships nothing for the other
+direction, so writing is a `ctypes` shim onto `user32`/`kernel32`, Windows-only.
+`can_copy()` says so out loud so the caller can behave, rather than discovering
+it at the moment someone presses the key.
+
+**Everything that can be tested without a clipboard is a pure function**: the
+DIB encoder, its inverse, and the two decision rules all take arguments and
+return values. `put_image` — open, empty, allocate, set, close — is the only
+thing CI cannot run, and it is written to be boring for exactly that reason: no
+branching on the data, one ordered sequence, the close in a `finally`. **The
+untestable code should be the code with nothing in it.**
+
+The test that earns its keep is `test_pillow_reads_it_as_a_bitmap`. A round
+trip through this module's own decoder proves only that two functions here
+agree, and a flipped row order implemented consistently in both would agree
+perfectly while producing a wrong picture in every other application. So the
+DIB gets a 14-byte BITMAPFILEHEADER bolted on and is handed to Pillow's BMP
+decoder, which somebody else wrote. Three details it pins, each of which fails
+*silently* — the clipboard accepts the handle, nothing raises, and the picture
+merely arrives upside down or blue: DIB rows run bottom-up, the channel order
+is BGRA, and there is no file header on a clipboard DIB.
+
+### 32.3 Two formats, because they serve different readers
+
+PNG *and* CF_DIB. 32bpp BI_RGB has somewhere to put alpha but no promise that
+anyone reads it; a PNG's alpha is not optional. Modern applications ask for the
+registered "PNG" format and get transparency, everything else takes the DIB.
+Writing one without the other means either losing alpha everywhere or being
+unpasteable in half of Windows.
+
+### 32.4 One clipboard, two doors
+
+Matthew's call, and it needs stating precisely because the two halves are not
+symmetric:
+
+* **Every copy goes out.** Copy Area and Copy Frame both mirror to the OS, so
+  the last thing you copied is the thing another application gets. A sprite is
+  as worth having in Discord as a frame is.
+* **The internal slot is still what Ctrl+V reads**, and that is not redundancy.
+  It carries `_clipboard_origin`, which is what makes paste land back where it
+  was copied from. No system clipboard format has anywhere to put that, so a
+  round trip through the OS would silently turn paste-in-place into
+  paste-at-the-corner.
+* **Paste Frame reads the OS.** That asymmetry is the feature: this is the door
+  *in*. A screenshot, a frame exported from something else, a drawing from a
+  paint program — Ctrl+V could never have offered any of them.
+
+Copy Frame stores its image at origin (0, 0), so Copy Frame followed by Ctrl+V
+is a paste-in-place of the whole picture with no special case anywhere: a frame
+*is* the canvas.
+
+Failing to reach the OS clipboard is **not** a failed copy. The pixels are in
+hand either way, so it reports in the status line and returns normally —
+raising would turn "another application had the clipboard open for a moment"
+into a copy that didn't happen.
+
+### 32.5 Replace, not composite
+
+`paint.replace_frame` exists separately from `paint.paste` for one reason: paste
+composites, so a clipboard image with transparent corners leaves the old frame
+showing through them. A frame that is half the old picture is not the frame
+anyone copied. It is also the first op here with no mask at all, which
+`_apply_frames` takes in its stride — it asks for `image -> image`, and "return
+the other image" is as valid a transform as any. The frame keeps its own
+**duration**: you replaced the picture, not the timing.
+
+Size is refused, not resized, and the message names both sizes. Scaling to fit
+would be a silent answer to a question the user should be asked, and "wrong
+size" tells you something is wrong where "60x60 against 40x20" tells you what to
+do. Nothing lands on the undo stack for a refusal.
+
+### 32.6 `grabclipboard()` has three return shapes, not two
+
+It returns an `Image`, or **a list of file paths** — which is what Windows puts
+there when you copy a file in Explorer — or None. A caller assuming "image or
+nothing" gets an `AttributeError` on the good day and a confusing no-op on the
+bad one. The list case gets its own message rather than being folded into
+"nothing on the clipboard", because a GIF copied in Explorer is a *file*, and
+opening it as a single frame would be the wrong answer to a reasonable action.
+
+### 32.7 A fourth guard in front of a wall
+
+`ReplaceFrame` had `lambda _old: incoming.copy()`, defending the document
+against holding a reference to the clipboard's own pixels. A mutation removed
+the `.copy()` and nothing broke — correctly, because `convert("RGBA")` one line
+above already returns `self.copy()` when the mode matches, so the image was
+detached before the lambda ever saw it. §27.4, §28.6, §29.3, and now this.
+
+The claim was real and worth keeping — the clipboard outlives the call and can
+be written to again, and a Document holding that reference would have its
+history rewritten from outside (risk 3, reached by a new route). So it is
+pinned by a test that mutates the passed-in image and checks the document,
+rather than by a line of code that cannot be observed doing anything.
+
+### 32.8 Ctrl+Shift+C needed the guard more than Ctrl+C did
+
+§26.4 recorded that `Ctrl+C` is a text-editing keystroke and `bind_all` fires
+after the class binding, so it must yield to a focused text field. Ctrl+Shift+C
+is a *selection* keystroke in the same fields — and where the unguarded Ctrl+C
+would quietly replace the image clipboard, an unguarded Ctrl+Shift+V would
+replace the frame you were looking at while you typed a brush size.

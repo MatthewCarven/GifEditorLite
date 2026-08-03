@@ -227,6 +227,14 @@ class MainWindow:
         self.edit_menu.add_command(label="Paste", accelerator="Ctrl+V",
                                    command=self.paste_region)
         self.edit_menu.add_separator()
+        # Whole frames, via the *system* clipboard: the door in and out of the
+        # editor. Shift is the modifier because these are the "bigger" versions
+        # of the two above -- same verb, whole frame.
+        self.edit_menu.add_command(label="Copy Frame", accelerator="Ctrl+Shift+C",
+                                   command=self.copy_frame)
+        self.edit_menu.add_command(label="Paste Frame", accelerator="Ctrl+Shift+V",
+                                   command=self.paste_frame)
+        self.edit_menu.add_separator()
         self.edit_menu.add_command(label="Select All", accelerator="Ctrl+A", command=self._select_all)
         self.edit_menu.add_command(label="Deselect", accelerator="Esc", command=self._clear_selection)
         menubar.add_cascade(label="Edit", menu=self.edit_menu)
@@ -321,6 +329,12 @@ class MainWindow:
         bind_key("<Control-x>", lambda _e: self.cut_region())
         bind_key("<Control-c>", lambda _e: self.copy_region())
         bind_key("<Control-v>", lambda _e: self.paste_region())
+        # Guarded too, and for a sharper reason than the three above: Tk
+        # delivers Ctrl+Shift+C to a text field as a *selection* keystroke, and
+        # replacing the frame under someone editing the Size box would be the
+        # worst version of §26.4's bug rather than the mildest.
+        bind_key("<Control-Shift-C>", lambda _e: self.copy_frame())
+        bind_key("<Control-Shift-V>", lambda _e: self.paste_frame())
         # editing shortcuts -- the controller no-ops these when they can't apply
         self.root.bind_all("<Control-z>", lambda _e: self.controller.undo())
         self.root.bind_all("<Control-Shift-Z>", lambda _e: self.controller.redo())
@@ -849,6 +863,25 @@ class MainWindow:
             return
         if self.controller.begin_paste():
             self._select_tool("move")
+
+    def copy_frame(self) -> None:
+        if self.controller.doc is None:
+            self.status.configure(text="Nothing open to copy")
+            return
+        self.controller.copy_frame()
+
+    def paste_frame(self) -> None:
+        """Ctrl+Shift+V: whatever the OS clipboard holds becomes this frame.
+
+        No guard here beyond "is anything open". Every other reason this can
+        decline -- an empty clipboard, a file rather than an image, the wrong
+        size -- is something only the controller can find out, and it says so
+        itself with the detail that makes the message useful.
+        """
+        if self.controller.doc is None:
+            self.status.configure(text="Open a GIF first")
+            return
+        self.controller.paste_frame()
 
     def crop_to_region(self) -> None:
         """Image -> Crop to Selection: the marquee becomes the whole canvas.
@@ -1419,6 +1452,15 @@ class MainWindow:
             ("Cut Area", c.can_copy),
             ("Copy Area", c.can_copy),
             ("Paste", c.can_paste),
+            ("Copy Frame", c.can_copy_frame),
+            # Live whenever a document is open, deliberately. Knowing whether
+            # the *system* clipboard holds an image means reading it, and
+            # reading it means opening it and decoding whatever is there --
+            # every time this menu opens, which is both wasteful and a way to
+            # collide with another application over a resource we don't need
+            # yet. So the command reports "Nothing on the clipboard" when
+            # pressed, rather than the menu pretending to know in advance.
+            ("Paste Frame", c.doc is not None),
             ("Select All", has_doc),
             ("Deselect", bool(c.selection) or c.region is not None),
         ):

@@ -6,7 +6,8 @@ nothing else.
 Status: **M4 — a working lite GIF editor.** Opens, plays (with ping-pong),
 edits frames (delete/duplicate/reorder/reverse/trim), re-times them (set delay,
 scale speed), transforms the canvas (resize/rotate/flip/crop), paints
-(pencil/eraser/eyedropper), undo/redo, and saves back to GIF. See [TODO.md](TODO.md) for what's next and
+(pencil/eraser/eyedropper), copies frames to and from the system clipboard,
+undo/redo, and saves back to GIF. See [TODO.md](TODO.md) for what's next and
 [ARCHITECTURE.md](ARCHITECTURE.md) for why it's shaped this way.
 
 ## Use
@@ -61,6 +62,16 @@ straight away pastes it exactly where it was copied from. A move shifts each
 frame's own pixels, so with several frames selected you can nudge a sprite
 across the whole animation in one go. Whatever you do next — another edit,
 another frame, saving — drops the float first rather than losing it.
+
+**Whole frames, via the Windows clipboard:** **Ctrl+Shift+C** copies the frame
+you're on out to the system clipboard, so it can go straight into Paint, Discord
+or anything else — as a PNG where transparency is understood, and as a plain
+bitmap everywhere else. **Ctrl+Shift+V** goes the other way: whatever image is on
+the clipboard *replaces* the current frame, transparency and all, which is how a
+screenshot becomes a frame. It keeps the frame's own delay — you replaced the
+picture, not the timing. The sizes have to match, and if they don't it says so
+and names both rather than quietly scaling anything. Copying out is Windows-only
+for now; pasting in works anywhere Pillow can read the clipboard.
 
 **Saving:** Ctrl+S to save, Ctrl+Shift+S for Save As. One quirk to know about —
 GIF merges identical *consecutive* frames and sums their durations, so a frame

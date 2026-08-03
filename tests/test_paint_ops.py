@@ -741,3 +741,91 @@ class TestCutPasteRoundTrip:
         cut = run("paint.cut", d, index=0, x=2, y=2, width=3, height=3)
         back = run("paint.paste", cut.doc, index=0, image=clipboard, x=2, y=2)
         assert back.doc.frames[0].image.tobytes() == source.tobytes()
+
+
+class TestReplaceFrame:
+    """The op behind Paste Frame. Its whole reason to exist separately from
+    `paint.paste` is that it does *not* composite, so most of these are about
+    what it refuses to do."""
+
+    def whole(self, size=(8, 8), color=(1, 2, 3, 255)) -> Image.Image:
+        return Image.new("RGBA", size, color)
+
+    def test_it_replaces_the_named_frame(self):
+        d = doc(3)
+        out = run("paint.replace_frame", d, index=1, image=self.whole())
+        assert out.doc[1].image.getpixel((0, 0)) == (1, 2, 3, 255)
+
+    def test_the_other_frames_are_still_the_same_objects(self):
+        """Not merely equal -- shared by reference, which is what keeps undo
+        cheap when one frame in twenty changes (`_apply_frames`)."""
+        d = doc(3)
+        out = run("paint.replace_frame", d, index=1, image=self.whole())
+        assert out.doc[0] is d[0] and out.doc[2] is d[2]
+
+    def test_it_does_not_composite(self):
+        """A transparent pixel in the incoming frame must *stay* transparent.
+        Compositing would leave the old frame showing through it, which is the
+        one behaviour that would make this op the same as paint.paste."""
+        d = doc(2, color=(200, 100, 50, 255))
+        incoming = Image.new("RGBA", (8, 8), (0, 0, 0, 0))
+        incoming.putpixel((4, 4), (9, 9, 9, 255))
+        out = run("paint.replace_frame", d, index=0, image=incoming)
+        assert out.doc[0].image.getpixel((0, 0))[3] == 0
+        assert out.doc[0].image.getpixel((4, 4)) == (9, 9, 9, 255)
+
+    def test_the_frame_keeps_its_duration(self):
+        d = Document((Frame.new(Image.new("RGBA", (8, 8)), 430),), (8, 8))
+        out = run("paint.replace_frame", d, index=0, image=self.whole())
+        assert out.doc[0].duration_ms == 430
+
+    def test_the_replaced_frame_gets_a_fresh_uid(self):
+        """Different pixels, so the thumbnail cache must not serve the old
+        picture (ARCHITECTURE.md 5)."""
+        d = doc(2)
+        out = run("paint.replace_frame", d, index=0, image=self.whole())
+        assert out.doc[0].image_uid != d[0].image_uid
+
+    def test_a_wrong_size_declines_rather_than_resizing(self):
+        """Scaling to fit would be a silent answer to a question the user
+        should be asked. The controller refuses first and names both sizes;
+        this is the same refusal stated where the pixels are, so the op cannot
+        be talked into it by a second caller."""
+        d = doc(2)
+        assert run("paint.replace_frame", d, index=0,
+                   image=self.whole((4, 4))).doc is d
+        assert run("paint.replace_frame", d, index=0,
+                   image=self.whole((16, 16))).doc is d
+
+    def test_no_image_and_no_such_frame_both_decline(self):
+        d = doc(2)
+        assert run("paint.replace_frame", d, index=0).doc is d
+        assert run("paint.replace_frame", d, index=9, image=self.whole()).doc is d
+        assert run("paint.replace_frame", d, index=-1, image=self.whole()).doc is d
+
+    def test_replacing_a_frame_with_itself_declines(self):
+        d = doc(2)
+        assert run("paint.replace_frame", d, index=0, image=d[0].image).doc is d
+
+    def test_the_document_does_not_alias_the_image_it_was_handed(self):
+        """The incoming image is *the clipboard*, which outlives this call and
+        can be written to again. A document holding that reference would have
+        its history rewritten from outside -- risk 3, reached by a new route."""
+        d = doc(2)
+        incoming = self.whole()
+        out = run("paint.replace_frame", d, index=0, image=incoming)
+        incoming.putpixel((0, 0), (255, 255, 255, 255))
+        assert out.doc[0].image.getpixel((0, 0)) == (1, 2, 3, 255)
+
+    def test_it_takes_an_image_that_is_not_already_rgba(self):
+        """`ImageGrab` hands back whatever the other application put there, and
+        a screenshot is usually RGB."""
+        d = doc(2)
+        out = run("paint.replace_frame", d, index=0,
+                  image=Image.new("RGB", (8, 8), (4, 5, 6)))
+        assert out.doc[0].image.getpixel((0, 0)) == (4, 5, 6, 255)
+
+    def test_the_playhead_stays_on_the_frame_that_changed(self):
+        d = doc(3)
+        out = run("paint.replace_frame", d, index=2, image=self.whole())
+        assert out.index == 2

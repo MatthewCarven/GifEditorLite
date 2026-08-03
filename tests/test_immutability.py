@@ -63,6 +63,12 @@ CASES = [
     ("paint.paste", {"index": 1, "frames": (1, 2),
                      "image": Image.new("RGBA", (3, 3), (9, 9, 9, 255)),
                      "x": 2, "y": 2}),
+    # Replace hands the incoming image straight through as the new frame, which
+    # makes it the op most likely to leave the document holding a reference to
+    # pixels somebody else still owns -- the clipboard, in practice, which is
+    # exactly the sort of thing that gets written to again later.
+    ("paint.replace_frame", {"index": 1,
+                             "image": Image.new("RGBA", (8, 8), (7, 7, 7, 255))}),
 ]
 
 

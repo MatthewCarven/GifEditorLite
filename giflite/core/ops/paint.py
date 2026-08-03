@@ -624,3 +624,54 @@ class PasteRegion:
         return _apply_mask_frames(doc, sel, targets, int(index),
                                   layer.getchannel("A"), (0, 0, 0, 0),
                                   "paint", layer)
+
+
+@register_op
+class ReplaceFrame:
+    """Swap one frame's pixels for a whole new image. Not a composite.
+
+    The op behind Paste Frame, and the distinction from `paint.paste` is the
+    entire point of it existing separately: paste *composites*, so a clipboard
+    image with transparent corners leaves the old frame showing through them.
+    Replacing a frame means replacing it -- transparency included -- because a
+    frame that is half the old picture is not the frame anyone copied.
+
+    That also makes this the first op here with no mask at all, which
+    `_apply_frames` takes in its stride: it asks only for `image -> image`, and
+    "return the other image" is as valid a transform as any. The frame keeps
+    its own **duration**, though: you replaced the picture, not the timing, and
+    timing is what `timing.set_delay` is for.
+
+    Size is the caller's problem. The controller refuses a mismatch before it
+    gets here, with both sizes in the message, because "the clipboard doesn't
+    fit" is a thing to *say* rather than a thing to silently crop.
+    """
+
+    id = "paint.replace_frame"
+    label = "Paste Frame"
+    accel = None
+    needs_selection = False
+    in_menu = False  # the interesting argument is a clipboard, not a number
+    params = ()
+
+    def apply(self, doc: Document, sel: Selection, index: int = 0,
+              image: Image.Image | None = None, **_) -> OpResult:
+        if image is None or not doc.frames:
+            return OpResult(doc, sel)
+        target = int(index)
+        if not 0 <= target < len(doc.frames):
+            return OpResult(doc, sel)
+        # `convert` is what detaches this from the caller's image, and it does
+        # so even when the mode already matches -- Pillow's `convert` returns
+        # `self.copy()` in that case. So the `.copy()` that stood here was the
+        # fourth guard in this codebase standing in front of something that had
+        # already decided (§27.4, §28.6, §29.3): a mutation run removed it and
+        # nothing broke, correctly. The claim it was making is real and matters
+        # -- the clipboard outlives this call and can be written to again, and a
+        # Document holding that reference would have its history rewritten from
+        # outside (risk 3) -- so it is pinned by a test rather than by a line of
+        # code that cannot be observed doing anything.
+        incoming = image.convert("RGBA")
+        if incoming.size != doc.size:
+            return OpResult(doc, sel)
+        return _apply_frames(doc, sel, (target,), target, lambda _old: incoming)

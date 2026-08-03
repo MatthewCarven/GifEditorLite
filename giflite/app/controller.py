@@ -25,6 +25,7 @@ from pathlib import Path
 from PIL import Image
 
 from giflite.app import events as ev
+from giflite.app import sysclip
 from giflite.app.events import EventBus
 from giflite.core.history import History, Snapshot
 from giflite.core.io import format_for, reader_for, writer_for
@@ -596,8 +597,36 @@ class AppController:
         self._clipboard = image.crop(self._region.box).copy()
         self._clipboard_origin = (self._region.x, self._region.y)
         w, h = self._clipboard.size
-        self.events.emit(ev.STATUS, message=f"Copied {w}x{h}")
+        self.events.emit(ev.STATUS,
+                         message=f"Copied {w}x{h}{self._to_system_clipboard()}")
         return True
+
+    def _to_system_clipboard(self) -> str:
+        """Mirror the internal clipboard out to the OS. Returns a status suffix.
+
+        Every copy goes out, not just Copy Frame, because there is **one
+        clipboard** (Matthew's call) and the last thing you copied should be the
+        thing another application gets. A sprite is as worth having in Discord
+        as a frame is.
+
+        The *internal* slot is still the one Ctrl+V reads, and that is not
+        redundancy: it carries `_clipboard_origin`, which is what makes paste
+        land back where it was copied from. No system clipboard format has
+        anywhere to put that, so a round trip through the OS would silently
+        turn paste-in-place into paste-at-the-corner.
+
+        Failing to reach the OS clipboard is **not** a failure of the copy. The
+        pixels are in hand either way, so this reports in the status line and
+        returns normally; raising would turn "another app has the clipboard
+        open for a moment" into a copy that didn't happen.
+        """
+        if not sysclip.can_copy():
+            return ""
+        try:
+            sysclip.put_image(self._clipboard)
+        except Exception as exc:  # noqa: BLE001 -- OS refusals are varied
+            return f" (not to the system clipboard: {exc})"
+        return ""
 
     def cut_region(self) -> bool:
         """Copy the region, then clear it -- on the playhead frame only.
@@ -612,6 +641,66 @@ class AppController:
         region = self._region
         self.run_op("paint.cut", index=self._index, x=region.x, y=region.y,
                     width=region.width, height=region.height)
+        return True
+
+    # ---- whole frames, and the system clipboard --------------------------
+    #
+    # Copy Area answers "these pixels"; Copy Frame answers "this picture". They
+    # share one clipboard slot, so copying either replaces the other -- which is
+    # what every editor does and the only version that has a single answer to
+    # "what does Ctrl+V paste?".
+
+    @property
+    def can_copy_frame(self) -> bool:
+        return self._doc is not None
+
+    def copy_frame(self) -> bool:
+        """Put the whole playhead frame on the clipboard, internal and system.
+
+        Origin (0, 0), because a whole frame *is* the canvas -- which means a
+        Copy Frame followed by Ctrl+V is a paste-in-place of the entire picture,
+        and lands exactly where it came from with no special case.
+        """
+        if self._doc is None:
+            return False
+        frame = self._doc[self._clamp(self._index)]
+        self._clipboard = frame.image.copy()
+        self._clipboard_origin = (0, 0)
+        w, h = self._clipboard.size
+        self.events.emit(ev.STATUS,
+                         message=f"Copied frame {self._clamp(self._index) + 1}"
+                                 f" ({w}x{h}){self._to_system_clipboard()}")
+        return True
+
+    def paste_frame(self) -> bool:
+        """Replace the playhead frame with the image on the system clipboard.
+
+        **The system clipboard, not the internal one**, and that asymmetry is
+        the feature rather than an oversight: this is the door *into* the
+        editor. A screenshot, a frame exported from something else, a drawing
+        from a paint program -- Pillow will hand any of them over, and pasting
+        one in as a frame is the thing Ctrl+V could never do.
+
+        Replaces rather than composites (Matthew's call): a frame with
+        transparent corners should arrive with transparent corners, not with
+        the old frame showing through them. The frame keeps its own duration.
+
+        Refuses a size mismatch and names both sizes. Nothing happens and
+        nothing lands on the undo stack -- the numbers are what tell you what
+        to do about it, where a bare "wrong size" would not.
+        """
+        if self._doc is None:
+            return False
+        image, problem = sysclip.grab_image()
+        if image is None:
+            self.events.emit(ev.STATUS, message=problem)
+            return False
+        complaint = sysclip.size_complaint(image.size, self._doc.size)
+        if complaint:
+            self.events.emit(ev.STATUS, message=complaint)
+            return False
+        self.run_op("paint.replace_frame", index=self._clamp(self._index),
+                    image=image)
         return True
 
     def crop_to_region(self) -> bool:

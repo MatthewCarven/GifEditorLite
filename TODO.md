@@ -524,9 +524,10 @@ Follow-ups, none load-bearing:
 - [ ] It has no keyboard shortcut. C is the crop tool and S is Select, so a
       binding is a decision to take on purpose rather than smuggle in with the
       feature — available if you want one
-- [ ] No system clipboard integration — the clipboard is internal only. Copying
-      a region out to another application is a separate piece of work and would
-      want a format decision (PNG bytes, probably)
+- [x] **System clipboard** — done 2026-08-01 (ARCHITECTURE §32). The format
+      decision was *both*: a registered "PNG" format for the readers that
+      understand alpha, and CF_DIB for everything else. Copy Area mirrors out
+      too, so the last thing you copied is what another program gets
 
 ## Erase mode — done 2026-07-29 (ARCHITECTURE §27)
 
@@ -589,6 +590,40 @@ gone. Exactly §21/§23.5 again, on a section that was added after both.
 - [ ] The padding constants are only tested by the height sweep (400-780 in the
       smoke). Three mutations of them survived every fixed-size check: a
       constant 24px light only changes the outcome inside a 24px band
+
+## Copy Frame / Paste Frame — done 2026-08-01 (ARCHITECTURE §32) ✅
+
+Asked for as "copy frame to clipboard ... and Paste frame from Clipboard (if
+its the same size else complain)". His calls, all asked before any code: the
+**Windows clipboard both ways**, paste **replaces** the current frame, **one
+clipboard** shared with Copy Area, and a mismatch **refuses and names both
+sizes**.
+
+- [x] `giflite/app/sysclip.py` — in `app/`, not `ui/tk/`: it is platform I/O,
+      not toolkit I/O, so a second frontend inherits it. Pure DIB encoder +
+      inverse + decision rules; one small impure `put_image`
+- [x] `paint.replace_frame` — replaces rather than composites, keeps the
+      frame's own duration, declines a size mismatch rather than resizing
+- [x] Edit menu: Copy Frame (Ctrl+Shift+C), Paste Frame (Ctrl+Shift+V), both
+      guarded against firing inside a text field
+- [x] 17 mutations confirmed, including all three silent-failure modes of the
+      DIB format (row order, channel order, stray file header)
+
+**Only Matthew can verify the Windows half.** Specifically: does a copied frame
+arrive in Paint/Discord the right way up and the right colour, does
+transparency survive into a PNG-aware target, and does Paste Frame take a
+screenshot in.
+
+- [ ] Paste Frame is live whenever a document is open, because knowing whether
+      the OS clipboard holds an image means opening and decoding it — every
+      time the Edit menu opens. The command reports "Nothing on the clipboard"
+      when pressed instead. Revisit only if that reads wrong in use
+- [ ] Copying *out* is Windows-only. macOS (`pbcopy`/NSPasteboard) and Linux
+      (`xclip`) are each a small shim behind the same `can_copy()` seam;
+      reading already works on all three via Pillow
+- [ ] A file on the clipboard (copied in Explorer) is reported, not opened.
+      Importing it as a frame — or as a whole animation — is a plausible
+      want and a separate decision
 
 ## Python 3.11+ could not import the package — fixed 2026-08-01 ✅
 

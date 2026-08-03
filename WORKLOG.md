@@ -1449,3 +1449,76 @@ the crop tool, S is Select, and inventing a binding is a decision to take on
 purpose rather than smuggle in with a feature). At 480x400 the colour swatch and
 delay box are gone entirely — the honest consequence of the rule, and the answer
 if it ever matters is a scrolling panel, not a fourth special case.
+
+## 2026-08-01 (later) — Copy Frame, Paste Frame, and the Windows clipboard
+
+Matthew: *"am dreaming of copy frame to clipboard on the edit menu please Claude
+and Paste frame from Clipboard (if its the same size else complain)"*. Four
+questions were worth asking first, because "the clipboard" meant two different
+things and the answer changed the size of the job. His calls: **the Windows
+clipboard, both ways**; paste **replaces** the current frame; **one clipboard**
+shared with Copy Area; and a mismatch **refuses and names both sizes**. Design
+in ARCHITECTURE §32.
+
+**The honest constraint, stated before starting:** none of the Windows half can
+run in this sandbox. So the file is split by testability rather than by topic —
+the DIB encoder, its inverse and both decision rules are pure functions with
+real tests, and `put_image` (open, empty, allocate, set, close) is the only
+thing that touches the OS. It is written to be boring on purpose. **The
+untestable code should be the code with nothing in it.**
+
+**The test that actually de-risks the shim** is the one that doesn't use this
+module's own decoder. A round trip through `image_from_dib` proves two
+functions here agree, and a flipped row order implemented consistently in both
+would agree perfectly while producing a wrong picture in every other
+application on the machine. So the DIB gets a BITMAPFILEHEADER bolted on and
+goes to *Pillow's* BMP decoder. It pins the three things that fail silently:
+rows run bottom-up, channels are BGRA, and a clipboard DIB has no file header.
+Mutating each of those breaks it, which is as close to "verified on Windows" as
+Linux gets.
+
+**Two formats on the clipboard, PNG and CF_DIB**, because they serve different
+readers: 32bpp BI_RGB has room for alpha but no promise anyone reads it, while
+a PNG's alpha is not optional. One without the other means losing transparency
+everywhere or being unpasteable in half of Windows.
+
+**"One clipboard" needed care, because the two halves aren't symmetric.** Every
+copy now mirrors *out* to the OS — a sprite is as worth having in Discord as a
+frame is. But Ctrl+V still reads the internal slot, and that is not redundancy:
+the slot carries `_clipboard_origin`, and no system clipboard format has
+anywhere to put it, so routing paste through the OS would silently turn
+paste-in-place into paste-at-the-corner. Paste **Frame** reads the OS, and that
+asymmetry is the feature: it is the door *in*, and a screenshot is a thing
+Ctrl+V could never have offered.
+
+**Things found while building:**
+
+`grabclipboard()` has *three* return shapes, not two — `Image`, None, or a list
+of file paths, which is what Windows puts there when you copy a file in
+Explorer. A caller assuming "image or nothing" gets an AttributeError. It gets
+its own message, because a GIF copied in Explorer is a file and opening it as
+one frame is the wrong answer to a reasonable action.
+
+`paint.replace_frame` had a `.copy()` guarding the document against aliasing the
+clipboard's pixels. A mutation deleted it and nothing broke, correctly:
+`convert("RGBA")` already returns `self.copy()` when the mode matches. **Fourth
+guard in four sessions standing in front of something that already decides**
+(§27.4, §28.6, §29.3). The claim is real, so it is now pinned by a test that
+writes to the passed-in image and checks the document, instead of by a line
+nothing can observe.
+
+And Ctrl+Shift+C needed the §26.4 text-field guard *more* than Ctrl+C did: it is
+a selection keystroke in those fields, and where an unguarded Ctrl+C quietly
+replaces the image clipboard, an unguarded Ctrl+Shift+V replaces the frame you
+are looking at while you type a brush size. The smoke test drives both from
+inside the Size box.
+
+**Numbers:** 726 headless (was 670), 336 smoke checks (was 322), 17 mutations
+confirmed — including all three silent-failure modes of the DIB format. Green on
+3.10, 3.11 and 3.12.
+
+**What only Matthew can verify**, and it is the whole Windows half: that Copy
+Frame lands in Paint/Discord the right way up and the right colour, that
+transparency survives into something that understands PNG, and that Paste Frame
+takes a screenshot in. If the picture arrives upside down or blue, the bug is in
+`dib_bytes` and the two lines that would cause it are named in §32.2.

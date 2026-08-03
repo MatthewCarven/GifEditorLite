@@ -20,6 +20,9 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from PIL import Image as _Image  # noqa: E402
+
+from giflite.app import sysclip  # noqa: E402
 from giflite.app.controller import AppController  # noqa: E402
 from giflite.core.model import Region, Selection  # noqa: E402
 from giflite.ui.tk import canvas as canvas_module  # noqa: E402
@@ -1517,6 +1520,110 @@ def main() -> int:
     check("crop-to-selection: one undo puts the whole canvas back",
           controller.doc.size == before_size, str(controller.doc.size))
 
+    # --- whole frames, through the system clipboard -----------------------
+    # The OS clipboard is faked: Xvfb has no image clipboard, and the Windows
+    # writer cannot run here at all. What this exercises is everything between
+    # the menu and `sysclip` -- which is the part a Windows-only shim would
+    # otherwise leave completely untested.
+    sent = []
+    fake_clip = {"image": None, "why": "Nothing on the clipboard"}
+    sysclip.can_copy = lambda: True
+    sysclip.put_image = lambda image: sent.append(image)
+    sysclip.grab_image = lambda: (fake_clip["image"], fake_clip["why"])
+
+    controller.set_region(None)
+    controller.seek(2)
+    window.canvas.focus_set()
+    root.update()
+    window._refresh_edit_menu()
+    check("frame clipboard: Copy Frame is live with a document open",
+          str(window.edit_menu.entrycget("Copy Frame", "state")) == "normal")
+    check("frame clipboard: so is Paste Frame -- asking the OS costs more than "
+          "it is worth in a postcommand",
+          str(window.edit_menu.entrycget("Paste Frame", "state")) == "normal")
+
+    label_before_copy = controller.undo_label
+    window.edit_menu.invoke(window.edit_menu.index("Copy Frame"))
+    root.update()
+    check("frame clipboard: Copy Frame filled the internal slot with the frame",
+          controller.clipboard_size == controller.doc.size,
+          str(controller.clipboard_size))
+    check("frame clipboard: and pushed the same pixels at the OS",
+          len(sent) == 1 and sent[0].size == controller.doc.size,
+          f"{[im.size for im in sent]}")
+    check("frame clipboard: the copy is not an edit",
+          controller.undo_label == label_before_copy,
+          f"{label_before_copy!r} -> {controller.undo_label!r}")
+
+    # Paste Frame reads the *system* clipboard, which is the whole asymmetry:
+    # this is the door into the editor.
+    fake_clip["image"] = _Image.new("RGBA", controller.doc.size, (3, 250, 7, 255))
+    fake_clip["why"] = ""
+    edits_before = controller.can_undo
+    window.edit_menu.invoke(window.edit_menu.index("Paste Frame"))
+    root.update()
+    check("frame clipboard: Paste Frame replaced the frame under the playhead",
+          controller.doc[2].image.getpixel((0, 0)) == (3, 250, 7, 255),
+          str(controller.doc[2].image.getpixel((0, 0))))
+    check("frame clipboard: the canvas redrew with it",
+          window.canvas._photo is not None)
+    controller.undo()
+    root.update()
+    check("frame clipboard: one undo puts the old frame back",
+          controller.doc[2].image.getpixel((0, 0)) != (3, 250, 7, 255)
+          and controller.can_undo == edits_before)
+
+    # The complaint. Both sizes, and nothing on the undo stack for it.
+    fake_clip["image"] = _Image.new("RGBA", (7, 9), (0, 0, 0, 255))
+    undo_before = controller.can_undo
+    window.edit_menu.invoke(window.edit_menu.index("Paste Frame"))
+    root.update()
+    status = window.status["text"]
+    check("frame clipboard: a wrong-sized image is refused with both sizes",
+          "7x9" in status and str(controller.doc.size[0]) in status, status)
+    check("frame clipboard: and the refusal is not an edit",
+          controller.can_undo == undo_before)
+
+    # An empty clipboard reports rather than doing nothing quietly.
+    fake_clip["image"] = None
+    fake_clip["why"] = "Nothing on the clipboard"
+    window.edit_menu.invoke(window.edit_menu.index("Paste Frame"))
+    root.update()
+    check("frame clipboard: an empty clipboard says so",
+          "Nothing on the clipboard" in window.status["text"], window.status["text"])
+
+    # Ctrl+Shift+C is a *selection* keystroke inside a text field, so the guard
+    # matters more here than for Ctrl+C: this one would replace a whole frame.
+    fake_clip["image"] = _Image.new("RGBA", controller.doc.size, (9, 9, 200, 255))
+    fake_clip["why"] = ""
+    window._size_box.focus_set()
+    root.update()
+    sent.clear()
+    pixel_before = controller.doc[controller.index].image.getpixel((0, 0))
+    root.event_generate("<Control-Shift-C>")
+    root.event_generate("<Control-Shift-V>")
+    root.update()
+    check("keys: Ctrl+Shift+C/V in the Size box leave the frame alone",
+          sent == [] and controller.doc[controller.index].image.getpixel((0, 0))
+          == pixel_before, f"sent {len(sent)}")
+
+    window.canvas.focus_set()
+    root.update()
+    root.event_generate("<Control-Shift-C>")
+    root.update()
+    check("keys: Ctrl+Shift+C away from a text field copies the frame",
+          len(sent) == 1, f"sent {len(sent)}")
+    root.event_generate("<Control-Shift-V>")
+    root.update()
+    check("keys: Ctrl+Shift+V away from a text field pastes the frame",
+          controller.doc[controller.index].image.getpixel((0, 0)) == (9, 9, 200, 255),
+          str(controller.doc[controller.index].image.getpixel((0, 0))))
+
+    while controller.can_undo:
+        controller.undo()
+    root.update()
+
+
     while controller.can_undo:
         controller.undo()
     controller.set_region(None)
@@ -1750,7 +1857,6 @@ def main() -> int:
     # The pickers are modal, so the menu commands themselves can't be driven in
     # a scripted run; what is checked here is everything either side of them --
     # the menu state, the controller calls they make, and the title.
-    from PIL import Image as _Image
 
     src = tmp / "seq_in"
     src.mkdir()
