@@ -648,3 +648,95 @@ def test_an_absurd_rule_count_declines_rather_than_freezing_the_window():
     view.set_scale(2.0)
     assert view.grid_visible is True
     assert view.grid_lines() is None
+
+# ---- anchored (wheel) zoom ------------------------------------------------
+#
+# The invariant is read through geometry() *twice at different scales*, which
+# is what makes it a real check rather than the §22 trap of comparing a value
+# with itself: the same read-back fails on the centre-anchored zoom_in (the
+# contrast test below), so agreement across the step is the anchor working.
+
+
+def image_point_under(view, dx, dy):
+    """Where display point (dx, dy) lands on the image, unsnapped."""
+    left, top, fw, fh = view.geometry()
+    sw, sh = (view._source[0], view._source[1])
+    return ((dx - left) / fw * sw, (dy - top) / fh * sh)
+
+
+def test_wheel_zoom_holds_the_point_under_the_cursor():
+    # A non-square source, or a swapped axis in the anchor read is invisible.
+    view = make_view(viewport=(400, 300), source=(1000, 600))
+    view.set_scale(2.0)
+    anchor = (290.0, 80.0)                    # off-centre on purpose
+    before = image_point_under(view, *anchor)
+    assert view.zoom_in_at(*anchor) is True
+    assert view.scale == 4.0
+    assert image_point_under(view, *anchor) == pytest.approx(before, abs=0.51)
+
+
+def test_wheel_zoom_out_holds_it_too():
+    view = make_view(viewport=(400, 300), source=(1000, 600))
+    view.set_scale(8.0)
+    anchor = (60.0, 250.0)
+    before = image_point_under(view, *anchor)
+    assert view.zoom_out_at(*anchor) is True
+    assert image_point_under(view, *anchor) == pytest.approx(before, abs=0.51)
+
+
+def test_centre_zoom_does_not_hold_that_point():
+    """The contrast that gives the anchor tests their teeth: if this ever
+    starts passing with plain zoom_in, the invariant check above has gone
+    circular."""
+    view = make_view(viewport=(400, 300), source=(1000, 600))
+    view.set_scale(2.0)
+    anchor = (290.0, 80.0)
+    before = image_point_under(view, *anchor)
+    view.zoom_in()
+    moved = image_point_under(view, *anchor)
+    assert abs(moved[0] - before[0]) > 5 or abs(moved[1] - before[1]) > 5
+
+
+def test_anchored_zoom_still_respects_the_edge_clamp():
+    """Anchoring must lose to the pasteboard rule: zooming out at a corner
+    would otherwise pin the view past the edge.
+
+    Checked at *both* levels, the §21 lesson: `_axis_origin` clamps the
+    rendered geometry even for a stored centre that is out of bounds, so a
+    geometry assertion alone would pass with the invisible-trap centre and
+    the next zoom-out would jump. The stored centre is the one that can lie
+    -- and it is asserted by *equality* with the edge value, because the
+    unclamped excursion here is a fraction of a pixel and a bounds check
+    with slack would sleep through it.
+    """
+    view = make_view(viewport=(200, 200), source=(1000, 600))
+    view.set_scale(8.0)
+    while view.pan_right():
+        pass
+    while view.pan_down():
+        pass                                   # genuinely at the edge, not near it
+    view.zoom_out_at(199.0, 199.0)             # corner-anchored, must yield
+    left, top, fw, fh = view.geometry()
+    assert 200 - fw <= left <= 0
+    assert 200 - fh <= top <= 0
+    half = 200 / 2 / view.scale
+    cx, cy = view.center
+    assert cx == pytest.approx(1000 - half)
+    assert cy == pytest.approx(600 - half)
+
+
+def test_anchored_zoom_at_the_ladder_end_reports_false():
+    view = make_view(viewport=(400, 300), source=(1000, 1000))
+    view.set_scale(LADDER[-1])
+    center = view.center
+    assert view.zoom_in_at(10.0, 10.0) is False
+    assert view.center == center               # a refused zoom moves nothing
+
+
+def test_anchored_zoom_from_fit_takes_the_next_rung():
+    """From fit the image is smaller than the viewport, geometry centres it,
+    and the anchor degrades gracefully into a plain step up the ladder."""
+    view = make_view(viewport=(400, 300), source=(100, 80))
+    assert view.is_fit
+    assert view.zoom_in_at(200.0, 150.0) is True
+    assert not view.is_fit

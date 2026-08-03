@@ -131,14 +131,18 @@ def read_sequence(folder: Path, delay_ms: int = 100, loop: int = 0) -> Document:
     else:
         size = (max(im.width for im, _ in images), max(im.height for im, _ in images))
 
-    frames = tuple(Frame.new(_onto_canvas(im, size), duration) for im, duration in images)
+    frames = tuple(Frame.new(place_on_canvas(im, size), duration) for im, duration in images)
     doc = Document(frames, size, loop=loop, meta={"source_format": "sequence"})
     doc.validate()
     return doc
 
 
-def _onto_canvas(image: Image.Image, size: tuple[int, int]) -> Image.Image:
+def place_on_canvas(image: Image.Image, size: tuple[int, int]) -> Image.Image:
     """Place `image` top-left on a transparent canvas of `size`.
+
+    Public because the project container (gifproj.py) applies the same rule:
+    the placement policy is a fact about frames-that-don't-match-the-canvas,
+    not about where the bytes came from.
 
     Top-left rather than centred: a sequence with mismatched sizes is nearly
     always one where something was added at the right or bottom, and top-left

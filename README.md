@@ -3,11 +3,13 @@
 A small, modular GIF editor in Python. Tkinter frontend, Pillow for pixels,
 nothing else.
 
-Status: **M4 — a working lite GIF editor.** Opens, plays (with ping-pong),
-edits frames (delete/duplicate/reorder/reverse/trim), re-times them (set delay,
+Status: **a working lite GIF editor.** Opens, plays (with ping-pong), edits
+frames (delete/duplicate/reorder/reverse/trim), re-times them (set delay,
 scale speed), transforms the canvas (resize/rotate/flip/crop), paints
-(pencil/eraser/eyedropper), copies frames to and from the system clipboard,
-undo/redo, and saves back to GIF. See [TODO.md](TODO.md) for what's next and
+(pencil/eraser/fill/shapes, with Shift constraints), selects/copies/moves
+pixels, copies frames to and from the system clipboard, zooms with a
+navigator and pixel grid, undo/redo, and saves back to GIF — or losslessly to
+its own `.gifproj` project format. See [TODO.md](TODO.md) for what's next and
 [ARCHITECTURE.md](ARCHITECTURE.md) for why it's shaped this way.
 
 ## Use
@@ -26,16 +28,27 @@ dialog generated from the operation itself.
 
 **Cropping** is a gesture rather than a dialog (typing four numbers is poor UX):
 press **C** or pick Image → Crop, drag a rectangle on the preview — a live box
-shows the pixel size — and release to crop every frame to it. Esc cancels. If
-you have already selected an area (below), **Image → Crop to Selection** crops
-straight to it with no second drag.
+shows the pixel size — and release to crop every frame to it. **Shift keeps the
+box square.** Esc cancels. If you have already selected an area (below),
+**Image → Crop to Selection** crops straight to it with no second drag.
 
 **Painting** uses the tool palette in the panel beside the preview: pick
 **Pencil** (B), **Eraser** (E), **Fill** (F), **Line** (L), **Rect** (R),
 **Ellipse** (O) or **Eyedropper** (I), choose a colour and brush size, and drag
 on the preview to paint the current frame. The mark previews as you drag and
-commits as one undoable edit on release. Hard-edged brushes for now; soft brushes
-are on the roadmap.
+commits as one undoable edit on release. **Hold Shift to constrain**: lines
+snap to 45°, rectangles square up, ellipses become circles — press or release
+it mid-drag and the preview follows. **Shift-click the Fill bucket** to fill
+every pixel that matches the one you clicked, connected or not (the undo entry
+says "Global Fill", because it is one). Hard-edged brushes for now; soft
+brushes are on the roadmap.
+
+**Zoom and pan:** Ctrl+`=` / Ctrl+`-` step the zoom, Ctrl+0 fits, Ctrl+1 is
+1:1 — or **Ctrl+scroll on the preview to zoom at the cursor**, so the pixel
+you are pointing at stays put while everything grows around it. Zoomed in, a
+navigator map appears in the side panel: press or drag on it to pan, or use
+**Shift+arrows** from the keyboard (bare arrows still step frames). View →
+Pixel Grid (Ctrl+') overlays a grid once pixels are big enough to count.
 
 **To erase, tick Erase** — there is no transparent colour to pick, and there
 couldn't be: painting composites *over* the frame, so a transparent colour adds
@@ -46,7 +59,7 @@ rectangle wipes an area. The Eraser tool is still there for when that's all you
 want. The colour swatch greys out while Erase is on, because nothing is using it.
 
 **Select, copy and paste:** press **S** or pick Select, drag a rectangle on the
-preview, and a marching-ants marquee marks it. **Ctrl+C** copies those pixels
+preview (Shift for a square), and a marching-ants marquee marks it. **Ctrl+C** copies those pixels
 from the frame you are on, **Ctrl+X** cuts them, **Ctrl+V** pastes them back
 where they came from. Paste lands on every *selected* frame when the playhead is
 standing inside the selection, and on just the current frame otherwise — which is
@@ -73,11 +86,21 @@ picture, not the timing. The sizes have to match, and if they don't it says so
 and names both rather than quietly scaling anything. Copying out is Windows-only
 for now; pasting in works anywhere Pillow can read the clipboard.
 
-**Saving:** Ctrl+S to save, Ctrl+Shift+S for Save As. One quirk to know about —
-GIF merges identical *consecutive* frames and sums their durations, so a frame
-you duplicated to "hold" it comes back as one longer frame on reopen. Playback
-is identical; only the frame count changes. A lossless project format that
-preserves exact frames is on the roadmap.
+**Saving:** Ctrl+S to save, Ctrl+Shift+S for Save As. One GIF quirk to know
+about — the format merges identical *consecutive* frames and sums their
+durations, so a frame you duplicated to "hold" it comes back as one longer
+frame on reopen (playback is identical), and its palette carries exactly one
+bit of transparency.
+
+**When that matters, save a project instead**: choose "GIF Editor Lite
+project" in Save As and you get a **`.gifproj`** — a zip of lossless PNG
+frames plus a small manifest — that reopens exactly as authored: held
+duplicates stay separate frames, partial transparency survives, timing comes
+back untouched. Ctrl+S over an opened project just saves, no questions asked
+(that's what a project is for); Ctrl+S over an opened GIF still warns before
+re-encoding your original. Nothing about the file is secret: unzip a
+`.gifproj` and you have exactly the folder Export Frames writes, manifest and
+all, readable by Import Frames or anything else that eats PNGs.
 
 ## Run
 

@@ -28,7 +28,7 @@ from giflite.app import events as ev
 from giflite.app import sysclip
 from giflite.app.events import EventBus
 from giflite.core.history import History, Snapshot
-from giflite.core.io import format_for, reader_for, writer_for
+from giflite.core.io import format_for, is_lossless, reader_for, writer_for
 from giflite.core.io.gif_read import probe_gif
 from giflite.core.io.gif_write import count_merges
 from giflite.core.model import Document, Region, Selection
@@ -384,15 +384,32 @@ class AppController:
         return self._path is not None and self._path_is_source
 
     @property
+    def save_degrades_source(self) -> bool:
+        """Whether a plain Save would *lossily* re-encode the file we opened.
+
+        `overwrites_source` is the where -- Save writes over the opened file.
+        This adds the what -- that the write loses something. A GIF re-save
+        rebuilds the palette and merges identical holds; a project save is a
+        round trip, and overwriting the project you opened is simply what
+        saving a project means. The overwrite warning wants this fact rather
+        than the broader one, by 19.2's own argument: warning about a save
+        that destroys nothing trains people to click through the dialog that
+        matters.
+        """
+        return self.overwrites_source and not is_lossless(self._path)
+
+    @property
     def suggested_save_name(self) -> str:
         """A filename to offer in Save As, steered away from the original.
 
         Suffixes `_edited` while the path is still the untouched source, and does
         so idempotently -- saving twice must not produce `a_edited_edited.gif`.
+        A *lossless* source gets no steering: there is nothing to protect a
+        .gifproj from, and the natural Save As over a project is the project.
         """
         if self._path is None:
             return "untitled.gif"
-        if not self._path_is_source:
+        if not self._path_is_source or is_lossless(self._path):
             return self._path.name
         stem = self._path.stem
         if not stem.endswith(EDITED_SUFFIX):
@@ -444,7 +461,11 @@ class AppController:
             return False
 
         # Count merges before writing, while we still have the authored frames.
-        merges = count_merges(self._doc)
+        # Only for lossy targets: a lossless writer keeps identical frames
+        # separate, so mentioning merges there would be reporting a thing that
+        # did not happen -- and the count costs a byte-compare of every frame,
+        # which a project save has no reason to pay.
+        merges = 0 if is_lossless(path) else count_merges(self._doc)
         try:
             writer(self._doc, path)
         except Exception as exc:  # noqa: BLE001 -- surfaced to the user

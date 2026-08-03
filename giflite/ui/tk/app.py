@@ -319,6 +319,16 @@ class MainWindow:
         bind_key("<Down>", lambda _e: self._arrow(0, 1))
         bind_key("<Home>", lambda _e: self.controller.seek(0))
         bind_key("<End>", lambda _e: self.controller.seek(self.controller.frame_count - 1))
+        # Shift+arrows pan the view. Bare arrows are spoken for twice over
+        # (frame transport, float nudge), so panning takes the modifier -- and
+        # goes through the guard, because Shift+arrow in a text field is
+        # extend-selection, which the field has the better claim on. When
+        # there is nothing to pan (fit, or an image smaller than the
+        # viewport), `nudge` moves nothing and the keys quietly do nothing.
+        bind_key("<Shift-Left>", lambda _e: self.pan(-1, 0))
+        bind_key("<Shift-Right>", lambda _e: self.pan(1, 0))
+        bind_key("<Shift-Up>", lambda _e: self.pan(0, -1))
+        bind_key("<Shift-Down>", lambda _e: self.pan(0, 1))
         # Cut / copy / paste. **Guarded, despite carrying a modifier.** The rule
         # in §19.3 was written as "bare keys yield to text fields" and the real
         # rule is "a keystroke something else has a better claim on yields to
@@ -727,7 +737,10 @@ class MainWindow:
         if self.controller.save_would_change_nothing:
             self.controller.save()  # emits the status line; writes nothing
             return
-        if self.controller.overwrites_source and not self._confirm_overwrite_source():
+        # `save_degrades_source`, not `overwrites_source`: writing a project
+        # file over the project you opened is what saving a project *is*, and
+        # a warning there would be noise in front of the dialog that matters.
+        if self.controller.save_degrades_source and not self._confirm_overwrite_source():
             return
         self._with_busy_cursor(self.controller.save)
 
@@ -985,10 +998,12 @@ class MainWindow:
         self._update_status()
 
     def pan(self, dx: float, dy: float) -> None:
-        """One pan step, in units of `PAN_STEP` viewport-fractions. No UI drives
-        this now that the navigator does the panning -- it stays because the
-        canvas API is the seam a second frontend would use, and it is what the
-        minimap's drag reduces to."""
+        """One pan step, in units of `PAN_STEP` viewport-fractions.
+
+        Written for the pan buttons, kept through the navigator era on the
+        argument that it was the seam any other pan input would use -- and
+        Shift+arrows is that input, arrived at last. The minimap still pans
+        absolutely; this is the relative step."""
         self.canvas.pan(dx * PAN_STEP, dy * PAN_STEP)
         self._update_status()
 

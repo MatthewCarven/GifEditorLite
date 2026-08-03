@@ -15,6 +15,9 @@ import pytest
 
 from giflite.ui.tk.tools import (
     CropTool,
+    Mods,
+    constrain_box,
+    constrain_line,
     EllipseTool,
     EraserTool,
     EyedropperTool,
@@ -544,7 +547,7 @@ class TestFillTool:
         tool.on_press(ctx, 7, 9)
         assert ctx.commits == [("paint.fill", {
             "index": 4, "x": 7, "y": 9, "color": (0, 255, 0, 255), "tolerance": 0,
-            "mode": "paint",
+            "contiguous": True, "mode": "paint",
         })]
 
     def test_it_passes_the_tolerance_from_the_context(self):
@@ -644,3 +647,124 @@ class TestShapeTools:
         for cls in (LineTool, RectTool, EllipseTool):
             assert cls.coords == "pixel"
         assert CropTool.coords == "edge"
+
+class TestConstrainLine:
+    """The 45-degree snap: nearest by angle, then projected, so the line
+    tracks the cursor's reach instead of jumping between fixed lengths."""
+
+    def test_a_shallow_drag_snaps_horizontal_at_full_reach(self):
+        assert constrain_line(0, 0, 10, 3) == (10, 0)
+
+    def test_a_steep_drag_snaps_vertical(self):
+        assert constrain_line(0, 0, 3, 10) == (0, 10)
+
+    def test_a_near_diagonal_projects_onto_the_diagonal(self):
+        # (10, 8): projection onto (1,1)/sqrt2 has components (10+8)/2 = 9.
+        assert constrain_line(0, 0, 10, 8) == (9, 9)
+
+    def test_every_quadrant_keeps_its_signs(self):
+        assert constrain_line(0, 0, -10, 8) == (-9, 9)
+        assert constrain_line(0, 0, -10, -8) == (-9, -9)
+        assert constrain_line(0, 0, 10, -8) == (9, -9)
+
+    def test_the_octant_boundary_is_at_22_5_degrees_not_the_2x_shortcut(self):
+        """tan(22.5) is ~0.414, not 0.5. A drag at slope 0.45 is *diagonal*
+        under the true rule and horizontal under the tempting `2*ady <= adx`
+        one -- this is the case that tells the two apart."""
+        assert constrain_line(0, 0, 20, 9)[1] != 0
+
+    def test_a_zero_drag_stays_put(self):
+        assert constrain_line(5, 5, 5, 5) == (5, 5)
+
+    def test_the_anchor_offsets_rather_than_participates(self):
+        assert constrain_line(100, 50, 110, 53) == (110, 50)
+
+
+class TestConstrainBox:
+    def test_the_larger_extent_wins(self):
+        assert constrain_box(0, 0, 10, 4) == (10, 10)
+        assert constrain_box(0, 0, 4, 10) == (10, 10)
+
+    def test_quadrants_keep_their_signs(self):
+        assert constrain_box(0, 0, -10, 4) == (-10, 10)
+        assert constrain_box(0, 0, -4, -10) == (-10, -10)
+
+    def test_an_axis_with_no_extent_grows_positive(self):
+        # A pure vertical drag still yields a square; rightward by convention.
+        assert constrain_box(0, 0, 0, 8) == (8, 8)
+
+    def test_the_anchor_offsets(self):
+        assert constrain_box(20, 30, 26, 33) == (26, 36)
+
+
+class TestShiftConstrain:
+    """Modifiers ride each event, so the constraint applies per sample: the
+    preview follows the keys from the next motion on and the state at release
+    is what commits."""
+
+    SHIFT = Mods(shift=True)
+
+    def test_rect_commits_a_square_under_shift(self):
+        tool, ctx = RectTool(), FakeContext()
+        tool.on_press(ctx, 2, 2)
+        tool.on_release(ctx, 12, 6, self.SHIFT)
+        params = ctx.commits[0][1]
+        assert (params["x1"], params["y1"]) == (12, 12)
+
+    def test_ellipse_commits_a_circle_under_shift(self):
+        tool, ctx = EllipseTool(), FakeContext()
+        tool.on_press(ctx, 0, 0)
+        tool.on_release(ctx, 5, 9, self.SHIFT)
+        params = ctx.commits[0][1]
+        assert (params["x1"], params["y1"]) == (9, 9)
+
+    def test_line_commits_a_45_degree_snap_under_shift(self):
+        tool, ctx = LineTool(), FakeContext()
+        tool.on_press(ctx, 0, 0)
+        tool.on_release(ctx, 10, 8, self.SHIFT)
+        params = ctx.commits[0][1]
+        assert (params["x1"], params["y1"]) == (9, 9)
+
+    def test_without_shift_nothing_is_constrained(self):
+        tool, ctx = RectTool(), FakeContext()
+        tool.on_press(ctx, 2, 2)
+        tool.on_release(ctx, 12, 6)
+        params = ctx.commits[0][1]
+        assert (params["x1"], params["y1"]) == (12, 6)
+
+    def test_the_preview_is_constrained_too(self):
+        """The marquee must show the shape that will land, or Shift becomes a
+        surprise at release."""
+        tool, ctx = RectTool(), FakeContext()
+        tool.on_press(ctx, 0, 0)
+        tool.on_drag(ctx, 10, 4, self.SHIFT)
+        assert ctx.rects[-1] == tool.preview_box((0, 0), 10, 10)
+
+    def test_releasing_shift_mid_drag_unconstrains_the_next_sample(self):
+        tool, ctx = RectTool(), FakeContext()
+        tool.on_press(ctx, 0, 0)
+        tool.on_drag(ctx, 10, 4, self.SHIFT)
+        tool.on_drag(ctx, 10, 4)  # same spot, shift now up
+        assert ctx.rects[-1] == tool.preview_box((0, 0), 10, 4)
+
+    def test_crop_commits_a_square_under_shift(self):
+        tool, ctx = CropTool(), FakeContext()
+        tool.on_press(ctx, 1, 1)
+        tool.on_release(ctx, 9, 5, self.SHIFT)
+        assert ctx.commits[0][1] == {"x": 1, "y": 1, "width": 8, "height": 8}
+
+    def test_select_sets_a_square_region_under_shift(self):
+        tool, ctx = SelectTool(), FakeContext()
+        tool.on_press(ctx, 2, 2)
+        tool.on_release(ctx, 10, 6, self.SHIFT)
+        assert ctx.regions == [(2, 2, 8, 8)]
+
+    def test_fill_goes_global_under_shift(self):
+        tool, ctx = FillTool(), FakeContext()
+        tool.on_press(ctx, 3, 3, self.SHIFT)
+        assert ctx.commits[0][1]["contiguous"] is False
+
+    def test_fill_stays_contiguous_without(self):
+        tool, ctx = FillTool(), FakeContext()
+        tool.on_press(ctx, 3, 3)
+        assert ctx.commits[0][1]["contiguous"] is True

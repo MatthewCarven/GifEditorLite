@@ -1522,3 +1522,97 @@ Frame lands in Paint/Discord the right way up and the right colour, that
 transparency survives into something that understands PNG, and that Paste Frame
 takes a screenshot in. If the picture arrives upside down or blue, the bug is in
 `dib_bytes` and the two lines that would cause it are named in §32.2.
+
+## 2026-08-03 — The project format, Shift, and the wheel
+
+Matthew: *"How can we make it 'better' please Claude?"* — which is a fork, not
+a task, so it went back to him as one. His picks, in order: **`.gifproj`**
+(the extension too — `.gifproj` over `.giflite` and `.glp`), then
+**Shift-constrain**, then **zoom-to-cursor + keyboard panning**. WebP/APNG
+stays a fork of its own per his standing call. Design in ARCHITECTURE §33–35.
+
+**The project format cost almost nothing, which was the point of §25 doing it
+early.** The manifest was already "the project format, unzipped", so
+`gifproj.py` is the same `giflite.json` and the same zero-padded PNGs in a
+zip — one test extracts a container and diffs it file-by-file against a
+sequence export of the same document. Container-specific decisions: manifest
+*required* (a manifest-less zip is somebody else's file; opening it
+convincingly would be worse than refusing), order from the manifest alone
+(members written backwards in a test to keep the zip's order meaningless),
+and deterministic bytes — PNGs STORED, manifest deflated, members stamped
+with zip's 1980 epoch so a diff can tell "saved again" from "changed".
+
+**The mutation run caught me doing the thing I keep writing down.** The
+"fixed timestamp" was `ZipInfo(name, date_time=(1980,1,1,0,0,0))`, and
+deleting the argument changed nothing — that tuple is ZipInfo's *default*. A
+guard in front of something that already decides, fifth find, first one of
+mine caught in the act by my own mutation pass. Deleted; the claim now lives
+in a test that reads the stored `date_time` back out of the written zip.
+That test replaced a first draft with no teeth: "write twice, compare bytes"
+passes under wall-clock stamps too, because zip time has 2-second resolution
+and two writes in one moment agree by luck. The refactor that actually
+breaks determinism is `writestr` with a bare string name (stamps the wall
+clock) — mutated, and killed by the epoch test.
+
+**Save policy split one fact into two** (§33.3). `overwrites_source` is the
+where; new `save_degrades_source` adds the what — GIF re-encode loses, a
+project save is a round trip. The overwrite dialog runs on the second now,
+because §19.2's own argument applies to itself: a warning in front of a
+harmless save trains people to click through the one that matters. Riders:
+the merge note is computed for lossy targets only, and `suggested_save_name`
+stops steering a lossless source to `_edited`. Losslessness is a `Format`
+field plus `is_lossless(path)`, riding *beside* the `writer_for` dispatch
+rather than replacing it — deliberately, because the §19.2 writer-spy test
+monkeypatches `writer_for`, and a dispatch rewrite would have left that spy
+patching a name nobody calls, passing forever.
+
+**Shift went in as a seam, not a feature** (§34). `Mods` rides every mouse
+hook as a fourth argument defaulting to none-held — per *event*, not on the
+context, so mid-drag Shift changes take effect from the next sample and
+there is no keyboard-state global to fall out of sync. One canvas function
+translates Tk's state bitmask; tools never see a Tk constant. On top of the
+seam, the features are small: `constrain_box` (larger extent wins, signs
+kept) for rect/ellipse/crop/select, `constrain_line` (nearest of eight
+directions by normalised dot, then projected — the 22.5° boundary is exact,
+which the tempting `2*ady <= adx` shortcut is not, and a test pins the slope
+that tells them apart), and Shift-click on the bucket for **global fill** —
+which §23's `_fill_mask` docstring had already written: "the global variant
+is this function without the flood". It is exactly that, plus a truthful
+undo label ("Global Fill"). At the canvas edge every constraint yields to
+the existing clamps, same as any marquee dragged past the boundary.
+
+**The wheel amends a recorded call, on the record** (§35, and a note left at
+§20.5). "No view gesture on the preview" predates §20.4's funnel; once every
+view change cancels a pending gesture, Ctrl+wheel is exactly as safe as the
+Ctrl+`-` that already fired mid-stroke. The bare wheel stays the tools'.
+Anchoring is three lines against the §20.2 centre model: read the image
+point under the cursor, step the ladder, put the centre at
+`anchor + (mid - cursor)/scale`, clamp last. Keyboard zoom stays
+centre-anchored — your eye is where your hand is. Shift-arrows pan through
+the text-field guard (Shift+arrow is extend-selection in a field, §26.4's
+rule again), giving `MainWindow.pan` its first production caller;
+`can_pan_x`/`can_pan_y` still have none, so §21's deletion question stands
+with better evidence.
+
+**Two mutation survivors, both my tests' fault** (§35.2). An axes-swap in the
+anchor read lived because every anchor test used a 1000×1000 source — a
+square cannot tell `sw` from `sh`. The clamp-skip lived because "park at the
+edge" was thirty pan steps that parked mid-image. Non-square sources and
+`while view.pan_right(): pass` killed both; a fixed step count is the
+fixed-size window sweep bug in pan-steps clothing. The clamp test also
+asserts the stored centre by equality, not bounds-with-slack — the §21
+invisible-trap centre is out by a fraction of a pixel here, and rendering
+clamps over it.
+
+**Numbers:** 790 headless (was 726), 356 smoke checks (was 336). Mutations:
+22 run across the three slices, 20 killed, 1 equivalent (the restated
+ZipInfo default — deleted, claim pinned), plus the bare-string `writestr`
+variant killed after the rewrite. Green on 3.10, 3.11 and 3.12. Screenshot
+under Xvfb eyeballed: all four panel sections mapped at the 900×720 default.
+
+**For Matthew's hands:** open a `.gifproj` from Explorer won't work until
+Windows learns the extension (no file association shipped — double-click is
+the OS's business, Open/Save As inside the app know it already); the Save As
+type dropdown should show "GIF Editor Lite project (*.gifproj)" — worth one
+eyeball on the native dialog; and the Copy/Paste Frame Windows verification
+from last session is still outstanding.

@@ -296,3 +296,86 @@ class TestSuggestedSaveName:
 
     def test_falls_back_with_no_path(self):
         assert AppController().suggested_save_name == "untitled.gif"
+
+class TestLosslessSavePolicy:
+    """The .gifproj arrival split one fact into two. `overwrites_source` says
+    Save would write over the opened file; `save_degrades_source` adds that
+    the write would *lose* something. The overwrite warning runs on the
+    second: overwriting the project you opened is what saving a project is,
+    and a warning there would train people to click through the one that
+    matters (ARCHITECTURE.md 19.2's own argument, applied to itself).
+    """
+
+    @pytest.fixture
+    def project(self, tmp_path: Path):
+        """A controller that opened a .gifproj, i.e. a lossless source."""
+        from giflite.core.io.gifproj import write_gifproj
+
+        controller = AppController()
+        frontend = FakeFrontend().attach(controller)
+        make_gif(tmp_path / "seed.gif", frames=4)
+        controller.open(tmp_path / "seed.gif")
+        write_gifproj(controller.doc, tmp_path / "a.gifproj")
+        controller.open(tmp_path / "a.gifproj")
+        frontend.clear()
+        return controller, frontend, tmp_path
+
+    def test_a_gif_source_would_degrade(self, loaded):
+        controller, _, _ = loaded
+        assert controller.overwrites_source is True
+        assert controller.save_degrades_source is True
+
+    def test_a_project_source_would_not(self, project):
+        controller, _, _ = project
+        assert controller.overwrites_source is True  # the fact stays a fact
+        assert controller.save_degrades_source is False  # the harm does not
+
+    def test_no_document_degrades_nothing(self):
+        assert AppController().save_degrades_source is False
+
+    def test_saving_elsewhere_clears_it_like_the_source_flag(self, loaded):
+        controller, _, tmp_path = loaded
+        controller.save_as(tmp_path / "out.gif")
+        assert controller.save_degrades_source is False
+
+    def test_a_project_source_suggests_its_own_name(self, project):
+        """No `_edited` steering for a source that saving cannot hurt."""
+        controller, _, _ = project
+        assert controller.suggested_save_name == "a.gifproj"
+
+    def test_a_project_save_reports_no_merges(self, project):
+        """The merge note describes what the GIF encoder will do. A project
+        save keeps identical frames separate, so the note would be reporting
+        a thing that did not happen."""
+        controller, frontend, _ = project
+        controller.set_selection(Selection.single(0))
+        controller.run_op("frames.duplicate")  # a held duplicate: 1 gif merge
+        controller.save()
+        assert "merged" not in frontend.last(ev.STATUS).payload["message"]
+
+    def test_the_same_document_saved_as_gif_still_reports_them(self, project):
+        controller, frontend, tmp_path = project
+        controller.set_selection(Selection.single(0))
+        controller.run_op("frames.duplicate")
+        controller.save_as(tmp_path / "flat.gif")
+        assert "merged" in frontend.last(ev.STATUS).payload["message"]
+
+    def test_edit_save_reopen_round_trips_exactly(self, project):
+        """The workflow the format exists for: Ctrl+S over the opened project,
+        no dialog, nothing lost. The held duplicate is the detail to watch --
+        a GIF round trip folds it (the TestCleanSaveIsSkipped write-back test
+        reopens to 5 frames); the project must hand back all 5 as authored."""
+        controller, _, tmp_path = project
+        controller.set_selection(Selection.single(0))
+        controller.run_op("frames.duplicate")
+        edited = controller.doc
+        assert controller.save() is True
+        assert controller.dirty is False
+
+        controller.open(tmp_path / "a.gifproj")
+        back = controller.doc
+        assert len(back) == len(edited) == 5
+        assert [f.image.tobytes() for f in back.frames] == [
+            f.image.tobytes() for f in edited.frames]
+        assert [f.duration_ms for f in back.frames] == [
+            f.duration_ms for f in edited.frames]

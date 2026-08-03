@@ -609,6 +609,9 @@ redrawing, rather than each entry point remembering to.
   real: the wheel and the middle button stay entirely the tools', so no view
   gesture can ever land inside a stroke. Panning happens in the navigator
   instead (§21), which keeps that property while still giving you a drag.
+  *(Amended 2026-08-03 by §35: Ctrl+wheel zoom arrived once §20.4's funnel made
+  a view change mid-gesture safe rather than possible-and-corrupting. The
+  **bare** wheel and the middle button remain the tools'.)*
 
 ---
 
@@ -1726,3 +1729,219 @@ after the class binding, so it must yield to a focused text field. Ctrl+Shift+C
 is a *selection* keystroke in the same fields — and where the unguarded Ctrl+C
 would quietly replace the image clipboard, an unguarded Ctrl+Shift+V would
 replace the frame you were looking at while you typed a brush size.
+
+---
+
+## 33. The project format: `.gifproj`
+
+Deferred at §18, built almost entirely at §25, assembled here. The felt need
+finally arrived on its own schedule — "make it better" resolved, at Matthew's
+pick, to the one item that turns accepted risks into non-issues: GIF's
+identical-frame merge (risk 2, accepted at M3), its 1-bit alpha (the reason
+eraser opacity was declined), and its 10ms-floored timing all stop being
+compromises the moment the document can be saved as *itself*.
+
+### 33.1 The container is the export, zipped
+
+§25.4 said the manifest was "the project format, unzipped", and §33 held it to
+that literally: `core/io/gifproj.py` writes the same `giflite.json` (same
+`MANIFEST_NAME`, same schema, same version 1) and the same zero-padded
+`frame_NNNN.png` members that `write_sequence` puts in a folder. One test
+extracts a container and compares it file-by-file against a sequence export of
+the same document — byte-identical manifest, identical names. So unzipping a
+project *produces* a valid exported folder, and the sequence importer can eat
+the wreckage of any future format archaeology. Nothing about the schema was
+designed twice.
+
+Three things are container-specific, and only three:
+
+- **The manifest is required.** In a folder, absent is normal (folders of PNGs
+  come from everywhere) and the reader improvises order and timing. A
+  `.gifproj` without a manifest is some other program's zip, and opening it
+  convincingly would be worse than refusing: `ManifestError`, naming the file.
+- **Order comes from the manifest alone.** The folder reader natural-sorts
+  because a directory listing has no order worth trusting; a container's
+  manifest names every member, so zip member order is deliberately
+  meaningless. A test writes the members backwards to keep it that way.
+- **Saving is deterministic.** Same document in, same bytes out, so a diff or
+  a backup tool can tell "saved again" from "changed". PNG members are STORED
+  (they are DEFLATE inside already; compressing them again spends CPU to grow
+  the file), the JSON manifest deflates, and every member carries zip's own
+  1980 epoch rather than the wall clock.
+
+### 33.2 The timestamp that was already there
+
+The determinism plan said "write every member with a fixed `date_time`", and
+the first implementation did — `ZipInfo(name, date_time=(1980, 1, 1, 0, 0, 0))`
+— and the mutation run promptly proved the argument dead: deleting it changed
+nothing, because **that tuple is `ZipInfo`'s own default**. A guard standing in
+front of something that already decides, §27.4's recurring find, committed
+fresh this session by the person who keeps writing that sentence down.
+
+Deleted, with the claim pinned where it can be observed: a test opens the
+written zip and asserts every member's stored `date_time` *is* the epoch. That
+test also caught its own first draft sleeping — "write twice, compare bytes"
+passes under wall-clock stamps too, because zip time has 2-second resolution
+and two writes in the same moment agree by luck. The real hazard has a name:
+`writestr` handed a bare *string* stamps the wall clock, and that one-line
+refactor is exactly what the epoch test now kills.
+
+### 33.3 Save policy: one fact became two
+
+`overwrites_source` says Save would write over the file that was opened. The
+warning dialog ran on it — correctly, while every writable format was lossy.
+A project made the fact insufficient: overwriting the `.gifproj` you opened is
+not a hazard, it is *what saving a project means*, and §19.2's own argument
+cuts against warning there — a dialog in front of a harmless save trains
+people to click through the one that matters.
+
+So `Format` grows `lossless` (data, stated once per format: GIF false, gifproj
+and sequence true), `core/io.is_lossless(path)` answers for a path, and the
+controller splits the fact: `overwrites_source` remains the *where*,
+`save_degrades_source` adds the *what* — would this write lose something. The
+frontend's confirm now runs on the second. Two corollaries, both applied:
+the merge-count message is computed only for lossy targets (a project save
+folds nothing, and `count_merges` byte-compares every frame — a cost with no
+customer there); and `suggested_save_name` stops steering to `_edited` for a
+lossless source, because there is nothing to steer away from and the natural
+Save As over a project is the project.
+
+`_write` still dispatches through `writer_for` untouched — the losslessness
+question rides beside the writer rather than replacing its lookup, which is
+also what kept the §19.2 writer-spy test's teeth in (it monkeypatches
+`writer_for`; a dispatch rewrite would have left it patching a name nobody
+calls, passing forever).
+
+### 33.4 What the round trip actually promises
+
+Byte-identical RGBA per frame, durations and loop exactly as authored,
+identical consecutive frames as separate frames — pinned against the document
+the GIF writer demonstrably folds (the same doc goes through both writers in
+one test, 3 frames out of one and 2 out of the other). The eraser-opacity
+alpha ramp — `255,223,191,159,127,95,63,31`, which a GIF save flattens to
+`255,255,255,255,0,0,0,0` — comes back untouched, which closes the loop on
+§12's investigation: the ramp that was the reason to decline the feature is
+now the test that the declined want has a home.
+
+Not promised: `Frame.image_uid` stability (uids are session-local cache keys),
+zip-level identity across *machines* (ZipInfo's `create_system` differs by
+OS), or defence against a manifest naming `../evil` — members are decoded in
+memory, never extracted, so a hostile name can at worst fail to match.
+
+---
+
+## 34. Shift: the modifier seam, constraints, and the global fill
+
+Matthew's second pick. The feature is squares, circles, 45° lines and
+Shift-click global fill; the *work* was deciding where modifier state lives,
+because that decision is paid once and inherited by every tool after.
+
+### 34.1 Mods travel with the event, not on the context
+
+A `Mods` dataclass (frozen, toolkit-neutral, defined beside `Tool`) rides
+every `on_press`/`on_drag`/`on_release` as a fourth argument defaulting to
+`NO_MODS`. Not a `ToolContext` property: modifiers are a fact about *that
+press or drag*, and a context-held copy is one more global the canvas must
+keep in sync with the keyboard — wrong precisely at the event that mattered
+whenever it lags. Per-event also makes mid-drag changes free: each motion
+carries its own state, so holding or releasing Shift re-shapes the preview
+from the next sample on, and the state at release is what commits. (The
+preview does not re-shape on the *keypress itself* with the mouse still —
+that would need a key-tracking cache, i.e. the global. Every motion is
+sub-pixel at editing zooms, so the next sample is effectively now.)
+
+The translation from toolkit state lives in one canvas function
+(`_mods_from`), same seam discipline as coordinates: tools see image pixels
+and `Mods`, never `event.x` or a state bit. `Mods` carries `shift` alone —
+Shift and Control share masks across platforms but Alt is a different bit on
+each, and a field nothing claims is the §21 `can_pan_x` conversation again.
+The object (rather than a bare bool) is what makes the next modifier a new
+field instead of a second signature break.
+
+### 34.2 Two constraint rules, chosen per tool
+
+`constrain_box` equalises the drag to its larger extent, keeping the drag's
+own signs — squares from rectangles, circles from ellipses, square crops,
+square selections: every rubber-band, one rule. `constrain_line` snaps to the
+nearest of eight directions *by angle* and then projects the drag onto it, so
+the line keeps tracking the cursor's reach instead of jumping between fixed
+lengths. Nearest-by-angle is a max over normalised dot products — no trig —
+and the boundary lands exactly on 22.5°, which the tempting integer shortcut
+(`2*ady <= adx`) does not; a test pins the slope that tells them apart.
+`ShapeTool` holds the rule as a swappable `constrain` staticmethod; the line
+overrides it, and `_far()` applies it in preview and commit alike, because a
+marquee that shows a different shape than lands is §19.1 with a modifier key.
+
+At the canvas edge the constraint *yields*: a Shift-square dragged past the
+boundary gets the same clamp any marquee gets (`canvas.crop` clamps its box,
+`set_region` clamps on the way in), so squareness bends before pasteboard
+shows — which is what every editor's fixed-ratio marquee does too.
+
+### 34.3 The global fill was already written
+
+§23's `_fill_mask` docstring closed with "the global variant, if it is ever
+wanted, is this function without the flood". It was wanted; it is that:
+`contiguous=False` returns the match mask before the connectivity walk, the
+op grows the parameter, and `label_for` says "Global Fill" (undo describing a
+smaller edit than it reverts is the same lie §27's "Erase Fill" fixed). The
+frontend reaches it by Shift-click on the bucket — a per-click intent suits a
+modifier, and the panel already has one "Fill" too many (§23.5's known
+ambiguity, not worth a third). The seed must still be a real pixel: global
+lifts connectivity, not the need for a click to mean somewhere.
+
+---
+
+## 35. The wheel zooms at the cursor; Shift-arrows pan
+
+The third pick, and the one that amends a recorded call. §20.5 said "no view
+gesture on the preview", for a reason that was real at the time: a wheel the
+view owns is a wheel that can fire inside a stroke. §20.4 then built the
+funnel — every view change cancels a pending gesture before redrawing —
+because Ctrl+`-` could already fire mid-stroke. Once that guard exists the
+argument inverts: a view gesture is exactly as safe as the keyboard zoom that
+has shipped for weeks. What survives of §20.5 is its narrower half: the
+**bare** wheel and middle button stay unbound, entirely the tools'; zoom is
+the Ctrl-chorded wheel, the chord every browser and editor already taught.
+
+### 35.1 Anchoring is three lines against the centre model
+
+`zoom_in_at(dx, dy)` reads the image point under the cursor through the same
+float mapping tools snap from, steps the ladder, then sets the centre to
+`anchor + (mid_viewport - cursor)/new_scale` and lets `_clamp` have the final
+word. §20.2's decision to store pan as the image point at the viewport centre
+is what makes this arithmetic instead of machinery — a pixel-offset pan would
+have needed the §19.1 re-derivation this feature was always going to get
+wrong once. Keyboard zoom stays centre-anchored on purpose: your eye is on
+the middle when your hand is on Ctrl+`=`, and on the cursor when it is on the
+wheel. One wheel notch is one rung regardless of delta magnitude —
+high-resolution wheels report many events per detent, and a rung per event
+would fly the whole ladder in a flick.
+
+Clamp-over-anchor is a real policy, not an accident: zooming out anchored at
+a corner would otherwise pin the view past the edge. The test asserts the
+stored centre by *equality* with the edge value — §21's invisible-trap lesson,
+because `_axis_origin` renders correctly over an illegal centre and the
+excursion here is a fraction of a pixel, which a bounds check with slack
+sleeps through.
+
+### 35.2 Two mutation survivors, both the tests' fault
+
+The §22/§24 pattern, met from the arithmetic side this time. An axes-swap in
+the anchor read survived because every anchor test used a **square source** —
+1000×1000 cannot tell `sw` from `sh`. And the clamp-skip survived because
+"park at the edge" was thirty pan steps that parked mid-image; the clamp
+never engaged, so its absence changed nothing. Non-square sources and
+`while view.pan_right(): pass` — reach the edge, don't assume it — killed
+both. A fixed iteration count is the fixed-size window sweep bug wearing
+pan-steps clothing.
+
+### 35.3 Shift-arrows are the pan input §21 kept waiting for
+
+Bare arrows are spoken for twice (frame transport, float nudge), so panning
+takes Shift, through `_bind_guarded_key` — Shift+arrow is *extend-selection*
+inside a text field, and the field has the better claim (§26.4's rule, third
+application). `MainWindow.pan` finally has the production caller it was kept
+for. `can_pan_x`/`can_pan_y` still have none — keyboard pan needs no
+disabled-state and `nudge` already reports edge stops — so §21's deletion
+question stands, now with better evidence: two pan inputs have arrived and
+neither asked.

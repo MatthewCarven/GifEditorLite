@@ -27,6 +27,7 @@ from typing import Callable
 
 from giflite.core.io.gif_read import read_gif
 from giflite.core.io.gif_write import write_gif
+from giflite.core.io.gifproj import read_gifproj, write_gifproj
 from giflite.core.io.sequence import read_sequence, write_sequence
 from giflite.core.model import MIN_DURATION_MS, Document
 from giflite.core.params import IntParam, Param
@@ -66,6 +67,14 @@ class Format:
     # when it matters, not at import time, or a missing one takes the app down
     # on startup -- the whole point of the guarantee.
     available: Callable[[], bool] = field(default=_always)
+    # Whether writing preserves the document exactly -- reopen and get the
+    # same frames, timing and alpha back. GIF does not (rebuilt palette,
+    # merged holds, 1-bit alpha); the PNG-based formats do. This is the fact
+    # save policy runs on: warn-before-overwriting-the-source and the
+    # merge-count message both apply to lossy targets only, and putting the
+    # bit here means a future format states it once instead of every policy
+    # site growing another special case.
+    lossless: bool = False
 
     def matches(self, path: Path) -> bool:
         path = Path(path)
@@ -86,11 +95,20 @@ FORMATS: tuple[Format, ...] = (
         write=write_gif,
     ),
     Format(
+        id="gifproj",
+        label="GIF Editor Lite project",
+        extensions=(".gifproj",),
+        read=read_gifproj,
+        write=write_gifproj,
+        lossless=True,
+    ),
+    Format(
         id="sequence",
         label="Image sequence (folder)",
         is_folder=True,
         read=read_sequence,
         write=write_sequence,
+        lossless=True,
         read_params=(
             IntParam("delay_ms", "Delay per frame", default=100,
                      min=MIN_DURATION_MS, max=60000, unit="ms"),
@@ -135,6 +153,17 @@ def format_for(path: Path, *, readable: bool = False,
         if fmt.is_folder and fmt.matches(path):
             return fmt
     return None
+
+
+def is_lossless(path: Path) -> bool:
+    """Whether writing to `path` would preserve the document exactly.
+
+    False when nothing claims the path: the caller is asking "would saving
+    here lose anything?", and the honest answer to "saving here won't even
+    work" is not "no loss". The write itself will fail loudly on its own.
+    """
+    fmt = format_for(path, writable=True)
+    return fmt is not None and fmt.lossless
 
 
 def reader_for(path: Path) -> Reader | None:

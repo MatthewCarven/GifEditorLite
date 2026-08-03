@@ -200,6 +200,63 @@ class TestFill:
         assert r.doc.frames[2].image_uid == d.frames[2].image_uid
 
 
+class TestGlobalFill:
+    """`contiguous=False`: every pixel the seed matches, reachable or not.
+    The docstring in `_fill_mask` promised the global variant was "this
+    function without the flood" a session before anything claimed it; these
+    are the checks that hold it to that."""
+
+    def test_it_reaches_the_disconnected_island(self):
+        """The pair to TestFill's unreachable-region check: same document,
+        same seed, opposite promise."""
+        d = striped()
+        r = run("paint.fill", d, index=0, x=3, y=3, color=(0, 255, 0, 255),
+                contiguous=False)
+        img = r.doc.frames[0].image
+        assert img.getpixel((3, 3)) == (0, 255, 0, 255)
+        assert img.getpixel((13, 3)) == (0, 255, 0, 255)  # across the gap
+
+    def test_the_field_between_them_is_untouched(self):
+        d = striped()
+        r = run("paint.fill", d, index=0, x=3, y=3, color=(0, 255, 0, 255),
+                contiguous=False)
+        assert r.doc.frames[0].image.getpixel((8, 3)) == (0, 0, 255, 255)
+
+    def test_tolerance_still_gates_the_match(self):
+        im = Image.new("RGBA", (4, 1), (100, 100, 100, 255))
+        im.putpixel((2, 0), (108, 100, 100, 255))
+        d = Document((Frame.new(im, 100),), (4, 1))
+        r = run("paint.fill", d, index=0, x=0, y=0, color=(0, 0, 0, 255),
+                tolerance=0, contiguous=False)
+        assert r.doc.frames[0].image.getpixel((2, 0)) == (108, 100, 100, 255)
+        r = run("paint.fill", d, index=0, x=0, y=0, color=(0, 0, 0, 255),
+                tolerance=8, contiguous=False)
+        assert r.doc.frames[0].image.getpixel((2, 0)) == (0, 0, 0, 255)
+
+    def test_erase_mode_clears_both_islands(self):
+        d = striped()
+        r = run("paint.fill", d, index=0, x=3, y=3, mode="erase",
+                contiguous=False)
+        img = r.doc.frames[0].image
+        assert img.getpixel((3, 3))[3] == 0
+        assert img.getpixel((13, 3))[3] == 0
+        assert img.getpixel((8, 3))[3] == 255  # the field keeps its alpha
+
+    def test_a_seed_outside_the_canvas_still_declines(self):
+        """Global lifts connectivity, not the need for a real seed."""
+        d = striped()
+        r = run("paint.fill", d, index=0, x=99, y=99, color=(0, 255, 0, 255),
+                contiguous=False)
+        assert r.doc is d
+
+    def test_the_undo_label_says_global(self):
+        from giflite.core.ops.registry import get_op, op_label
+        op = get_op("paint.fill")
+        assert op_label(op, contiguous=False) == "Global Fill"
+        assert op_label(op, contiguous=False, mode="erase") == "Erase Global Fill"
+        assert op_label(op, contiguous=True) == "Fill"
+
+
 class TestShapes:
     def test_rect_outline_leaves_its_interior_alone(self):
         d = doc(1, (10, 10))

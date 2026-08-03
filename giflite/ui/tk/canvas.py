@@ -32,7 +32,28 @@ from collections import OrderedDict
 
 from PIL import Image, ImageDraw, ImageTk
 
+from .tools import Mods, NO_MODS
 from .view import ViewTransform
+
+# Tk's event.state bits for the modifier keys, identical on Windows, X11 and
+# macOS (unlike Alt, which is a different bit on each -- one reason `Mods`
+# only carries what something uses).
+_SHIFT_MASK = 0x0001
+
+
+def _mods_from(event: tk.Event) -> Mods:
+    """The `Mods` for a mouse event, from its toolkit state bitmask.
+
+    This translation is the only place tools' modifier handling touches Tk,
+    which is the same seam discipline as coordinates: tools see image pixels
+    and `Mods`, never event.x or a state bit. `state` is an int for every
+    mouse event; anything else (a handful of exotic X events say "??") means
+    no modifier information, and no-modifiers is the honest reading of that.
+    """
+    state = getattr(event, "state", 0)
+    if not isinstance(state, int):
+        return NO_MODS
+    return Mods(shift=bool(state & _SHIFT_MASK))
 
 BACKGROUND = "#232326"      # the "pasteboard" outside the canvas
 PLACEHOLDER_FG = "#8b8b93"
@@ -127,6 +148,18 @@ class PreviewCanvas(tk.Canvas):
         self.bind("<B1-Motion>", self._on_drag)
         self.bind("<ButtonRelease-1>", self._on_release)
         self.bind("<Escape>", self._on_escape)
+        # Ctrl+wheel zooms at the pointer. The *bare* wheel stays unbound on
+        # purpose -- §20.5's "no view gesture on the preview" was about the
+        # wheel the tools might one day want and about a stroke being disturbed
+        # mid-gesture; the Ctrl chord leaves the first untouched, and every
+        # zoom goes through `_apply_view`, whose §20.4 gesture-cancel is what
+        # has made view changes safe mid-stroke since Ctrl+`-` could fire
+        # there. Windows and macOS deliver wheels as <MouseWheel> with a
+        # signed delta; X11 delivers buttons 4 and 5. Binding all three is the
+        # portable spelling of one gesture.
+        self.bind("<Control-MouseWheel>", self._on_ctrl_wheel)
+        self.bind("<Control-Button-4>", lambda e: self._on_ctrl_wheel(e, 1))
+        self.bind("<Control-Button-5>", lambda e: self._on_ctrl_wheel(e, -1))
 
     # ---- public ----------------------------------------------------------
 
@@ -172,6 +205,14 @@ class PreviewCanvas(tk.Canvas):
 
     def zoom_out(self) -> bool:
         return self._apply_view(self.view.zoom_out())
+
+    def zoom_in_at(self, dx: float, dy: float) -> bool:
+        """Zoom one rung in, anchored at display point (dx, dy) -- the wheel's
+        entry. Same funnel as every other view change."""
+        return self._apply_view(self.view.zoom_in_at(dx, dy))
+
+    def zoom_out_at(self, dx: float, dy: float) -> bool:
+        return self._apply_view(self.view.zoom_out_at(dx, dy))
 
     def zoom_fit(self) -> bool:
         self.view.fit()
@@ -468,7 +509,26 @@ class PreviewCanvas(tk.Canvas):
         handler(self._tool_ctx,
                 *self._display_to_image(self.canvasx(event.x),
                                         self.canvasy(event.y),
-                                        snap=getattr(self._tool, "coords", "pixel")))
+                                        snap=getattr(self._tool, "coords", "pixel")),
+                _mods_from(event))
+
+    def _on_ctrl_wheel(self, event: tk.Event, direction: int | None = None) -> str:
+        """One wheel notch = one ladder rung, at the pointer.
+
+        `direction` is passed by the X11 button bindings (4 up, 5 down); the
+        <MouseWheel> path reads the sign of `delta` instead. The magnitude is
+        ignored on purpose: high-resolution wheels report many small deltas
+        per detent, and stepping a rung per *event* rather than per notch
+        would fly through the whole ladder in one flick.
+        """
+        if direction is None:
+            direction = 1 if getattr(event, "delta", 0) > 0 else -1
+        x, y = self.canvasx(event.x), self.canvasy(event.y)
+        if direction > 0:
+            self.zoom_in_at(x, y)
+        else:
+            self.zoom_out_at(x, y)
+        return "break"
 
     def _on_press(self, event: tk.Event) -> None:
         self._dispatch("on_press", event)

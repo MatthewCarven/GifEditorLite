@@ -25,6 +25,14 @@
       3.12 or 3.13 until that day — `Document.meta`'s mappingproxy default
       became illegal in 3.11 (ARCHITECTURE §31). Fixed, and guarded by a test
       that fails on 3.10 too, but worth knowing which one you are on
+- [ ] Eyeball `.gifproj` on Windows: Save As should offer "GIF Editor Lite
+      project (*.gifproj)" in the native type dropdown, a saved project should
+      reopen through File → Open, and Ctrl+S over it should save with **no**
+      overwrite prompt. (Double-clicking one in Explorer won't open the app —
+      no file association is shipped; that's the OS's business, not ours yet)
+- [ ] Feel test the new hands: Shift while dragging rect/ellipse/line/crop/
+      select, Shift-click the bucket, Ctrl+wheel on the preview, Shift+arrows
+      while zoomed
 
 ## M0 — skeleton ✅
 
@@ -205,7 +213,9 @@ out to be worse than advertised. Design in ARCHITECTURE §19.2–19.3.
 ## Later
 
 - [x] **Image-sequence IO** — done 2026-07-29, see below
-- [ ] **Project / sidecar format** (`.gifproj`?) — lossless zip of PNG frames + JSON manifest, so authored frames/timing survive a round-trip GIF can't represent. One `read_x`/`write_x` pair; see ARCHITECTURE §18. Matthew wants this eventually
+- [x] **Project format `.gifproj`** — done 2026-08-03, see below. Exactly the
+      shape §18 predicted: one reader/writer pair over the §25 manifest, in a
+      zip. Risk 2 (identical-frame merging) now has its real answer
 - [ ] M5 video import (`imageio-ffmpeg`, try/except registration). **WebP/APNG
       export is no longer planned here** — Matthew's call 2026-07-29: if those
       land it's a fork, *APNG Editor Lite*, so the two tools can promise
@@ -271,13 +281,16 @@ ARCHITECTURE §21.
 **Later (additive):**
 
 - [ ] `can_pan_x` / `can_pan_y` have no production caller now the pan buttons
-      are gone — kept as the question any other pan input must ask. Delete if
-      nothing claims them
+      are gone — kept as the question any other pan input must ask. **Update
+      2026-08-03: two more pan inputs arrived (Shift+arrows, the wheel's
+      clamp) and neither asked** — `nudge` reports edge stops itself. The
+      deletion question stands, with better evidence
 - [ ] Possible follow-up: `_boards` and `_composed` are keyed more finely now
       (rect + out-size + phase). Bounded, but worth a look at real cache hit
       rates during playback while zoomed
-- [ ] Possible follow-up: zoom-to-cursor, keyboard panning (`nudge` and the
-      direction helpers are already there), or a resizable panel
+- [x] Zoom-to-cursor + keyboard panning — done 2026-08-03, see below
+      (Ctrl+wheel anchored at the pointer; Shift+arrows). A resizable panel
+      remains unclaimed
 
 ## Pixel grid ✅
 
@@ -344,11 +357,11 @@ ARCHITECTURE §23.
 
 **Later (additive):**
 
-- [ ] Shift-constrain: square/circle from a shape drag, 45° lines. Needs the
-      canvas to pass modifier state through `_dispatch`, which is an API change
-      to `Tool.on_press` — worth doing once, for all tools
-- [ ] Global fill (replace every matching pixel, not just the contiguous run) —
-      `_fill_mask` without the flood stage; a modifier or a fourth setting
+- [x] Shift-constrain — done 2026-08-03, see below. The `Mods` seam was the
+      API change worth doing once; squares, circles, 45° lines, and crop and
+      select square up too
+- [x] Global fill — done 2026-08-03: Shift-click the bucket. It was
+      `_fill_mask` without the flood stage, exactly as this line predicted
 - [ ] Fill is ~1µs/pixel (PIL's Python flood walk): 1.1s for a whole-canvas fill
       at 1000x1000, instant at GIF sizes. Only worth attacking if it bites
 - [ ] The panel measures ~211px against `PANEL_WIDTH` 200 — the Colour/Fill row
@@ -682,3 +695,100 @@ evaporate on every GIF save. Declined — Matthew's call, and the right one.
       pixels toward the background colour they'll sit on, staying fully opaque.
       Needs no partial alpha and nothing is lost on save. Not requested; noted
       so the underlying want isn't forgotten along with the rejected mechanism
+
+## The project format `.gifproj` ✅
+
+Done 2026-08-03, Matthew's pick (extension too: `.gifproj` over `.giflite` and
+`.glp`). Design in ARCHITECTURE §33; the format itself was designed at §25 and
+this slice mostly assembled it.
+
+- [x] `core/io/gifproj.py` — `read_gifproj`/`write_gifproj` over the existing
+      §25 manifest: same `giflite.json`, same schema v1, same zero-padded PNG
+      names. An unzipped project **is** a valid exported folder (tested
+      file-by-file against `write_sequence`)
+- [x] Manifest required in a container (absent → `ManifestError` naming the
+      file); order comes from the manifest, never the zip (members written
+      backwards in a test); missing member / unknown version / non-zip all
+      refused by name
+- [x] Deterministic bytes: PNGs STORED, manifest deflated, members at zip's
+      1980 epoch. The epoch is `ZipInfo`'s own default — the explicit
+      restatement was deleted when a mutation proved it dead, and the claim
+      is pinned by a test reading the stored timestamps back (the "write
+      twice, compare" draft slept through wall-clock stamps: zip time has
+      2-second resolution)
+- [x] `Format.lossless` + `is_lossless(path)`; registry entry; Open/Save
+      dialogs picked the format up from the registry with no UI change
+- [x] Save policy: new `save_degrades_source` (= overwrites_source AND the
+      write loses something) drives the overwrite dialog, so Ctrl+S over an
+      opened project saves with no prompt; merge note gated to lossy targets;
+      `suggested_save_name` stops steering a lossless source to `_edited`
+- [x] Round trip pinned exact: pixels byte-identical, durations/loop as
+      authored, held duplicates stay separate (same doc through the GIF
+      writer folds — asserted side by side), and the declined eraser-opacity
+      alpha ramp survives untouched
+- [x] 790 headless (was 726), 356 smoke (was 336); 11 mutations on this slice
+      (10 killed, 1 equivalent → deletion above)
+
+**Later (additive):**
+
+- [ ] Save writes the container in place, like every other writer here. A
+      temp-file + `os.replace` write would survive a crash mid-save; worth
+      doing for the *project* format first if ever, since a project is the
+      copy you care about
+- [ ] A `.gifproj` double-clicked in Explorer needs a Windows file
+      association to open the app — an installer/registry concern, noted so
+      the want isn't mistaken for a bug
+- [ ] `probe_gif`'s large-file warning has no `.gifproj` counterpart (opening
+      one decodes every member). Fine at sprite sizes; revisit if projects
+      ever get big
+
+## Shift-constrain + global fill ✅
+
+Done 2026-08-03. Design in ARCHITECTURE §34.
+
+- [x] `Mods` on every tool mouse hook (frozen dataclass, `NO_MODS` default) —
+      per **event**, not on the context, so mid-drag Shift re-shapes from the
+      next sample and release-state commits. `_mods_from` is the one place
+      Tk's state bitmask is read
+- [x] `constrain_box` (larger extent wins, drag's signs kept) for
+      rect/ellipse **and crop and select**; `constrain_line` (nearest of 8
+      directions by normalised dot, projected) for the line — the 22.5°
+      boundary is exact, pinned against the `2*ady <= adx` shortcut
+- [x] Constraints yield to the canvas edge clamps rather than fighting them
+- [x] Shift-click bucket = global fill: `paint.fill(contiguous=False)` =
+      `_fill_mask` minus the flood, as §23's docstring promised; undo label
+      says "Global Fill"; hints updated on every affected tool
+- [x] 11 mutations across this and the zoom slice, all killed (two after
+      fixing tests that couldn't see: square source, edge never reached)
+
+**Later (additive):**
+
+- [ ] Shift on **Move** (axis-lock the drag) and Shift on the **pencil**
+      (straight segment from the last point, Photoshop-style) — both are one
+      `constrain_line` call now the seam exists; neither asked for yet
+- [ ] `Mods.ctrl`/`alt` when something claims them (Alt is a different state
+      bit per platform — the reason it isn't speculatively there)
+
+## Zoom-to-cursor + Shift-arrow panning ✅
+
+Done 2026-08-03. Design in ARCHITECTURE §35; §20.5 amended on the record.
+
+- [x] `ViewTransform.zoom_in_at`/`zoom_out_at` — anchor algebra over the §20.2
+      centre model, clamp has the final word (corner-anchored zoom-out yields
+      instead of pinning past the edge; stored centre asserted by equality)
+- [x] Ctrl+wheel on the preview (`<Control-MouseWheel>` + X11 buttons 4/5);
+      one notch = one rung regardless of delta; **bare wheel still unbound**,
+      still the tools'. Safe because §20.4's funnel cancels a pending gesture
+      on every view change
+- [x] Keyboard zoom stays centre-anchored on purpose (your eye is where your
+      hand is)
+- [x] Shift+arrows pan via `MainWindow.pan` — its first production caller —
+      through the text-field guard (Shift+arrow is extend-selection in a
+      field); bare arrows stay transport/float-nudge; smoke drives all four
+      routings
+
+**Later (additive):**
+
+- [ ] Wheel-drag panning (middle button or space-drag) would be the next
+      §20.5 conversation — the funnel makes it safe, the question is whether
+      the middle button should stay reserved for a future tool

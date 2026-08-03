@@ -27,3 +27,9 @@ COMMIT_MSG.txt
 # root so they aren't committed by accident; if we want them tracked as
 # fixtures they move to tests/fixtures/, which is NOT ignored.
 /*.gif
+
+# Same rule for screenshots at root — `git add -A` has swept one into a
+# commit twice now (2026-08-01 amended, 2026-08-03 shipped). Anything worth
+# tracking gets a real home first.
+/*.png
+/*.gifproj

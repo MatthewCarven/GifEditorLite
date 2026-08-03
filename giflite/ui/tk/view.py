@@ -225,6 +225,47 @@ class ViewTransform:
                 return True
         return False
 
+    def zoom_in_at(self, dx: float, dy: float) -> bool:
+        """One rung in, holding the image point under display point (dx, dy).
+
+        The wheel's zoom. `zoom_in()` holds the viewport centre, which is right
+        for a keyboard shortcut -- your eye is on the middle -- and wrong for a
+        wheel, where your eye is on the cursor and the thing you are leaning in
+        toward should grow in place rather than slide away toward the centre.
+        """
+        return self._zoom_anchored(dx, dy, self.zoom_in)
+
+    def zoom_out_at(self, dx: float, dy: float) -> bool:
+        return self._zoom_anchored(dx, dy, self.zoom_out)
+
+    def _zoom_anchored(self, dx: float, dy: float, step) -> bool:
+        """Run `step` (zoom_in/zoom_out), then re-centre so the image point
+        that was under (dx, dy) is under it still.
+
+        The centre-as-pan representation makes this three lines of algebra:
+        the anchor's image coordinates are read out *before* the step through
+        the same float mapping `display_to_image` snaps for tools, and the new
+        centre is the anchor plus the cursor's offset from mid-viewport at the
+        new scale. `_clamp` then has the final word, so anchoring never shows
+        pasteboard on an axis with image to spare -- at the edges the anchor
+        yields, which is also what stops zoom-out-at-a-corner pinning the view
+        there.
+        """
+        left, top, fw, fh = self.geometry()
+        sw, sh = self._source
+        if sw <= 0 or sh <= 0 or fw <= 0 or fh <= 0:
+            return step()
+        ix = (dx - left) / fw * sw
+        iy = (dy - top) / fh * sh
+        if not step():
+            return False
+        scale = self.scale
+        vw, vh = self._viewport
+        self._center = (ix + (vw / 2 - dx) / scale,
+                        iy + (vh / 2 - dy) / scale)
+        self._clamp()
+        return True
+
     @property
     def can_zoom_in(self) -> bool:
         return self.scale < LADDER[-1] - _EPS

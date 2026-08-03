@@ -247,10 +247,12 @@ def main() -> int:
 
     # Fake mouse events carrying widget x/y, shared by every gesture check below.
     class _XY:
-        def __init__(self, x, y):
+        def __init__(self, x, y, state=0):
             self.x = x
             self.y = y
-            self.state = 0
+            # A real Tk state bitmask (0x0001 == Shift), so a stub drag can
+            # carry modifiers through the same _mods_from the live path uses.
+            self.state = state
 
     # --- the mapping is anchored to where Tk actually drew the image -----
     # This checks _image_geom against ground truth (the image item's bbox) and
@@ -1940,6 +1942,139 @@ def main() -> int:
     root.update()
     check("import: opening a real file afterwards restores a path",
           controller.has_path and root.title().startswith("smoke.gif"), root.title())
+
+    # --- the project format through the real window (ARCHITECTURE 33) ----
+    from giflite.core.io.gifproj import read_gifproj  # noqa: E402
+
+    proj = tmp / "smoke.gifproj"
+    window._with_busy_cursor(lambda: controller.save_as(proj))
+    root.update()
+    check("gifproj: Save As writes the container", proj.exists())
+    check("gifproj: title follows the project",
+          root.title().startswith("smoke.gifproj"), root.title())
+
+    window.open_path(proj)
+    root.update()
+    check("gifproj: reopens with every frame", controller.frame_count == 8,
+          str(controller.frame_count))
+    check("gifproj: an authored duration survived",
+          controller.doc[2].duration_ms == 250, str(controller.doc[2].duration_ms))
+    check("gifproj: the reopened project is the source", controller.overwrites_source)
+    check("gifproj: saving over it degrades nothing",
+          not controller.save_degrades_source)
+    check("gifproj: Save As offers the project's own name",
+          controller.suggested_save_name == "smoke.gifproj",
+          controller.suggested_save_name)
+
+    # Ctrl+S over the opened project: no prompt, a real write, lossless back.
+    # The GIF flavour of this routing (prompt raised, three answers) is checked
+    # above; this is the other half of `save_degrades_source` -- the dialog
+    # standing down where there is nothing to protect.
+    window._pick(1)
+    controller.run_op("frames.delete")
+    prompt = {"asked": 0}
+    original_ask_proj = _mb.askyesnocancel
+
+    def _tripwire(*_a, **_k):
+        prompt["asked"] += 1
+        return True
+
+    _mb.askyesnocancel = _tripwire
+    try:
+        window.save_file()
+        root.update()
+    finally:
+        _mb.askyesnocancel = original_ask_proj
+    check("gifproj: Ctrl+S saved without the overwrite prompt",
+          prompt["asked"] == 0, f"asked {prompt['asked']}x")
+    check("gifproj: the save landed", not controller.dirty)
+    back = read_gifproj(proj)
+    check("gifproj: the edit round-tripped losslessly",
+          len(back) == 7 and [f.duration_ms for f in back.frames]
+          == [f.duration_ms for f in controller.doc.frames],
+          f"{len(back)} frames")
+
+    # --- shift-constrain through the real event path ---------------------
+    # The headless tool tests prove the arithmetic; what only this layer can
+    # answer is whether a real Tk state bitmask arrives at the tool as Mods.
+    window.open_path(gif)
+    root.update()
+    window._set_fg_color((255, 0, 255, 255))
+    window._fill_var.set(True)
+    window._select_tool("rect")
+    sx, sy = window.canvas._image_to_display(4, 4, center=True)
+    ex, ey = window.canvas._image_to_display(24, 10, center=True)
+    window.canvas._on_press(_XY(int(sx), int(sy)))
+    window.canvas._on_drag(_XY(int(ex), int(ey), state=0x0001))
+    window.canvas._on_release(_XY(int(ex), int(ey), state=0x0001))
+    root.update()
+    frame = controller.frame_image()
+    check("shift: a shifted rect drag lands square",
+          frame.getpixel((24, 24)) == (255, 0, 255, 255)
+          and frame.getpixel((4, 24)) == (255, 0, 255, 255),
+          f"far corner {frame.getpixel((24, 24))}, below-anchor {frame.getpixel((4, 24))}")
+    check("shift: and stops at the square's edge",
+          frame.getpixel((25, 4)) != (255, 0, 255, 255)
+          and frame.getpixel((4, 25)) != (255, 0, 255, 255))
+
+    # --- wheel zoom at the pointer ---------------------------------------
+    window._select_tool("cursor")
+    window.zoom_fit()
+    root.update()
+    view = window.canvas.view
+    # From a vantage where both axes overflow the viewport, so the anchor is
+    # genuinely in charge. An anchor near an *edge* yields to the pasteboard
+    # clamp by design (covered headlessly); the interior point is the case
+    # where "held still" must hold exactly.
+    while view.scale < 8.0 and view.can_zoom_in:
+        window.zoom_in()
+    root.update()
+    scale_start = view.scale
+    ax, ay = window.canvas._image_to_display(70, 35, center=True)
+    pixel_before = view.display_to_image(ax, ay)
+    window.canvas._on_ctrl_wheel(_XY(int(ax), int(ay)), 1)
+    root.update()
+    check("wheel: Ctrl+wheel zoomed a rung in", view.scale > scale_start,
+          f"{scale_start:.2f} -> {view.scale:.2f}")
+    pixel_after = view.display_to_image(ax, ay)
+    check("wheel: the pixel under the cursor held still",
+          abs(pixel_after[0] - pixel_before[0]) <= 1
+          and abs(pixel_after[1] - pixel_before[1]) <= 1,
+          f"{pixel_before} -> {pixel_after}")
+    # And the X11 binding itself (Xvfb delivers wheels as buttons 4/5).
+    scale_mid = view.scale
+    window.canvas.focus_set()
+    window.canvas.event_generate("<Control-Button-4>",
+                                 x=int(ax), y=int(ay), when="now")
+    root.update()
+    check("wheel: the Control-Button-4 binding fires", view.scale > scale_mid,
+          f"{scale_mid} -> {view.scale}")
+
+    # --- Shift-arrow panning ---------------------------------------------
+    center_before = view.center
+    index_before = controller.index
+    root.event_generate("<Shift-Right>")
+    root.update()
+    check("pan: Shift+Right panned the view", view.center[0] > center_before[0],
+          f"{center_before} -> {view.center}")
+    check("pan: and left the playhead alone", controller.index == index_before,
+          str(controller.index))
+    center_panned = view.center
+    root.event_generate("<Right>")
+    root.update()
+    check("pan: a bare arrow still steps the frame",
+          controller.index == index_before + 1, str(controller.index))
+    check("pan: and leaves the view alone", view.center == center_panned)
+    # Shift+arrow inside a text field is extend-selection; the guard yields.
+    window._size_box.focus_set()
+    root.update()
+    root.event_generate("<Shift-Right>")
+    root.update()
+    check("pan: Shift+arrows yield to a focused text field",
+          view.center == center_panned, str(view.center))
+    window.canvas.focus_set()
+    window.zoom_fit()
+    root.update()
 
     # --- close ----------------------------------------------------------
     controller.close()

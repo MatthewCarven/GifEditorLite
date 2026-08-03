@@ -141,8 +141,9 @@ def _match_mask(image: Image.Image, seed: Color, tolerance: int) -> Image.Image:
     return within
 
 
-def _fill_mask(image: Image.Image, x: int, y: int, tolerance: int) -> Image.Image | None:
-    """Coverage mask for a flood fill seeded at `(x, y)`. None if out of bounds.
+def _fill_mask(image: Image.Image, x: int, y: int, tolerance: int,
+               contiguous: bool = True) -> Image.Image | None:
+    """Coverage mask for a fill seeded at `(x, y)`. None if out of bounds.
 
     Two stages, deliberately: *which pixels match* is a colour question and is
     answered above in C, and *which of those are reachable* is a connectivity
@@ -153,14 +154,20 @@ def _fill_mask(image: Image.Image, x: int, y: int, tolerance: int) -> Image.Imag
     Marking with 128 rather than a second image is what makes the second stage
     free: the flood repaints the reachable run of 255s, so the pixels left at
     255 are precisely the matching-but-unreachable ones, and a LUT separates
-    them. That is the whole of "contiguous, not global" -- and it means the
-    global variant, if it is ever wanted, is this function without the flood.
+    them. That is the whole of "contiguous, not global" -- and as this
+    docstring promised for a session before anything claimed it, the global
+    variant *is* this function without the flood: `contiguous=False` returns
+    the match mask as it stands, connectivity never asked. The seed still has
+    to be a real pixel -- a global fill is still seeded by a click, and a
+    click off the canvas still means nothing.
     """
     width, height = image.size
     if not (0 <= x < width and 0 <= y < height):
         return None
     seed = image.getpixel((x, y))
     match = _match_mask(image, seed, tolerance)
+    if not contiguous:
+        return match
     ImageDraw.floodfill(match, (x, y), 128, thresh=0)
     return match.point([255 if v == 128 else 0 for v in range(256)])
 
@@ -428,6 +435,10 @@ class FloodFill:
     colour that erases. Painting alpha-composites, so a fully transparent colour
     composited over a frame changes nothing and the op declines. Removing alpha
     is a different operation, not a different colour.
+
+    `contiguous=False` is the global fill: every pixel the seed matches,
+    reachable from the click or not. Same mask machinery, one question fewer
+    -- see `_fill_mask`. The frontend reaches it with Shift-click.
     """
 
     id = "paint.fill"
@@ -437,16 +448,22 @@ class FloodFill:
     in_menu = False
     params = ()
 
-    def label_for(self, mode: str = "paint", **_) -> str:
-        return "Erase Fill" if mode == "erase" else self.label
+    def label_for(self, mode: str = "paint", contiguous: bool = True, **_) -> str:
+        # "Global" earns its place in the label: undoing a fill that touched
+        # disconnected pixels all over the frame should say so, or the undo
+        # menu describes a smaller edit than the one it reverts.
+        base = self.label if contiguous else "Global Fill"
+        return f"Erase {base}" if mode == "erase" else base
 
     def apply(self, doc: Document, sel: Selection, index: int = 0,
               x: int = 0, y: int = 0, color: Color = (0, 0, 0, 255),
-              tolerance: int = 0, mode: str = "paint", **_) -> OpResult:
+              tolerance: int = 0, mode: str = "paint",
+              contiguous: bool = True, **_) -> OpResult:
         if not (0 <= int(index) < len(doc.frames)):
             return OpResult(doc, sel)
         image = doc.frames[int(index)].image
-        mask = _fill_mask(image, int(x), int(y), max(0, int(tolerance)))
+        mask = _fill_mask(image, int(x), int(y), max(0, int(tolerance)),
+                          contiguous=bool(contiguous))
         return _apply_mask(doc, sel, index, mask, _rgba(color), mode)
 
 

@@ -43,10 +43,22 @@ Two lifecycle hooks matter as much as the mouse ones:
     on_cancel(ctx)  Abandon in-progress state without committing. Called on Esc
                     and on a window resize, which rescales and moves the image
                     so any coordinates collected so far are now stale.
+
+Every mouse hook also receives a `Mods`: which modifier keys were down for
+*that event*. Modifiers travel with the event rather than living on the
+context because they are a fact about a moment, not about the session -- a
+context property would be one more piece of global state the canvas had to
+keep in sync with the keyboard, and it would be wrong for exactly the event
+that mattered whenever it lagged. Constraining happens per sample, so holding
+or releasing Shift mid-drag changes the preview from the next mouse movement
+on, and the state at *release* is what commits -- the same rule every editor
+the user already knows applies.
 """
 
 from __future__ import annotations
 
+import math
+from dataclasses import dataclass
 from typing import Protocol
 
 
@@ -78,6 +90,66 @@ class ToolContext(Protocol):
     def end_tool(self) -> None: ...
 
 
+@dataclass(frozen=True, slots=True)
+class Mods:
+    """Which modifier keys were down for a mouse event.
+
+    Toolkit-neutral on purpose: the canvas translates its toolkit's state
+    bitmask into one of these, so tools never see a Tk constant. Only `shift`
+    exists because only Shift has a customer; the object (rather than a bare
+    bool argument) is what makes the *next* modifier a new field instead of
+    another change to every handler signature -- the API break is paid once,
+    here.
+    """
+
+    shift: bool = False
+
+
+NO_MODS = Mods()
+
+# The eight compass directions a Shift-constrained line may take.
+_DIRECTIONS: tuple[tuple[int, int], ...] = (
+    (1, 0), (1, 1), (0, 1), (-1, 1), (-1, 0), (-1, -1), (0, -1), (1, -1))
+
+
+def constrain_line(ax: int, ay: int, x: int, y: int) -> tuple[int, int]:
+    """The far end of a line from (ax, ay), snapped to the nearest 45 degrees.
+
+    Nearest by *angle*, then projected: the drag vector keeps as much of its
+    length as lies along the snapped direction, so the line tracks the cursor
+    instead of jumping between fixed lengths. No trigonometry -- the nearest
+    of eight unit directions is the one with the largest normalised dot
+    product, and the projection is that dot product again. A drag of (10, 8)
+    lands diagonal at (9, 9); (10, 3) lands horizontal at (10, 0); the
+    boundary between those octants is exactly 22.5 degrees, which no integer
+    shortcut (the tempting `2*ady <= adx`) gets right.
+    """
+    dx, dy = x - ax, y - ay
+    if dx == 0 and dy == 0:
+        return (x, y)
+    best = max(_DIRECTIONS,
+               key=lambda u: (dx * u[0] + dy * u[1]) / math.hypot(u[0], u[1]))
+    t = (dx * best[0] + dy * best[1]) / (best[0] ** 2 + best[1] ** 2)
+    return (ax + round(t * best[0]), ay + round(t * best[1]))
+
+
+def constrain_box(ax: int, ay: int, x: int, y: int) -> tuple[int, int]:
+    """The far corner of a box from (ax, ay), equalised to the larger extent.
+
+    Squares from rectangles, circles from ellipses, square crops and square
+    selections -- one rule for every rubber-band. The larger of the two
+    extents wins so the box grows under the cursor rather than shrinking away
+    from it, and the drag's own directions are kept. A drag with no extent on
+    an axis grows positive there (rightward/downward): *some* sign is needed,
+    and the reading-order one is the least surprising.
+    """
+    dx, dy = x - ax, y - ay
+    d = max(abs(dx), abs(dy))
+    sx = 1 if dx >= 0 else -1
+    sy = 1 if dy >= 0 else -1
+    return (ax + sx * d, ay + sy * d)
+
+
 class Tool:
     """Base tool. Coordinates arrive already mapped to image pixels."""
 
@@ -100,9 +172,15 @@ class Tool:
         gesture state override this; stateless ones (eyedropper) never are."""
         return False
 
-    def on_press(self, ctx: ToolContext, x: int, y: int) -> None: ...
-    def on_drag(self, ctx: ToolContext, x: int, y: int) -> None: ...
-    def on_release(self, ctx: ToolContext, x: int, y: int) -> None: ...
+    # `mods` defaults to none-held so a caller without a keyboard (tests, a
+    # programmatic driver) can omit it -- the neutral value is a real state,
+    # not a placeholder.
+    def on_press(self, ctx: ToolContext, x: int, y: int,
+                 mods: Mods = NO_MODS) -> None: ...
+    def on_drag(self, ctx: ToolContext, x: int, y: int,
+                mods: Mods = NO_MODS) -> None: ...
+    def on_release(self, ctx: ToolContext, x: int, y: int,
+                   mods: Mods = NO_MODS) -> None: ...
 
     def on_cancel(self, ctx: ToolContext) -> None:
         """Abandon the gesture in progress, committing nothing."""
@@ -141,11 +219,13 @@ class StrokeTool(Tool):
         """
         return self.erase or bool(ctx.erase_mode)
 
-    def on_press(self, ctx: ToolContext, x: int, y: int) -> None:
+    def on_press(self, ctx: ToolContext, x: int, y: int,
+                 mods: Mods = NO_MODS) -> None:
         self._points = [(x, y)]
         ctx.preview_stroke(self._points, erase=self._erasing(ctx))
 
-    def on_drag(self, ctx: ToolContext, x: int, y: int) -> None:
+    def on_drag(self, ctx: ToolContext, x: int, y: int,
+                mods: Mods = NO_MODS) -> None:
         if not self._points:
             return
         # Skip duplicate samples so a still cursor doesn't pile up points.
@@ -153,7 +233,8 @@ class StrokeTool(Tool):
             self._points.append((x, y))
             ctx.preview_stroke(self._points, erase=self._erasing(ctx))
 
-    def on_release(self, ctx: ToolContext, x: int, y: int) -> None:
+    def on_release(self, ctx: ToolContext, x: int, y: int,
+                   mods: Mods = NO_MODS) -> None:
         if not self._points:
             return
         if (x, y) != self._points[-1]:
@@ -202,7 +283,7 @@ class CropTool(Tool):
     id = "crop"
     label = "Crop"
     op_id = "canvas.crop"
-    hint = "drag a rectangle on the image   |   Esc to cancel"
+    hint = "drag a rectangle on the image   |   Shift for a square   |   Esc to cancel"
     # A crop box is described by its *edges*, so snap to the nearest pixel
     # boundary (and 0..src inclusive) rather than to the pixel under the cursor.
     coords = "edge"
@@ -214,20 +295,37 @@ class CropTool(Tool):
     def is_gesturing(self) -> bool:
         return self._anchor is not None
 
-    def on_press(self, ctx: ToolContext, x: int, y: int) -> None:
+    def _far(self, anchor: tuple[int, int], x: int, y: int,
+             mods: Mods) -> tuple[int, int]:
+        """Shift squares the box. On edge coordinates a square of edges is a
+        square of pixels, so the one constraint function serves both
+        conventions. A square that runs past the canvas gets the same clamp
+        any marquee dragged past the edge gets (op and controller both own
+        one), so at the very edge the constraint yields to the canvas --
+        which is what every editor's fixed-ratio marquee does too."""
+        if not mods.shift:
+            return (x, y)
+        return constrain_box(anchor[0], anchor[1], x, y)
+
+    def on_press(self, ctx: ToolContext, x: int, y: int,
+                 mods: Mods = NO_MODS) -> None:
         self._anchor = (x, y)
         ctx.preview_rect((x, y, x, y))
 
-    def on_drag(self, ctx: ToolContext, x: int, y: int) -> None:
+    def on_drag(self, ctx: ToolContext, x: int, y: int,
+                mods: Mods = NO_MODS) -> None:
         if self._anchor is None:
             return
-        ctx.preview_rect((self._anchor[0], self._anchor[1], x, y))
+        fx, fy = self._far(self._anchor, x, y, mods)
+        ctx.preview_rect((self._anchor[0], self._anchor[1], fx, fy))
 
-    def on_release(self, ctx: ToolContext, x: int, y: int) -> None:
+    def on_release(self, ctx: ToolContext, x: int, y: int,
+                   mods: Mods = NO_MODS) -> None:
         anchor, self._anchor = self._anchor, None
         ctx.clear_preview()
         if anchor is None:
             return
+        x, y = self._far(anchor, x, y, mods)
         left, right = sorted((anchor[0], x))
         top, bottom = sorted((anchor[1], y))
         width, height = right - left, bottom - top
@@ -266,8 +364,8 @@ class SelectTool(Tool):
 
     id = "select"
     label = "Select"
-    hint = ("drag to select an area   |   Ctrl+C copy, Ctrl+X cut, Ctrl+V paste"
-            "   |   click or Esc to clear")
+    hint = ("drag to select an area   |   Shift for a square   |   "
+            "Ctrl+C copy, Ctrl+X cut, Ctrl+V paste   |   click or Esc to clear")
     coords = "edge"
 
     def __init__(self) -> None:
@@ -277,17 +375,31 @@ class SelectTool(Tool):
     def is_gesturing(self) -> bool:
         return self._anchor is not None
 
-    def on_press(self, ctx: ToolContext, x: int, y: int) -> None:
+    def _far(self, anchor: tuple[int, int], x: int, y: int,
+             mods: Mods) -> tuple[int, int]:
+        # Same rule as crop's, for the same rubber-band, with the same yield
+        # to the canvas edge (set_region clamps on the way in).
+        if not mods.shift:
+            return (x, y)
+        return constrain_box(anchor[0], anchor[1], x, y)
+
+    def on_press(self, ctx: ToolContext, x: int, y: int,
+                 mods: Mods = NO_MODS) -> None:
         self._anchor = (x, y)
         ctx.preview_rect((x, y, x, y))
 
-    def on_drag(self, ctx: ToolContext, x: int, y: int) -> None:
+    def on_drag(self, ctx: ToolContext, x: int, y: int,
+                mods: Mods = NO_MODS) -> None:
         if self._anchor is None:
             return
-        ctx.preview_rect((self._anchor[0], self._anchor[1], x, y))
+        fx, fy = self._far(self._anchor, x, y, mods)
+        ctx.preview_rect((self._anchor[0], self._anchor[1], fx, fy))
 
-    def on_release(self, ctx: ToolContext, x: int, y: int) -> None:
+    def on_release(self, ctx: ToolContext, x: int, y: int,
+                   mods: Mods = NO_MODS) -> None:
         anchor, self._anchor = self._anchor, None
+        if anchor is not None:
+            x, y = self._far(anchor, x, y, mods)
         # The provisional marquee goes; the committed one is redrawn by the
         # canvas from the region itself, so for a moment there are neither and
         # then there is one. Clearing after setting the region would delete the
@@ -346,20 +458,23 @@ class MoveTool(Tool):
     def is_gesturing(self) -> bool:
         return self._anchor is not None
 
-    def on_press(self, ctx: ToolContext, x: int, y: int) -> None:
+    def on_press(self, ctx: ToolContext, x: int, y: int,
+                 mods: Mods = NO_MODS) -> None:
         if not ctx.floating and not ctx.begin_move():
             return  # nothing selected to move, and nothing floating to place
         self._anchor = (x, y)
         self._start = ctx.float_offset
 
-    def on_drag(self, ctx: ToolContext, x: int, y: int) -> None:
+    def on_drag(self, ctx: ToolContext, x: int, y: int,
+                mods: Mods = NO_MODS) -> None:
         if self._anchor is None:
             return
         ctx.move_float(self._start[0] + x - self._anchor[0],
                        self._start[1] + y - self._anchor[1])
 
-    def on_release(self, ctx: ToolContext, x: int, y: int) -> None:
-        self.on_drag(ctx, x, y)
+    def on_release(self, ctx: ToolContext, x: int, y: int,
+                   mods: Mods = NO_MODS) -> None:
+        self.on_drag(ctx, x, y, mods)
         self._anchor = None
 
     def on_cancel(self, ctx: ToolContext) -> None:
@@ -382,11 +497,18 @@ class FillTool(Tool):
     id = "fill"
     label = "Fill"
     op_id = "paint.fill"
-    hint = "click a region to flood-fill it   |   Tolerance sets how near a colour must be"
+    hint = ("click a region to flood-fill it   |   Shift-click fills every "
+            "matching pixel on the frame   |   Tolerance sets how near a colour must be")
 
-    def on_press(self, ctx: ToolContext, x: int, y: int) -> None:
+    def on_press(self, ctx: ToolContext, x: int, y: int,
+                 mods: Mods = NO_MODS) -> None:
+        # Shift lifts the connectivity requirement: fill everything the seed
+        # matches, reachable or not. A modifier rather than a panel setting
+        # because it is a per-click intent -- and the panel already has one
+        # "Fill" too many (TODO's own note).
         ctx.commit(self.op_id, index=ctx.frame_index, x=x, y=y,
                    color=ctx.fg_color, tolerance=ctx.tolerance,
+                   contiguous=not mods.shift,
                    mode="erase" if ctx.erase_mode else "paint")
 
 
@@ -409,6 +531,10 @@ class ShapeTool(Tool):
     op_id = "paint.shape"
     hint = "drag on the image   |   Esc to cancel"
     coords = "pixel"
+    # What Shift snaps the far point to. Boxes square up; the line overrides
+    # with the 45-degree snap. A staticmethod so subclasses swap the *rule*,
+    # not the plumbing around it.
+    constrain = staticmethod(constrain_box)
 
     def __init__(self) -> None:
         self._anchor: tuple[int, int] | None = None
@@ -416,6 +542,12 @@ class ShapeTool(Tool):
     @property
     def is_gesturing(self) -> bool:
         return self._anchor is not None
+
+    def _far(self, anchor: tuple[int, int], x: int, y: int,
+             mods: Mods) -> tuple[int, int]:
+        if not mods.shift:
+            return (x, y)
+        return self.constrain(anchor[0], anchor[1], x, y)
 
     @staticmethod
     def preview_box(anchor: tuple[int, int], x: int, y: int) -> tuple[int, int, int, int]:
@@ -434,20 +566,25 @@ class ShapeTool(Tool):
         top, bottom = sorted((anchor[1], y))
         return (left, top, right + 1, bottom + 1)
 
-    def on_press(self, ctx: ToolContext, x: int, y: int) -> None:
+    def on_press(self, ctx: ToolContext, x: int, y: int,
+                 mods: Mods = NO_MODS) -> None:
         self._anchor = (x, y)
         ctx.preview_rect(self.preview_box((x, y), x, y))
 
-    def on_drag(self, ctx: ToolContext, x: int, y: int) -> None:
+    def on_drag(self, ctx: ToolContext, x: int, y: int,
+                mods: Mods = NO_MODS) -> None:
         if self._anchor is None:
             return
-        ctx.preview_rect(self.preview_box(self._anchor, x, y))
+        fx, fy = self._far(self._anchor, x, y, mods)
+        ctx.preview_rect(self.preview_box(self._anchor, fx, fy))
 
-    def on_release(self, ctx: ToolContext, x: int, y: int) -> None:
+    def on_release(self, ctx: ToolContext, x: int, y: int,
+                   mods: Mods = NO_MODS) -> None:
         anchor, self._anchor = self._anchor, None
         ctx.clear_preview()
         if anchor is None:
             return
+        x, y = self._far(anchor, x, y, mods)
         # A click with no drag is committed rather than declined: a single-pixel
         # line or a 1x1 rect is a legitimate mark, and unlike crop -- where an
         # empty box would mean "crop to nothing" -- there is no degenerate case
@@ -466,21 +603,24 @@ class LineTool(ShapeTool):
     id = "line"
     label = "Line"
     kind = "line"
-    hint = "drag to draw a line   |   Esc to cancel"
+    hint = "drag to draw a line   |   Shift snaps to 45\N{DEGREE SIGN}   |   Esc to cancel"
+    constrain = staticmethod(constrain_line)
 
 
 class RectTool(ShapeTool):
     id = "rect"
     label = "Rectangle"
     kind = "rect"
-    hint = "drag to draw a rectangle   |   Fill makes it solid   |   Esc to cancel"
+    hint = ("drag to draw a rectangle   |   Shift for a square   |   "
+            "Fill makes it solid   |   Esc to cancel")
 
 
 class EllipseTool(ShapeTool):
     id = "ellipse"
     label = "Ellipse"
     kind = "ellipse"
-    hint = "drag to draw an ellipse   |   Fill makes it solid   |   Esc to cancel"
+    hint = ("drag to draw an ellipse   |   Shift for a circle   |   "
+            "Fill makes it solid   |   Esc to cancel")
 
 
 class EyedropperTool(Tool):
@@ -491,10 +631,12 @@ class EyedropperTool(Tool):
     label = "Eyedropper"
     hint = "click a pixel to pick its colour"
 
-    def on_press(self, ctx: ToolContext, x: int, y: int) -> None:
+    def on_press(self, ctx: ToolContext, x: int, y: int,
+                 mods: Mods = NO_MODS) -> None:
         ctx.pick_color(x, y)
 
-    def on_drag(self, ctx: ToolContext, x: int, y: int) -> None:
+    def on_drag(self, ctx: ToolContext, x: int, y: int,
+                mods: Mods = NO_MODS) -> None:
         ctx.pick_color(x, y)  # live pick while dragging
 
 
